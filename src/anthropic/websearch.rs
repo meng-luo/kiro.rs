@@ -267,12 +267,46 @@ fn generate_websearch_events(
         }),
     ));
 
-    // 2. content_block_start (server_tool_use)
+    // 2. content_block_start (text - 搜索决策说明, index 0)
+    let decision_text = format!("I'll search for \"{}\".", query);
     events.push(SseEvent::new(
         "content_block_start",
         json!({
             "type": "content_block_start",
             "index": 0,
+            "content_block": {
+                "type": "text",
+                "text": ""
+            }
+        }),
+    ));
+
+    events.push(SseEvent::new(
+        "content_block_delta",
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "text_delta",
+                "text": decision_text
+            }
+        }),
+    ));
+
+    events.push(SseEvent::new(
+        "content_block_stop",
+        json!({
+            "type": "content_block_stop",
+            "index": 0
+        }),
+    ));
+
+    // 3. content_block_start (server_tool_use, index 1)
+    events.push(SseEvent::new(
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": 1,
             "content_block": {
                 "id": tool_use_id,
                 "type": "server_tool_use",
@@ -282,13 +316,13 @@ fn generate_websearch_events(
         }),
     ));
 
-    // 3. content_block_delta (input_json_delta)
+    // 4. content_block_delta (input_json_delta)
     let input_json = json!({"query": query});
     events.push(SseEvent::new(
         "content_block_delta",
         json!({
             "type": "content_block_delta",
-            "index": 0,
+            "index": 1,
             "delta": {
                 "type": "input_json_delta",
                 "partial_json": serde_json::to_string(&input_json).unwrap_or_default()
@@ -296,16 +330,16 @@ fn generate_websearch_events(
         }),
     ));
 
-    // 4. content_block_stop (server_tool_use)
+    // 5. content_block_stop (server_tool_use)
     events.push(SseEvent::new(
         "content_block_stop",
         json!({
             "type": "content_block_stop",
-            "index": 0
+            "index": 1
         }),
     ));
 
-    // 5. content_block_start (web_search_tool_result)
+    // 6. content_block_start (web_search_tool_result, index 2)
     let search_content = if let Some(ref results) = search_results {
         results
             .results
@@ -332,7 +366,7 @@ fn generate_websearch_events(
         "content_block_start",
         json!({
             "type": "content_block_start",
-            "index": 1,
+            "index": 2,
             "content_block": {
                 "type": "web_search_tool_result",
                 "tool_use_id": tool_use_id,
@@ -341,21 +375,21 @@ fn generate_websearch_events(
         }),
     ));
 
-    // 6. content_block_stop (web_search_tool_result)
+    // 7. content_block_stop (web_search_tool_result)
     events.push(SseEvent::new(
         "content_block_stop",
         json!({
             "type": "content_block_stop",
-            "index": 1
+            "index": 2
         }),
     ));
 
-    // 7. content_block_start (text)
+    // 8. content_block_start (text, index 3)
     events.push(SseEvent::new(
         "content_block_start",
         json!({
             "type": "content_block_start",
-            "index": 2,
+            "index": 3,
             "content_block": {
                 "type": "text",
                 "text": ""
@@ -363,7 +397,7 @@ fn generate_websearch_events(
         }),
     ));
 
-    // 8. content_block_delta (text_delta) - 生成搜索结果摘要
+    // 9. content_block_delta (text_delta) - 生成搜索结果摘要
     let summary = generate_search_summary(query, &search_results);
 
     // 分块发送文本
@@ -374,7 +408,7 @@ fn generate_websearch_events(
             "content_block_delta",
             json!({
                 "type": "content_block_delta",
-                "index": 2,
+                "index": 3,
                 "delta": {
                     "type": "text_delta",
                     "text": text
@@ -383,12 +417,12 @@ fn generate_websearch_events(
         ));
     }
 
-    // 9. content_block_stop (text)
+    // 10. content_block_stop (text)
     events.push(SseEvent::new(
         "content_block_stop",
         json!({
             "type": "content_block_stop",
-            "index": 2
+            "index": 3
         }),
     ));
 
