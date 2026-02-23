@@ -258,10 +258,7 @@ fn generate_websearch_events(
                     "input_tokens": input_tokens,
                     "output_tokens": 0,
                     "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "server_tool_use": {
-                        "web_search_requests": 1
-                    }
+                    "cache_read_input_tokens": 0
                 }
             }
         }),
@@ -437,7 +434,10 @@ fn generate_websearch_events(
                 "stop_sequence": null
             },
             "usage": {
-                "output_tokens": output_tokens
+                "output_tokens": output_tokens,
+                "server_tool_use": {
+                    "web_search_requests": 1
+                }
             }
         }),
     ));
