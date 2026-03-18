@@ -396,6 +396,8 @@ struct CredentialEntry {
     credentials: KiroCredentials,
     /// API 调用连续失败次数
     failure_count: u32,
+    /// Token 刷新连续失败次数
+    refresh_failure_count: u32,
     /// 是否已禁用
     disabled: bool,
     /// 禁用原因（用于区分手动禁用 vs 自动禁用，便于自愈）
@@ -413,6 +415,8 @@ enum DisabledReason {
     Manual,
     /// 连续失败达到阈值后自动禁用
     TooManyFailures,
+    /// Token 刷新连续失败达到阈值后自动禁用
+    TooManyRefreshFailures,
     /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
     QuotaExceeded,
 }
@@ -459,6 +463,11 @@ pub struct CredentialEntrySnapshot {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// Token 刷新连续失败次数
+    pub refresh_failure_count: u32,
+    /// 禁用原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -565,6 +574,7 @@ impl MultiTokenManager {
                     id,
                     credentials: cred.clone(),
                     failure_count: 0,
+                    refresh_failure_count: 0,
                     disabled: cred.disabled, // 从配置文件读取 disabled 状态
                     disabled_reason: if cred.disabled {
                         Some(DisabledReason::Manual)
@@ -654,7 +664,7 @@ impl MultiTokenManager {
     /// 根据负载均衡模式选择下一个凭据
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
-    /// - balanced 模式：轮询选择可用凭据
+    /// - balanced 模式：均衡选择可用凭据
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
@@ -712,16 +722,17 @@ impl MultiTokenManager {
     /// 确保整个 API 调用过程中使用一致的凭据信息
     ///
     /// 如果 Token 过期或即将过期，会自动刷新
-    /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
+    /// Token 刷新失败会累计到当前凭据，达到阈值后禁用并切换
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
     pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
         let total = self.total_count();
-        let mut tried_count = 0;
+        let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
+        let mut attempt_count = 0;
 
         loop {
-            if tried_count >= total {
+            if attempt_count >= max_attempts {
                 anyhow::bail!(
                     "所有凭据均无法获取有效 Token（可用: {}/{}）",
                     self.available_count(),
@@ -732,7 +743,7 @@ impl MultiTokenManager {
             let (id, credentials) = {
                 let is_balanced = self.load_balancing_mode.lock().as_str() == "balanced";
 
-                // balanced 模式：每次请求都轮询选择，不固定 current_id
+                // balanced 模式：每次请求都重新均衡选择，不固定 current_id
                 // priority 模式：优先使用 current_id 指向的凭据
                 let current_hit = if is_balanced {
                     None
@@ -794,11 +805,12 @@ impl MultiTokenManager {
                     return Ok(ctx);
                 }
                 Err(e) => {
-                    tracing::warn!("凭据 #{} Token 刷新失败，尝试下一个凭据: {}", id, e);
-
-                    // Token 刷新失败，切换到下一个优先级的凭据（不计入失败次数）
-                    self.switch_to_next_by_priority();
-                    tried_count += 1;
+                    let has_available = self.report_refresh_failure(id);
+                    tracing::warn!("凭据 #{} Token 刷新失败: {}", id, e);
+                    attempt_count += 1;
+                    if !has_available {
+                        anyhow::bail!("所有凭据均已禁用（0/{}）", total);
+                    }
                 }
             }
         }
@@ -916,6 +928,13 @@ impl MultiTokenManager {
             .access_token
             .clone()
             .ok_or_else(|| anyhow::anyhow!("没有可用的 accessToken"))?;
+
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.refresh_failure_count = 0;
+            }
+        }
 
         Ok(CallContext {
             id,
@@ -1085,6 +1104,7 @@ impl MultiTokenManager {
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                 entry.failure_count = 0;
+                entry.refresh_failure_count = 0;
                 entry.success_count += 1;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
                 tracing::debug!(
@@ -1113,6 +1133,10 @@ impl MultiTokenManager {
                 Some(e) => e,
                 None => return entries.iter().any(|e| !e.disabled),
             };
+
+            if entry.disabled {
+                return entries.iter().any(|e| !e.disabled);
+            }
 
             entry.failure_count += 1;
             entry.last_used_at = Some(Utc::now().to_rfc3339());
@@ -1182,6 +1206,69 @@ impl MultiTokenManager {
             tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用", id);
 
             // 切换到优先级最高的可用凭据
+            if let Some(next) = entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .min_by_key(|e| e.credentials.priority)
+            {
+                *current_id = next.id;
+                tracing::info!(
+                    "已切换到凭据 #{}（优先级 {}）",
+                    next.id,
+                    next.credentials.priority
+                );
+                true
+            } else {
+                tracing::error!("所有凭据均已禁用！");
+                false
+            }
+        };
+        self.save_stats_debounced();
+        result
+    }
+
+    /// 报告指定凭据刷新 Token 失败。
+    ///
+    /// 连续刷新失败达到阈值后禁用凭据并切换，阈值内保持当前凭据不切换，
+    /// 与 API 401/403 的累计失败策略保持一致。
+    pub fn report_refresh_failure(&self, id: u64) -> bool {
+        let result = {
+            let mut entries = self.entries.lock();
+            let mut current_id = self.current_id.lock();
+
+            let entry = match entries.iter_mut().find(|e| e.id == id) {
+                Some(e) => e,
+                None => return entries.iter().any(|e| !e.disabled),
+            };
+
+            if entry.disabled {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
+            entry.last_used_at = Some(Utc::now().to_rfc3339());
+            entry.refresh_failure_count += 1;
+            let refresh_failure_count = entry.refresh_failure_count;
+
+            tracing::warn!(
+                "凭据 #{} Token 刷新失败（{}/{}）",
+                id,
+                refresh_failure_count,
+                MAX_FAILURES_PER_CREDENTIAL
+            );
+
+            if refresh_failure_count < MAX_FAILURES_PER_CREDENTIAL {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
+            entry.disabled = true;
+            entry.disabled_reason = Some(DisabledReason::TooManyRefreshFailures);
+
+            tracing::error!(
+                "凭据 #{} Token 已连续刷新失败 {} 次，已被禁用",
+                id,
+                refresh_failure_count
+            );
+
             if let Some(next) = entries
                 .iter()
                 .filter(|e| !e.disabled)
@@ -1275,6 +1362,13 @@ impl MultiTokenManager {
                     last_used_at: e.last_used_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
+                    refresh_failure_count: e.refresh_failure_count,
+                    disabled_reason: e.disabled_reason.map(|r| match r {
+                        DisabledReason::Manual => "Manual",
+                        DisabledReason::TooManyFailures => "TooManyFailures",
+                        DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
+                        DisabledReason::QuotaExceeded => "QuotaExceeded",
+                    }.to_string()),
                 })
                 .collect(),
             current_id,
@@ -1295,6 +1389,7 @@ impl MultiTokenManager {
             if !disabled {
                 // 启用时重置失败计数
                 entry.failure_count = 0;
+                entry.refresh_failure_count = 0;
                 entry.disabled_reason = None;
             } else {
                 entry.disabled_reason = Some(DisabledReason::Manual);
@@ -1334,6 +1429,7 @@ impl MultiTokenManager {
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.failure_count = 0;
+            entry.refresh_failure_count = 0;
             entry.disabled = false;
             entry.disabled_reason = None;
         }
@@ -1518,6 +1614,7 @@ impl MultiTokenManager {
                 id: new_id,
                 credentials: validated_cred,
                 failure_count: 0,
+                refresh_failure_count: 0,
                 disabled: false,
                 disabled_reason: None,
                 success_count: 0,
@@ -1926,6 +2023,76 @@ mod tests {
         let ctx = manager.acquire_context(None).await.unwrap();
         assert!(ctx.token == "t1" || ctx.token == "t2");
         assert_eq!(manager.available_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_acquire_context_balanced_retries_until_bad_credential_disabled() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut bad_cred = KiroCredentials::default();
+        bad_cred.priority = 0;
+        bad_cred.refresh_token = Some("bad".to_string());
+
+        let mut good_cred = KiroCredentials::default();
+        good_cred.priority = 1;
+        good_cred.access_token = Some("good-token".to_string());
+        good_cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager =
+            MultiTokenManager::new(config, vec![bad_cred, good_cred], None, None, false).unwrap();
+
+        let ctx = manager.acquire_context(None).await.unwrap();
+        assert_eq!(ctx.id, 2);
+        assert_eq!(ctx.token, "good-token");
+    }
+
+    #[test]
+    fn test_multi_token_manager_report_refresh_failure() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert_eq!(manager.available_count(), 2);
+        for _ in 0..(MAX_FAILURES_PER_CREDENTIAL - 1) {
+            assert!(manager.report_refresh_failure(1));
+        }
+        assert_eq!(manager.available_count(), 2);
+
+        assert!(manager.report_refresh_failure(1));
+        assert_eq!(manager.available_count(), 1);
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        assert!(first.disabled);
+        assert_eq!(first.refresh_failure_count, MAX_FAILURES_PER_CREDENTIAL);
+        assert_eq!(snapshot.current_id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_refresh_failure_disabled_is_not_auto_recovered() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
+            manager.report_refresh_failure(1);
+            manager.report_refresh_failure(2);
+        }
+        assert_eq!(manager.available_count(), 0);
+
+        let err = manager.acquire_context(None).await.err().unwrap().to_string();
+        assert!(
+            err.contains("所有凭据均已禁用"),
+            "错误应提示所有凭据禁用，实际: {}",
+            err
+        );
     }
 
     #[test]
