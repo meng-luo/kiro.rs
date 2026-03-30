@@ -228,6 +228,11 @@ impl KiroProvider {
                 .body(request_body.to_string())
                 .header("content-type", "application/json");
 
+            // MCP 请求需要携带 profile ARN（如果凭据中存在）
+            if let Some(ref arn) = ctx.credentials.profile_arn {
+                request = request.header("x-amzn-kiro-profile-arn", arn);
+            }
+
             let response = match request
                 .header("x-amz-user-agent", &x_amz_user_agent)
                 .header("user-agent", &user_agent)
