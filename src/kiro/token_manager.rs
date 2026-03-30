@@ -359,7 +359,7 @@ pub(crate) async fn get_usage_limits(
     let response = client
         .get(&url)
         .header("x-amz-user-agent", &amz_user_agent)
-        .header("User-Agent", &user_agent)
+        .header("user-agent", &user_agent)
         .header("host", &host)
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
         .header("amz-sdk-request", "attempt=1; max=1")
