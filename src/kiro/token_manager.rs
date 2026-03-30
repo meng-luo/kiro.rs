@@ -235,7 +235,10 @@ async fn refresh_social_token(
 }
 
 /// IdC Token 刷新所需的 x-amz-user-agent header
-const IDC_AMZ_USER_AGENT: &str = "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
+const IDC_AMZ_USER_AGENT: &str = "aws-sdk-js/3.980.0 KiroIDE";
+
+/// IdC Token 刷新所需的 user-agent header
+const IDC_USER_AGENT: &str = "aws-sdk-js/3.980.0 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.22.0 api/sso-oidc#3.980.0 m/E KiroIDE";
 
 /// 刷新 IdC Token (AWS SSO OIDC)
 async fn refresh_idc_token(
@@ -269,15 +272,13 @@ async fn refresh_idc_token(
 
     let response = client
         .post(&refresh_url)
-        .header("Content-Type", "application/json")
-        .header("Host", format!("oidc.{}.amazonaws.com", region))
-        .header("Connection", "keep-alive")
+        .header("content-type", "application/json")
         .header("x-amz-user-agent", IDC_AMZ_USER_AGENT)
-        .header("Accept", "*/*")
-        .header("Accept-Language", "*")
-        .header("sec-fetch-mode", "cors")
-        .header("User-Agent", "node")
-        .header("Accept-Encoding", "br, gzip, deflate")
+        .header("user-agent", IDC_USER_AGENT)
+        .header("host", format!("oidc.{}.amazonaws.com", region))
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=4")
+        .header("Connection", "close")
         .json(&body)
         .send()
         .await?;
