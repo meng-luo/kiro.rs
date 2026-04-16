@@ -350,7 +350,7 @@ pub(crate) async fn get_usage_limits(
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
-    let response = client
+    let mut request = client
         .get(&url)
         .header("x-amz-user-agent", &amz_user_agent)
         .header("user-agent", &user_agent)
@@ -358,9 +358,13 @@ pub(crate) async fn get_usage_limits(
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
         .header("amz-sdk-request", "attempt=1; max=1")
         .header("Authorization", format!("Bearer {}", token))
-        .header("Connection", "close")
-        .send()
-        .await?;
+        .header("Connection", "close");
+
+    if credentials.is_api_key_credential() {
+        request = request.header("tokentype", "API_KEY");
+    }
+
+    let response = request.send().await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1519,46 +1523,56 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        // 检查是否需要刷新 token
-        let needs_refresh = is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
+        // API Key 凭据直接使用 kiro_api_key，无需刷新
+        let token = if credentials.is_api_key_credential() {
+            credentials
+                .kiro_api_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
+        } else {
+            // 检查是否需要刷新 token
+            let needs_refresh =
+                is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 
-        let token = if needs_refresh {
-            let _guard = self.refresh_lock.lock().await;
-            let current_creds = {
-                let entries = self.entries.lock();
-                entries
-                    .iter()
-                    .find(|e| e.id == id)
-                    .map(|e| e.credentials.clone())
-                    .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-            };
+            if needs_refresh {
+                let _guard = self.refresh_lock.lock().await;
+                let current_creds = {
+                    let entries = self.entries.lock();
+                    entries
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| e.credentials.clone())
+                        .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+                };
 
-            if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
-                let new_creds =
-                    refresh_token(&current_creds, &self.config, effective_proxy.as_ref()).await?;
-                {
-                    let mut entries = self.entries.lock();
-                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                        entry.credentials = new_creds.clone();
+                if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
+                    let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
+                    let new_creds =
+                        refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
+                            .await?;
+                    {
+                        let mut entries = self.entries.lock();
+                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                            entry.credentials = new_creds.clone();
+                        }
                     }
+                    // 持久化失败只记录警告，不影响本次请求
+                    if let Err(e) = self.persist_credentials() {
+                        tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
+                    }
+                    new_creds
+                        .access_token
+                        .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
+                } else {
+                    current_creds
+                        .access_token
+                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
                 }
-                // 持久化失败只记录警告，不影响本次请求
-                if let Err(e) = self.persist_credentials() {
-                    tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
-                }
-                new_creds
-                    .access_token
-                    .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
             } else {
-                current_creds
+                credentials
                     .access_token
                     .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
             }
-        } else {
-            credentials
-                .access_token
-                .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
         };
 
         let credentials = {
