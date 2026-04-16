@@ -1414,8 +1414,8 @@ impl MultiTokenManager {
                     refresh_token_hash: if e.credentials.is_api_key_credential() {
                         // API Key 凭据显示脱敏的 key
                         e.credentials.kiro_api_key.as_deref().map(|k| {
-                            if k.len() > 8 {
-                                format!("{}...{}", &k[..8], &k[k.len()-4..])
+                            if k.is_ascii() && k.len() > 16 {
+                                format!("{}...{}", &k[..4], &k[k.len()-4..])
                             } else {
                                 "***".to_string()
                             }
