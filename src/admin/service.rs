@@ -193,7 +193,7 @@ impl AdminService {
         let new_cred = KiroCredentials {
             id: None,
             access_token: None,
-            refresh_token: Some(req.refresh_token),
+            refresh_token: req.refresh_token,
             profile_arn: None,
             expires_at: None,
             auth_method: Some(req.auth_method),
@@ -210,7 +210,7 @@ impl AdminService {
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,
             disabled: false, // 新添加的凭据默认启用
-            kiro_api_key: None,
+            kiro_api_key: req.kiro_api_key,
         };
 
         // 调用 token_manager 添加凭据
@@ -395,6 +395,9 @@ impl AdminService {
             || msg.contains("refreshToken 已被截断")
             || msg.contains("凭据已存在")
             || msg.contains("refreshToken 重复")
+            || msg.contains("kiroApiKey 重复")
+            || msg.contains("缺少 kiroApiKey")
+            || msg.contains("kiroApiKey 为空")
             || msg.contains("凭证已过期或无效")
             || msg.contains("权限不足")
             || msg.contains("已被限流");

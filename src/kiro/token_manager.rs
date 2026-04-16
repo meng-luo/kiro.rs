@@ -1624,9 +1624,9 @@ impl MultiTokenManager {
     /// 添加新凭据（Admin API）
     ///
     /// # 流程
-    /// 1. 验证凭据基本字段（refresh_token 不为空）
-    /// 2. 基于 refreshToken 的 SHA-256 哈希检测重复
-    /// 3. 尝试刷新 Token 验证凭据有效性
+    /// 1. 验证凭据基本字段（API Key: kiroApiKey 不为空; OAuth: refreshToken 不为空）
+    /// 2. 基于 kiroApiKey 或 refreshToken 的 SHA-256 哈希检测重复
+    /// 3. OAuth: 尝试刷新 Token 验证凭据有效性; API Key: 跳过
     /// 4. 分配新 ID（当前最大 ID + 1）
     /// 5. 添加到 entries 列表
     /// 6. 持久化到配置文件
@@ -1636,34 +1636,70 @@ impl MultiTokenManager {
     /// - `Err(_)` - 验证失败或添加失败
     pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
         // 1. 基本验证
-        validate_refresh_token(&new_cred)?;
-
-        // 2. 基于 refreshToken 的 SHA-256 哈希检测重复
-        let new_refresh_token = new_cred
-            .refresh_token
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("缺少 refreshToken"))?;
-        let new_refresh_token_hash = sha256_hex(new_refresh_token);
-        let duplicate_exists = {
-            let entries = self.entries.lock();
-            entries.iter().any(|entry| {
-                entry
-                    .credentials
-                    .refresh_token
-                    .as_deref()
-                    .map(sha256_hex)
-                    .as_deref()
-                    == Some(new_refresh_token_hash.as_str())
-            })
-        };
-        if duplicate_exists {
-            anyhow::bail!("凭据已存在（refreshToken 重复）");
+        if new_cred.is_api_key_credential() {
+            let api_key = new_cred
+                .kiro_api_key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?;
+            if api_key.is_empty() {
+                anyhow::bail!("kiroApiKey 为空");
+            }
+        } else {
+            validate_refresh_token(&new_cred)?;
         }
 
-        // 3. 尝试刷新 Token 验证凭据有效性
-        let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
-        let mut validated_cred =
-            refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?;
+        // 2. 基于哈希检测重复
+        if new_cred.is_api_key_credential() {
+            let new_api_key = new_cred
+                .kiro_api_key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("缺少 kiroApiKey"))?;
+            let new_api_key_hash = sha256_hex(new_api_key);
+            let duplicate_exists = {
+                let entries = self.entries.lock();
+                entries.iter().any(|entry| {
+                    entry
+                        .credentials
+                        .kiro_api_key
+                        .as_deref()
+                        .map(sha256_hex)
+                        .as_deref()
+                        == Some(new_api_key_hash.as_str())
+                })
+            };
+            if duplicate_exists {
+                anyhow::bail!("凭据已存在（kiroApiKey 重复）");
+            }
+        } else {
+            let new_refresh_token = new_cred
+                .refresh_token
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("缺少 refreshToken"))?;
+            let new_refresh_token_hash = sha256_hex(new_refresh_token);
+            let duplicate_exists = {
+                let entries = self.entries.lock();
+                entries.iter().any(|entry| {
+                    entry
+                        .credentials
+                        .refresh_token
+                        .as_deref()
+                        .map(sha256_hex)
+                        .as_deref()
+                        == Some(new_refresh_token_hash.as_str())
+                })
+            };
+            if duplicate_exists {
+                anyhow::bail!("凭据已存在（refreshToken 重复）");
+            }
+        }
+
+        // 3. 验证凭据有效性（API Key 无需网络刷新）
+        let mut validated_cred = if new_cred.is_api_key_credential() {
+            new_cred.clone()
+        } else {
+            let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
+            refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?
+        };
 
         // 4. 分配新 ID
         let new_id = {
@@ -1691,6 +1727,7 @@ impl MultiTokenManager {
         validated_cred.proxy_url = new_cred.proxy_url;
         validated_cred.proxy_username = new_cred.proxy_username;
         validated_cred.proxy_password = new_cred.proxy_password;
+        validated_cred.kiro_api_key = new_cred.kiro_api_key;
 
         {
             let mut entries = self.entries.lock();
@@ -1965,6 +2002,101 @@ mod tests {
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("凭据已存在"));
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_api_key_success() {
+        let config = Config::default();
+        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+
+        let mut api_key_cred = KiroCredentials::default();
+        api_key_cred.kiro_api_key = Some("ksk_test_key_123".to_string());
+        api_key_cred.auth_method = Some("api_key".to_string());
+
+        let result = manager.add_credential(api_key_cred).await;
+        assert!(result.is_ok());
+        let id = result.unwrap();
+        assert!(id > 0);
+        assert_eq!(manager.total_count(), 1);
+        assert_eq!(manager.available_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_reject_duplicate_api_key() {
+        let config = Config::default();
+
+        let mut existing = KiroCredentials::default();
+        existing.kiro_api_key = Some("ksk_existing_key".to_string());
+        existing.auth_method = Some("api_key".to_string());
+
+        let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
+
+        let mut duplicate = KiroCredentials::default();
+        duplicate.kiro_api_key = Some("ksk_existing_key".to_string());
+        duplicate.auth_method = Some("api_key".to_string());
+
+        let result = manager.add_credential(duplicate).await;
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("kiroApiKey 重复"));
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_api_key_empty_rejected() {
+        let config = Config::default();
+        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+
+        let mut cred = KiroCredentials::default();
+        cred.kiro_api_key = Some(String::new());
+        cred.auth_method = Some("api_key".to_string());
+
+        let result = manager.add_credential(cred).await;
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("kiroApiKey 为空"));
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_api_key_missing_key_rejected() {
+        let config = Config::default();
+        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+
+        let mut cred = KiroCredentials::default();
+        cred.auth_method = Some("api_key".to_string());
+        // kiro_api_key is None
+
+        let result = manager.add_credential(cred).await;
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("缺少 kiroApiKey"));
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_api_key_and_oauth_coexist() {
+        let config = Config::default();
+
+        let mut oauth_cred = KiroCredentials::default();
+        oauth_cred.refresh_token = Some("a".repeat(150));
+
+        let manager = MultiTokenManager::new(config, vec![oauth_cred], None, None, false).unwrap();
+
+        let mut api_key_cred = KiroCredentials::default();
+        api_key_cred.kiro_api_key = Some("ksk_new_key".to_string());
+        api_key_cred.auth_method = Some("api_key".to_string());
+
+        let result = manager.add_credential(api_key_cred).await;
+        assert!(result.is_ok());
+        assert_eq!(manager.total_count(), 2);
+        assert_eq!(manager.available_count(), 2);
     }
 
     // MultiTokenManager 测试

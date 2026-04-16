@@ -80,8 +80,8 @@ pub struct SetPriorityRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddCredentialRequest {
-    /// 刷新令牌（必填）
-    pub refresh_token: String,
+    /// 刷新令牌（OAuth 凭据必填，API Key 凭据不需要）
+    pub refresh_token: Option<String>,
 
     /// 认证方式（可选，默认 social）
     #[serde(default = "default_auth_method")]
@@ -122,6 +122,11 @@ pub struct AddCredentialRequest {
 
     /// 凭据级代理认证密码（可选）
     pub proxy_password: Option<String>,
+
+    /// Kiro API Key（API Key 凭据必填，格式: ksk_xxxxxxxx）
+    /// 设置后直接作为 Bearer Token 使用，无需 refreshToken
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kiro_api_key: Option<String>,
 }
 
 fn default_auth_method() -> String {
