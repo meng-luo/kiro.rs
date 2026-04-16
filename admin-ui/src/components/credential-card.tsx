@@ -162,6 +162,14 @@ export function CredentialCard({
                 {credential.disabled && credential.disabledReason && (
                   <Badge variant="outline">{credential.disabledReason}</Badge>
                 )}
+                {credential.authMethod && (
+                  <Badge variant="secondary">
+                    {credential.authMethod === 'api_key' ? 'API Key' :
+                     credential.authMethod === 'idc' ? 'IdC' :
+                     credential.authMethod === 'social' ? 'Social' :
+                     credential.authMethod}
+                  </Badge>
+                )}
               </CardTitle>
             </div>
             <div className="flex items-center gap-2">
@@ -292,8 +300,8 @@ export function CredentialCard({
               size="sm"
               variant="outline"
               onClick={handleForceRefresh}
-              disabled={forceRefresh.isPending || credential.disabled}
-              title={credential.disabled ? '已禁用的凭据无法刷新 Token' : '强制刷新 Token'}
+              disabled={forceRefresh.isPending || credential.disabled || credential.authMethod === 'api_key'}
+              title={credential.authMethod === 'api_key' ? 'API Key 凭据无需刷新 Token' : credential.disabled ? '已禁用的凭据无法刷新 Token' : '强制刷新 Token'}
             >
               <RefreshCw className={`h-4 w-4 mr-1 ${forceRefresh.isPending ? 'animate-spin' : ''}`} />
               刷新 Token

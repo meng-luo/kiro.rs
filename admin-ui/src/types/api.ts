@@ -62,8 +62,8 @@ export interface SetPriorityRequest {
 
 // 添加凭据请求
 export interface AddCredentialRequest {
-  refreshToken: string
-  authMethod?: 'social' | 'idc'
+  refreshToken?: string
+  authMethod?: 'social' | 'idc' | 'api_key'
   clientId?: string
   clientSecret?: string
   priority?: number
@@ -73,6 +73,7 @@ export interface AddCredentialRequest {
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  kiroApiKey?: string
 }
 
 // 添加凭据响应
