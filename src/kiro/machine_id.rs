@@ -51,20 +51,18 @@ fn normalize_machine_id(machine_id: &str) -> Option<String> {
 ///    - API Key 凭据：基于 `kiroApiKey` 派生
 ///    - OAuth 凭据：基于 `refreshToken` 派生
 /// 4. 兜底：基于随机种子派生，按 `credentials.id` 在进程内缓存（首次触发 warn 日志）
-///
-/// 永远返回 `Some`；保留 `Option` 返回类型以便上游调用点无需改动。
-pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config) -> Option<String> {
+pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config) -> String {
     // 如果配置了凭据级 machineId，优先使用
     if let Some(ref machine_id) = credentials.machine_id {
         if let Some(normalized) = normalize_machine_id(machine_id) {
-            return Some(normalized);
+            return normalized;
         }
     }
 
     // 如果配置了全局 machineId，作为默认值
     if let Some(ref machine_id) = config.machine_id {
         if let Some(normalized) = normalize_machine_id(machine_id) {
-            return Some(normalized);
+            return normalized;
         }
     }
 
@@ -73,18 +71,18 @@ pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config)
         // API Key 凭据：基于 kiroApiKey 派生
         if let Some(ref api_key) = credentials.kiro_api_key {
             if !api_key.is_empty() {
-                return Some(sha256_hex(&format!("KiroAPIKey/{}", api_key)));
+                return sha256_hex(&format!("KiroAPIKey/{}", api_key));
             }
         }
     } else if let Some(ref refresh_token) = credentials.refresh_token {
         // OAuth 凭据：基于 refreshToken 派生
         if !refresh_token.is_empty() {
-            return Some(sha256_hex(&format!("KotlinNativeAPI/{}", refresh_token)));
+            return sha256_hex(&format!("KotlinNativeAPI/{}", refresh_token));
         }
     }
 
     // 兜底：走派生流程生成随机 machineId，按凭据 id 进程内稳定
-    Some(fallback_machine_id(credentials))
+    fallback_machine_id(credentials)
 }
 
 /// 为缺失派生材料的凭据生成兜底 machineId
@@ -139,7 +137,7 @@ mod tests {
         config.machine_id = Some("a".repeat(64));
 
         let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result, Some("a".repeat(64)));
+        assert_eq!(result, "a".repeat(64));
     }
 
     #[test]
@@ -151,7 +149,7 @@ mod tests {
         config.machine_id = Some("a".repeat(64));
 
         let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result, Some("b".repeat(64)));
+        assert_eq!(result, "b".repeat(64));
     }
 
     #[test]
@@ -161,8 +159,7 @@ mod tests {
         let config = Config::default();
 
         let result = generate_from_credentials(&credentials, &config);
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().len(), 64);
+        assert_eq!(result.len(), 64);
     }
 
     #[test]
@@ -172,9 +169,8 @@ mod tests {
         let config = Config::default();
 
         let result = generate_from_credentials(&credentials, &config);
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().len(), 64);
-        assert!(result.as_ref().unwrap().chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(result.len(), 64);
+        assert!(result.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -184,10 +180,9 @@ mod tests {
         let config = Config::default();
 
         let result = generate_from_credentials(&credentials, &config);
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().len(), 64);
+        assert_eq!(result.len(), 64);
         // 应与 KiroAPIKey/<api_key> 的哈希一致
-        assert_eq!(result.unwrap(), sha256_hex("KiroAPIKey/ksk_test_api_key"));
+        assert_eq!(result, sha256_hex("KiroAPIKey/ksk_test_api_key"));
     }
 
     #[test]
@@ -199,7 +194,7 @@ mod tests {
         let config = Config::default();
 
         let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result, Some(sha256_hex("KiroAPIKey/ksk_test")));
+        assert_eq!(result, sha256_hex("KiroAPIKey/ksk_test"));
     }
 
     #[test]
@@ -212,13 +207,9 @@ mod tests {
         let config = Config::default();
 
         let result = generate_from_credentials(&credentials, &config);
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().len(), 64);
+        assert_eq!(result.len(), 64);
         // 必须不是基于 refresh_token 派生的值（互斥性验证）
-        assert_ne!(
-            result.unwrap(),
-            sha256_hex("KotlinNativeAPI/should_not_be_used")
-        );
+        assert_ne!(result, sha256_hex("KotlinNativeAPI/should_not_be_used"));
     }
 
     #[test]
@@ -228,8 +219,8 @@ mod tests {
         credentials.id = Some(u64::MAX - 10);
         let config = Config::default();
 
-        let first = generate_from_credentials(&credentials, &config).unwrap();
-        let second = generate_from_credentials(&credentials, &config).unwrap();
+        let first = generate_from_credentials(&credentials, &config);
+        let second = generate_from_credentials(&credentials, &config);
         assert_eq!(first, second);
     }
 
@@ -242,8 +233,8 @@ mod tests {
         cred_b.id = Some(u64::MAX - 21);
         let config = Config::default();
 
-        let id_a = generate_from_credentials(&cred_a, &config).unwrap();
-        let id_b = generate_from_credentials(&cred_b, &config).unwrap();
+        let id_a = generate_from_credentials(&cred_a, &config);
+        let id_b = generate_from_credentials(&cred_b, &config);
         assert_ne!(id_a, id_b);
     }
 
@@ -286,7 +277,6 @@ mod tests {
         let config = Config::default();
 
         let result = generate_from_credentials(&credentials, &config);
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().len(), 64);
+        assert_eq!(result.len(), 64);
     }
 }

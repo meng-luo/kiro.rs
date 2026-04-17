@@ -152,8 +152,7 @@ async fn refresh_social_token(
 
     let refresh_url = format!("https://prod.{}.auth.desktop.kiro.dev/refreshToken", region);
     let refresh_domain = format!("prod.{}.auth.desktop.kiro.dev", region);
-    let machine_id = machine_id::generate_from_credentials(credentials, config)
-        .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
     let kiro_version = &config.kiro_version;
 
     let client = build_client(proxy, 60, config.tls_backend)?;
@@ -332,8 +331,7 @@ pub(crate) async fn get_usage_limits(
     // 优先级：凭据.api_region > config.api_region > config.region
     let region = credentials.effective_api_region(config);
     let host = format!("q.{}.amazonaws.com", region);
-    let machine_id = machine_id::generate_from_credentials(credentials, config)
-        .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
     let kiro_version = &config.kiro_version;
     let os_name = &config.system_version;
     let node_version = &config.node_version;
@@ -581,12 +579,9 @@ impl MultiTokenManager {
                     id
                 });
                 if cred.machine_id.is_none() {
-                    if let Some(machine_id) =
-                        machine_id::generate_from_credentials(&cred, config_ref)
-                    {
-                        cred.machine_id = Some(machine_id);
-                        has_new_machine_ids = true;
-                    }
+                    cred.machine_id =
+                        Some(machine_id::generate_from_credentials(&cred, config_ref));
+                    has_new_machine_ids = true;
                 }
                 CredentialEntry {
                     id,

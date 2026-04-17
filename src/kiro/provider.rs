@@ -189,13 +189,7 @@ impl KiroProvider {
             };
 
             let config = self.token_manager.config();
-            let machine_id = match machine_id::generate_from_credentials(&ctx.credentials, config) {
-                Some(id) => id,
-                None => {
-                    last_error = Some(anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"));
-                    continue;
-                }
-            };
+            let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
 
             let url = self.mcp_url_for(&ctx.credentials);
             let x_amz_user_agent = format!("aws-sdk-js/1.0.34 KiroIDE-{}-{}", config.kiro_version, machine_id);
@@ -358,13 +352,7 @@ impl KiroProvider {
             };
 
             let config = self.token_manager.config();
-            let machine_id = match machine_id::generate_from_credentials(&ctx.credentials, config) {
-                Some(id) => id,
-                None => {
-                    last_error = Some(anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"));
-                    continue;
-                }
-            };
+            let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
 
             let url = self.base_url_for(&ctx.credentials);
             let x_amz_user_agent = format!("aws-sdk-js/1.0.34 KiroIDE-{}-{}", config.kiro_version, machine_id);
