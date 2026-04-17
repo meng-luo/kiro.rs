@@ -109,9 +109,11 @@ pub(crate) async fn refresh_token(
     config: &Config,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<KiroCredentials> {
-    // API Key 凭据不需要刷新，直接返回
+    // API Key 凭据不支持 Token 刷新：底层契约级拦截
+    // 其他调用点（try_ensure_token / 活跃路径 / add_credential）在调用前已显式分流 API Key；
+    // 仅 force_refresh_token_for 未分流，此处 bail 让错误自然传播为 400 BAD_REQUEST。
     if credentials.is_api_key_credential() {
-        return Ok(credentials.clone());
+        bail!("API Key 凭据不支持刷新 Token");
     }
 
     validate_refresh_token(credentials)?;
@@ -2000,6 +2002,24 @@ mod tests {
         assert_eq!(
             result,
             "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_token_rejects_api_key_credential() {
+        let config = Config::default();
+        let mut credentials = KiroCredentials::default();
+        credentials.kiro_api_key = Some("ksk_test_key_123".to_string());
+        credentials.auth_method = Some("api_key".to_string());
+
+        let result = refresh_token(&credentials, &config, None).await;
+
+        assert!(result.is_err(), "API Key 凭据应被 refresh_token 拒绝");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("API Key 凭据不支持刷新"),
+            "期望错误消息包含 'API Key 凭据不支持刷新'，实际: {}",
+            err_msg
         );
     }
 

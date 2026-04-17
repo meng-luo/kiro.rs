@@ -363,7 +363,12 @@ impl AdminService {
             return AdminServiceError::NotFound { id };
         }
 
-        // 2. 上游服务错误特征：HTTP 响应错误或网络错误
+        // 2. API Key 凭据不支持刷新：客户端请求错误，映射为 400
+        if msg.contains("API Key 凭据不支持刷新") {
+            return AdminServiceError::InvalidCredential(msg);
+        }
+
+        // 3. 上游服务错误特征：HTTP 响应错误或网络错误
         let is_upstream_error =
             // HTTP 响应错误（来自 refresh_*_token 的错误消息）
             msg.contains("凭证已过期或无效") ||
@@ -381,7 +386,7 @@ impl AdminService {
         if is_upstream_error {
             AdminServiceError::UpstreamError(msg)
         } else {
-            // 3. 默认归类为内部错误（本地验证失败、配置错误等）
+            // 4. 默认归类为内部错误（本地验证失败、配置错误等）
             // 包括：缺少 refreshToken、refreshToken 已被截断、无法生成 machineId 等
             AdminServiceError::InternalError(msg)
         }
