@@ -1417,7 +1417,7 @@ impl MultiTokenManager {
                     },
                     has_profile_arn: e.credentials.profile_arn.is_some(),
                     expires_at: if e.credentials.is_api_key_credential() {
-                        None // API Key 不过期
+                        None // API Key 凭据本地不维护过期时间（服务端策略未知）
                     } else {
                         e.credentials.expires_at.clone()
                     },

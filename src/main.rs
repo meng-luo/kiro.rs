@@ -55,7 +55,9 @@ async fn main() {
 
     // 检查 KIRO_API_KEY 环境变量，自动创建 API Key 凭据
     if let Ok(kiro_api_key) = std::env::var("KIRO_API_KEY") {
-        if !kiro_api_key.is_empty() {
+        if kiro_api_key.is_empty() {
+            tracing::warn!("KIRO_API_KEY 环境变量已设置但为空，视为未配置");
+        } else {
             tracing::info!("检测到 KIRO_API_KEY 环境变量，添加 API Key 凭据（最高优先级）");
             let api_key_cred = KiroCredentials {
                 kiro_api_key: Some(kiro_api_key),
