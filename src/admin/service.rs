@@ -1,6 +1,6 @@
 //! Admin API 业务逻辑服务
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,10 +36,15 @@ pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
+    /// 已注册的端点名称集合（用于 add_credential 校验）
+    known_endpoints: HashSet<String>,
 }
 
 impl AdminService {
-    pub fn new(token_manager: Arc<MultiTokenManager>) -> Self {
+    pub fn new(
+        token_manager: Arc<MultiTokenManager>,
+        known_endpoints: impl IntoIterator<Item = String>,
+    ) -> Self {
         let cache_path = token_manager
             .cache_dir()
             .map(|d| d.join("kiro_balance_cache.json"));
@@ -50,12 +55,14 @@ impl AdminService {
             token_manager,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
+            known_endpoints: known_endpoints.into_iter().collect(),
         }
     }
 
     /// 获取所有凭据状态
     pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
         let snapshot = self.token_manager.snapshot();
+        let default_endpoint = self.token_manager.config().default_endpoint.clone();
 
         let mut credentials: Vec<CredentialStatusItem> = snapshot
             .entries
@@ -79,6 +86,7 @@ impl AdminService {
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,
                 disabled_reason: entry.disabled_reason,
+                endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
             })
             .collect();
 
@@ -190,6 +198,19 @@ impl AdminService {
         &self,
         req: AddCredentialRequest,
     ) -> Result<AddCredentialResponse, AdminServiceError> {
+        // 校验端点名：未指定则默认合法，指定则必须已注册
+        if let Some(ref name) = req.endpoint {
+            if !self.known_endpoints.contains(name) {
+                let mut known: Vec<&str> =
+                    self.known_endpoints.iter().map(|s| s.as_str()).collect();
+                known.sort();
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "未知端点 \"{}\"，已注册端点: {:?}",
+                    name, known
+                )));
+            }
+        }
+
         // 构建凭据对象
         let email = req.email.clone();
         let new_cred = KiroCredentials {
@@ -213,6 +234,7 @@ impl AdminService {
             proxy_password: req.proxy_password,
             disabled: false, // 新添加的凭据默认启用
             kiro_api_key: req.kiro_api_key,
+            endpoint: req.endpoint,
         };
 
         // 调用 token_manager 添加凭据

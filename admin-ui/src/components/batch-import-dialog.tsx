@@ -29,6 +29,7 @@ interface CredentialInput {
   machineId?: string
   kiroApiKey?: string
   authMethod?: string
+  endpoint?: string
 }
 
 interface VerificationResult {
@@ -232,6 +233,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
               apiRegion: cred.apiRegion?.trim() || undefined,
               machineId: cred.machineId?.trim() || undefined,
+              endpoint: cred.endpoint?.trim() || undefined,
             })
 
             addedCredId = addedCred.credentialId
@@ -280,6 +282,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             clientSecret,
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
+            endpoint: cred.endpoint?.trim() || undefined,
           })
 
           addedCredId = addedCred.credentialId

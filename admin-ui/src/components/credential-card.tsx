@@ -170,6 +170,9 @@ export function CredentialCard({
                      credential.authMethod}
                   </Badge>
                 )}
+                {credential.endpoint && (
+                  <Badge variant="outline">{credential.endpoint}</Badge>
+                )}
               </CardTitle>
             </div>
             <div className="flex items-center gap-2">

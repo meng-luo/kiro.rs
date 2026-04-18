@@ -484,6 +484,9 @@ pub struct CredentialEntrySnapshot {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 端点名称（未显式配置时返回 None，由 Admin 层回退到默认值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -1450,6 +1453,7 @@ impl MultiTokenManager {
                         DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                         DisabledReason::InvalidConfig => "InvalidConfig",
                     }.to_string()),
+                    endpoint: e.credentials.endpoint.clone(),
                 })
                 .collect(),
             current_id,

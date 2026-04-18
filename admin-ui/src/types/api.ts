@@ -26,6 +26,7 @@ export interface CredentialStatusItem {
   proxyUrl?: string
   refreshFailureCount: number
   disabledReason?: string
+  endpoint: string
 }
 
 // 余额响应
@@ -76,6 +77,7 @@ export interface AddCredentialRequest {
   proxyUsername?: string
   proxyPassword?: string
   kiroApiKey?: string
+  endpoint?: string
 }
 
 // 添加凭据响应

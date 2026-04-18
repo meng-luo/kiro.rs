@@ -7,9 +7,11 @@ mod kiro;
 mod model;
 pub mod token;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::Parser;
+use kiro::endpoint::{IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
 use kiro::provider::KiroProvider;
 use kiro::token_manager::MultiTokenManager;
@@ -94,6 +96,38 @@ async fn main() {
         tracing::info!("已配置 HTTP 代理: {}", config.proxy_url.as_ref().unwrap());
     }
 
+    // 构建端点注册表
+    let mut endpoints: HashMap<String, Arc<dyn KiroEndpoint>> = HashMap::new();
+    {
+        let ide = IdeEndpoint::new();
+        endpoints.insert(ide.name().to_string(), Arc::new(ide));
+    }
+
+    // 校验默认端点存在
+    if !endpoints.contains_key(&config.default_endpoint) {
+        tracing::error!("默认端点 \"{}\" 未注册", config.default_endpoint);
+        std::process::exit(1);
+    }
+
+    // 校验所有凭据声明的端点都已注册
+    for cred in &credentials_list {
+        let name = cred
+            .endpoint
+            .as_deref()
+            .unwrap_or(&config.default_endpoint);
+        if !endpoints.contains_key(name) {
+            tracing::error!(
+                "凭据 id={:?} 指定了未知端点 \"{}\"（已注册: {:?}）",
+                cred.id,
+                name,
+                endpoints.keys().collect::<Vec<_>>()
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let endpoint_names: Vec<String> = endpoints.keys().cloned().collect();
+
     // 创建 MultiTokenManager 和 KiroProvider
     let token_manager = MultiTokenManager::new(
         config.clone(),
@@ -107,7 +141,12 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
-    let kiro_provider = KiroProvider::with_proxy(token_manager.clone(), proxy_config.clone());
+    let kiro_provider = KiroProvider::with_proxy(
+        token_manager.clone(),
+        proxy_config.clone(),
+        endpoints,
+        config.default_endpoint.clone(),
+    );
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
@@ -138,7 +177,8 @@ async fn main() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
             anthropic_app
         } else {
-            let admin_service = admin::AdminService::new(token_manager.clone());
+            let admin_service =
+                admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 

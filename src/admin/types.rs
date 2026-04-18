@@ -60,6 +60,8 @@ pub struct CredentialStatusItem {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
+    pub endpoint: String,
 }
 
 // ============ 操作请求 ============
@@ -131,6 +133,10 @@ pub struct AddCredentialRequest {
     /// 设置后直接作为 Bearer Token 使用，无需 refreshToken
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kiro_api_key: Option<String>,
+
+    /// 端点名称（可选，未配置时使用 config.defaultEndpoint）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 fn default_auth_method() -> String {

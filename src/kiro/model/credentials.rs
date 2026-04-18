@@ -102,6 +102,13 @@ pub struct KiroCredentials {
     /// 设置后直接作为 Bearer Token 使用，无需 refreshToken
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kiro_api_key: Option<String>,
+
+    /// 端点名称（可选）
+    ///
+    /// 决定该凭据走哪套 Kiro API。未配置时回退到 `config.defaultEndpoint`（默认 "ide"）。
+    /// 端点名必须在启动时注册的端点 registry 中存在。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 /// 判断是否为零（用于跳过序列化）
@@ -335,6 +342,7 @@ mod tests {
             proxy_password: None,
             disabled: false,
             kiro_api_key: None,
+            endpoint: None,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -452,6 +460,7 @@ mod tests {
             proxy_password: None,
             disabled: false,
             kiro_api_key: None,
+            endpoint: None,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -482,6 +491,7 @@ mod tests {
             proxy_password: None,
             disabled: false,
             kiro_api_key: None,
+            endpoint: None,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -595,6 +605,7 @@ mod tests {
             proxy_password: None,
             disabled: false,
             kiro_api_key: None,
+            endpoint: None,
         };
 
         let json = original.to_pretty_json().unwrap();

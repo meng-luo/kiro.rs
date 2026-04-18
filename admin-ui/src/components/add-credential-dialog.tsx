@@ -32,6 +32,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  const [endpoint, setEndpoint] = useState('')
 
   const { mutate, isPending } = useAddCredential()
 
@@ -48,6 +49,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setProxyUrl('')
     setProxyUsername('')
     setProxyPassword('')
+    setEndpoint('')
   }
 
   const isApiKey = authMethod === 'api_key'
@@ -87,6 +89,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         proxyUrl: proxyUrl.trim() || undefined,
         proxyUsername: proxyUsername.trim() || undefined,
         proxyPassword: proxyPassword.trim() || undefined,
+        endpoint: endpoint.trim() || undefined,
       },
       {
         onSuccess: (data) => {
@@ -254,6 +257,23 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               />
               <p className="text-xs text-muted-foreground">
                 可选，64 位十六进制字符串，留空使用配置中字段, 否则由刷新Token自动派生
+              </p>
+            </div>
+
+            {/* 端点 */}
+            <div className="space-y-2">
+              <label htmlFor="endpoint" className="text-sm font-medium">
+                端点
+              </label>
+              <Input
+                id="endpoint"
+                placeholder="留空使用默认端点（如 ide / cli）"
+                value={endpoint}
+                onChange={(e) => setEndpoint(e.target.value)}
+                disabled={isPending}
+              />
+              <p className="text-xs text-muted-foreground">
+                可选。决定该凭据走哪套 Kiro API。留空使用全局 defaultEndpoint
               </p>
             </div>
 
