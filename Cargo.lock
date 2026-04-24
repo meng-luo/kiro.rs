@@ -876,7 +876,6 @@ dependencies = [
  "hex",
  "http",
  "mime_guess",
- "openssl",
  "parking_lot",
  "reqwest",
  "rust-embed",
