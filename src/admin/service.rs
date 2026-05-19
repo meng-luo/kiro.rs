@@ -1,17 +1,20 @@
 //! Admin API 业务逻辑服务
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
+use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::conversation::{ConversationState, CurrentMessage, UserInputMessage};
 use crate::kiro::model::requests::kiro::KiroRequest;
@@ -25,7 +28,8 @@ use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem, CredentialTestRequest,
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
-    SetMaxConcurrentRequest, SystemVersionResponse,
+    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest,
+    SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -33,8 +37,22 @@ pub type TestEventStream =
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
-/// 当前 fork 的发布页仓库地址
-const RELEASES_BASE_URL: &str = "https://github.com/shusfun/kiro.rs/releases/tag";
+/// GitHub API 地址
+const GITHUB_API_BASE: &str = "https://api.github.com/repos";
+
+#[derive(Debug, Clone)]
+struct CachedVersionState {
+    response: SystemVersionResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    published_at: Option<String>,
+    prerelease: bool,
+    body: Option<String>,
+}
 
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +74,10 @@ pub struct AdminService {
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
     current_version: String,
+    current_commit: Option<String>,
+    version_state: Mutex<CachedVersionState>,
+    system_jobs: Mutex<HashMap<String, SystemOperationJobResponse>>,
+    http_client: Client,
 }
 
 impl AdminService {
@@ -69,6 +91,22 @@ impl AdminService {
             .map(|d| d.join("kiro_balance_cache.json"));
 
         let balance_cache = Self::load_balance_cache_from(&cache_path);
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let current_commit = Self::detect_current_commit();
+        let initial_version_state = CachedVersionState {
+            response: Self::build_default_version_response(
+                &token_manager.config(),
+                current_version.clone(),
+                current_commit.clone(),
+                None,
+            ),
+        };
+        let http_client = Self::build_admin_http_client(token_manager.config()).unwrap_or_else(|e| {
+            tracing::warn!("构建版本治理 HTTP 客户端失败，回退到默认客户端: {}", e);
+            Client::builder()
+                .build()
+                .expect("创建默认 HTTP 客户端失败")
+        });
 
         Self {
             token_manager,
@@ -76,7 +114,11 @@ impl AdminService {
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version,
+            current_commit,
+            version_state: Mutex::new(initial_version_state),
+            system_jobs: Mutex::new(HashMap::new()),
+            http_client,
         }
     }
 
@@ -117,6 +159,9 @@ impl AdminService {
                 recent_suspicious_count: entry.recent_suspicious_count,
                 sticky_session_count: entry.sticky_session_count,
                 sticky_detached: entry.sticky_detached,
+                dispatch_path: entry.dispatch_path,
+                soft_fallback_eligible: entry.soft_fallback_eligible,
+                last_soft_fallback_at: entry.last_soft_fallback_at,
             })
             .collect();
 
@@ -331,59 +376,91 @@ impl AdminService {
 
     /// 获取系统版本信息
     pub fn get_system_version(&self) -> SystemVersionResponse {
+        self.version_state.lock().response.clone()
+    }
+
+    /// 重新检查系统版本信息
+    pub async fn check_system_version(&self) -> Result<SystemVersionResponse, AdminServiceError> {
+        let latest_job = self.latest_job();
+        let latest_release = self.fetch_latest_release().await?;
+        let response = self.build_version_response(latest_release, latest_job);
+        self.version_state.lock().response = response.clone();
+        Ok(response)
+    }
+
+    pub async fn start_system_update(
+        self: &Arc<Self>,
+        payload: SystemUpdateRequest,
+    ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         let config = self.token_manager.config();
-        let deployment_mode = self.detect_deployment_mode(config);
-        let can_self_update = self.can_self_update(config, &deployment_mode);
-        let checked_at = Utc::now().to_rfc3339();
+        if !config.update.enabled {
+            return Err(AdminServiceError::InvalidCredential(
+                "当前实例未启用在线更新，请先在配置中开启 update.enabled".to_string(),
+            ));
+        }
+        let version_info = self.check_system_version().await?;
+        let target_version = payload
+            .version
+            .clone()
+            .or_else(|| version_info.update_available.then_some(version_info.latest_version.clone()))
+            .or_else(|| Some(version_info.current_version.clone()));
+        let target_version = target_version.filter(|value| !value.trim().is_empty());
+        let job = self.create_job(
+            "update",
+            target_version.clone(),
+            format!(
+                "准备更新到 {}",
+                target_version.clone().unwrap_or_else(|| "当前版本".to_string())
+            ),
+        );
+        let job_id = job.job_id.clone();
+        let service = self.clone();
+        tokio::spawn(async move {
+            service.run_update_job(job_id, target_version).await;
+        });
+        Ok(job)
+    }
 
-        SystemVersionResponse {
-            current_version: self.current_version.clone(),
-            latest_version: self.current_version.clone(),
-            update_available: false,
-            latest_published_at: None,
-            release_notes_url: Some(format!(
-                "{}/v{}",
-                RELEASES_BASE_URL, self.current_version
-            )),
-            deployment_mode,
-            can_self_update,
-            update_hint: if can_self_update {
-                "当前实例满足在线更新条件。".to_string()
-            } else if std::path::Path::new("/.dockerenv").exists() {
-                "当前实例运行在容器内，请通过镜像或容器编排方式更新。".to_string()
+    pub async fn start_system_rollback(
+        self: &Arc<Self>,
+        payload: SystemRollbackRequest,
+    ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        let backup_name = payload.backup_name.filter(|value| !value.trim().is_empty());
+        let job = self.create_job(
+            "rollback",
+            backup_name.clone(),
+            if let Some(name) = &backup_name {
+                format!("准备回滚到备份 {}", name)
             } else {
-                "当前实例未满足在线更新条件。".to_string()
+                "准备回滚到最近一次备份".to_string()
             },
-            checked_at,
-        }
+        );
+        let job_id = job.job_id.clone();
+        let service = self.clone();
+        tokio::spawn(async move {
+            service.run_rollback_job(job_id, backup_name).await;
+        });
+        Ok(job)
     }
 
-    fn detect_deployment_mode(&self, _config: &Config) -> String {
-        if let Ok(mode) = std::env::var("KIRO_DEPLOYMENT_MODE") {
-            if !mode.trim().is_empty() {
-                return mode;
-            }
-        }
-
-        if std::path::Path::new("/.dockerenv").exists() {
-            "docker".to_string()
-        } else {
-            "file".to_string()
-        }
+    pub async fn start_system_restart(
+        self: &Arc<Self>,
+    ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        let job = self.create_job("restart", None, "准备重启当前实例".to_string());
+        let job_id = job.job_id.clone();
+        let service = self.clone();
+        tokio::spawn(async move {
+            service.run_restart_job(job_id).await;
+        });
+        Ok(job)
     }
 
-    fn can_self_update(&self, config: &Config, deployment_mode: &str) -> bool {
-        let writable_config = config
-            .config_path()
-            .and_then(|p| p.parent())
-            .map(|dir| {
-                std::fs::metadata(dir)
-                    .map(|m| !m.permissions().readonly())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        deployment_mode == "binary" && writable_config
+    pub fn get_system_job(&self, id: &str) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        self.system_jobs
+            .lock()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| AdminServiceError::InvalidCredential(format!("任务不存在: {}", id)))
     }
 
     /// 设置负载均衡模式
@@ -451,6 +528,9 @@ impl AdminService {
             .map_err(|e| self.classify_balance_error(e, id))?;
 
         let token_manager = self.provider.token_manager().clone();
+        let dispatch_path = provider_response.dispatch_path.clone();
+        let used_soft_fallback = provider_response.used_soft_fallback;
+        let account_state_at_start = provider_response.account_state_at_start.clone();
         let mut stream = provider_response.response.bytes_stream();
         let mut lease = Some(provider_response.lease);
         let mut decoder = EventStreamDecoder::new();
@@ -461,6 +541,9 @@ impl AdminService {
                 "type": "test_start",
                 "accountId": id,
                 "model": model_id,
+                "dispatchPath": dispatch_path,
+                "usedSoftFallback": used_soft_fallback,
+                "accountStateAtStart": account_state_at_start,
             });
 
             loop {
@@ -539,6 +622,458 @@ impl AdminService {
         };
 
         Ok(Box::pin(output))
+    }
+
+    fn build_admin_http_client(config: &Config) -> anyhow::Result<Client> {
+        let proxy = config.update.proxy_url.as_ref().map(|url| ProxyConfig::new(url.clone()));
+        build_client(proxy.as_ref(), 60, config.tls_backend)
+    }
+
+    fn detect_current_commit() -> Option<String> {
+        let candidates = [
+            std::env::var("GITHUB_SHA").ok(),
+            std::env::var("VERGEN_GIT_SHA").ok(),
+            option_env!("GIT_COMMIT_HASH").map(|value| value.to_string()),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|value| !value.trim().is_empty())
+            .map(|value| value.chars().take(12).collect())
+    }
+
+    fn build_default_version_response(
+        config: &Config,
+        current_version: String,
+        current_commit: Option<String>,
+        latest_job: Option<SystemOperationJobResponse>,
+    ) -> SystemVersionResponse {
+        let deployment_mode = if !config.update.current_deployment_mode.trim().is_empty() {
+            config.update.current_deployment_mode.clone()
+        } else if std::path::Path::new("/.dockerenv").exists() {
+            "docker".to_string()
+        } else {
+            "binary".to_string()
+        };
+        let can_self_update = config.update.enabled
+            && config.update.restart_mode == "command"
+            && !config.update.restart_command.trim().is_empty()
+            && deployment_mode == "binary";
+        SystemVersionResponse {
+            current_version: current_version.clone(),
+            latest_version: current_version,
+            update_available: false,
+            latest_published_at: None,
+            release_notes_url: None,
+            deployment_mode,
+            can_self_update,
+            update_hint: if can_self_update {
+                "当前实例允许从管理台发起下载、替换和重启。".to_string()
+            } else if std::path::Path::new("/.dockerenv").exists() {
+                "当前实例运行在容器内，请通过镜像或容器编排更新。".to_string()
+            } else {
+                "当前实例未满足在线更新条件，请检查 update 配置。".to_string()
+            },
+            checked_at: Utc::now().to_rfc3339(),
+            current_commit,
+            channel: Some(config.update.channel.clone()),
+            latest_job,
+        }
+    }
+
+    fn build_version_response(
+        &self,
+        latest_release: Option<GitHubRelease>,
+        latest_job: Option<SystemOperationJobResponse>,
+    ) -> SystemVersionResponse {
+        let config = self.token_manager.config();
+        let mut response = Self::build_default_version_response(
+            config,
+            self.current_version.clone(),
+            self.current_commit.clone(),
+            latest_job,
+        );
+        if let Some(release) = latest_release {
+            let latest_version = release.tag_name.trim_start_matches('v').to_string();
+            response.latest_version = latest_version.clone();
+            response.update_available = latest_version != self.current_version;
+            response.latest_published_at = release.published_at;
+            response.release_notes_url = Some(release.html_url);
+            response.update_hint = if response.update_available {
+                format!(
+                    "发现新版本 {}，可在这里发起更新并查看最近任务状态。",
+                    latest_version
+                )
+            } else if response.can_self_update {
+                "当前已经是最新版本，可继续在这里执行重启或回滚。".to_string()
+            } else {
+                response.update_hint
+            };
+        }
+        response
+    }
+
+    async fn fetch_latest_release(&self) -> Result<Option<GitHubRelease>, AdminServiceError> {
+        let config = self.token_manager.config();
+        let repo = config.update.github_repo.trim();
+        if repo.is_empty() {
+            return Ok(None);
+        }
+        let url = format!("{}/{}/releases", GITHUB_API_BASE, repo);
+        let response = self
+            .http_client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "kiro-rs-admin")
+            .send()
+            .await
+            .map_err(|e| AdminServiceError::UpstreamError(format!("检查 GitHub Release 失败: {}", e)))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AdminServiceError::UpstreamError(format!(
+                "GitHub Release 检查失败: {} {}",
+                status, body
+            )));
+        }
+        let releases: Vec<GitHubRelease> = response
+            .json()
+            .await
+            .map_err(|e| AdminServiceError::UpstreamError(format!("解析 GitHub Release 失败: {}", e)))?;
+        let selected = releases.into_iter().find(|release| {
+            if release.prerelease && !config.update.allow_prerelease {
+                return false;
+            }
+            if config.update.channel == "stable" {
+                !release.prerelease
+            } else {
+                true
+            }
+        });
+        Ok(selected)
+    }
+
+    fn create_job(
+        &self,
+        operation: &str,
+        target_version: Option<String>,
+        message: String,
+    ) -> SystemOperationJobResponse {
+        let job = SystemOperationJobResponse {
+            job_id: Uuid::new_v4().to_string(),
+            operation: operation.to_string(),
+            status: "running".to_string(),
+            target_version,
+            current_version: Some(self.current_version.clone()),
+            started_at: Some(Utc::now().to_rfc3339()),
+            finished_at: None,
+            message,
+            can_retry: false,
+        };
+        self.system_jobs
+            .lock()
+            .insert(job.job_id.clone(), job.clone());
+        self.sync_latest_job(Some(job.clone()));
+        job
+    }
+
+    fn update_job(
+        &self,
+        job_id: &str,
+        status: &str,
+        message: String,
+        can_retry: bool,
+    ) -> Option<SystemOperationJobResponse> {
+        let mut jobs = self.system_jobs.lock();
+        let job = jobs.get_mut(job_id)?;
+        job.status = status.to_string();
+        job.message = message;
+        job.can_retry = can_retry;
+        job.finished_at = Some(Utc::now().to_rfc3339());
+        let cloned = job.clone();
+        drop(jobs);
+        self.sync_latest_job(Some(cloned.clone()));
+        Some(cloned)
+    }
+
+    fn latest_job(&self) -> Option<SystemOperationJobResponse> {
+        self.system_jobs
+            .lock()
+            .values()
+            .cloned()
+            .max_by(|left, right| left.started_at.cmp(&right.started_at))
+    }
+
+    fn sync_latest_job(&self, latest_job: Option<SystemOperationJobResponse>) {
+        self.version_state.lock().response.latest_job = latest_job;
+    }
+
+    async fn run_update_job(self: Arc<Self>, job_id: String, target_version: Option<String>) {
+        let result = async {
+            let release = self
+                .fetch_latest_release()
+                .await?
+                .ok_or_else(|| AdminServiceError::UpstreamError("未获取到可用发布版本".to_string()))?;
+            let expected_version = target_version
+                .clone()
+                .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string());
+            let staging_dir = self.prepare_update_dirs().await?;
+            let release_file = staging_dir.join(format!(
+                "release-{}.json",
+                expected_version.replace('/', "_")
+            ));
+            let release_payload = serde_json::to_vec_pretty(&json!({
+                "tagName": release.tag_name,
+                "htmlUrl": release.html_url,
+                "publishedAt": release.published_at,
+                "body": release.body,
+                "checkedAt": Utc::now().to_rfc3339(),
+            }))
+            .map_err(|e| AdminServiceError::InternalError(format!("序列化 release 元信息失败: {}", e)))?;
+            tokio::fs::write(&release_file, release_payload)
+                .await
+                .map_err(|e| AdminServiceError::InternalError(format!("写入 release 元信息失败: {}", e)))?;
+            let backup_dir = self.create_backup().await?;
+            self.run_command_from_config("update").await?;
+            self.run_healthcheck().await?;
+            Ok::<String, AdminServiceError>(format!(
+                "更新流程已执行，目标版本 {}，备份目录 {}",
+                expected_version,
+                backup_dir.display()
+            ))
+        }
+        .await;
+
+        match result {
+            Ok(message) => {
+                let _ = self.update_job(&job_id, "succeeded", message, false);
+            }
+            Err(error) => {
+                let _ = self.update_job(&job_id, "failed", error.to_string(), true);
+            }
+        }
+    }
+
+    async fn run_rollback_job(self: Arc<Self>, job_id: String, backup_name: Option<String>) {
+        let result = async {
+            let backup_dir = self.restore_backup(backup_name.as_deref()).await?;
+            self.run_command_from_config("rollback").await?;
+            self.run_healthcheck().await?;
+            Ok::<String, AdminServiceError>(format!("已回滚到备份 {}", backup_dir.display()))
+        }
+        .await;
+        match result {
+            Ok(message) => {
+                let _ = self.update_job(&job_id, "rolled_back", message, false);
+            }
+            Err(error) => {
+                let _ = self.update_job(&job_id, "failed", error.to_string(), true);
+            }
+        }
+    }
+
+    async fn run_restart_job(self: Arc<Self>, job_id: String) {
+        let result = async {
+            self.run_command_from_config("restart").await?;
+            self.run_healthcheck().await?;
+            Ok::<String, AdminServiceError>("重启命令已执行，健康检查通过".to_string())
+        }
+        .await;
+        match result {
+            Ok(message) => {
+                let _ = self.update_job(&job_id, "succeeded", message, false);
+            }
+            Err(error) => {
+                let _ = self.update_job(&job_id, "failed", error.to_string(), true);
+            }
+        }
+    }
+
+    async fn prepare_update_dirs(&self) -> Result<PathBuf, AdminServiceError> {
+        let config = self.token_manager.config();
+        let dir = self.resolve_workspace_path(&config.update.download_dir)?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("创建下载目录失败: {}", e)))?;
+        Ok(dir)
+    }
+
+    async fn create_backup(&self) -> Result<PathBuf, AdminServiceError> {
+        let config = self.token_manager.config();
+        let backup_root = self.resolve_workspace_path(&config.update.backup_dir)?;
+        tokio::fs::create_dir_all(&backup_root)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("创建备份目录失败: {}", e)))?;
+        let backup_dir = backup_root.join(Utc::now().format("%Y%m%d%H%M%S").to_string());
+        tokio::fs::create_dir_all(&backup_dir)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("创建备份快照失败: {}", e)))?;
+        if let Ok(current_exe) = std::env::current_exe() {
+            let target = backup_dir.join(
+                current_exe
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("kiro-rs")),
+            );
+            tokio::fs::copy(&current_exe, &target)
+                .await
+                .map_err(|e| AdminServiceError::InternalError(format!("备份当前二进制失败: {}", e)))?;
+        }
+        self.cleanup_old_backups(&backup_root, config.update.max_backups).await?;
+        Ok(backup_dir)
+    }
+
+    async fn restore_backup(&self, backup_name: Option<&str>) -> Result<PathBuf, AdminServiceError> {
+        let config = self.token_manager.config();
+        let backup_root = self.resolve_workspace_path(&config.update.backup_dir)?;
+        let mut entries = tokio::fs::read_dir(&backup_root)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("读取备份目录失败: {}", e)))?;
+        let mut candidates = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("读取备份条目失败: {}", e)))?
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                candidates.push(path);
+            }
+        }
+        candidates.sort();
+        let selected = if let Some(name) = backup_name {
+            let candidate = backup_root.join(name);
+            if candidates.iter().any(|path| path == &candidate) {
+                candidate
+            } else {
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "指定备份不存在: {}",
+                    name
+                )));
+            }
+        } else {
+            candidates
+                .pop()
+                .ok_or_else(|| AdminServiceError::InvalidCredential("当前没有可回滚的备份".to_string()))?
+        };
+        Ok(selected)
+    }
+
+    async fn cleanup_old_backups(
+        &self,
+        backup_root: &Path,
+        max_backups: usize,
+    ) -> Result<(), AdminServiceError> {
+        if max_backups == 0 {
+            return Ok(());
+        }
+        let mut entries = tokio::fs::read_dir(backup_root)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("读取备份目录失败: {}", e)))?;
+        let mut dirs = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("读取备份条目失败: {}", e)))?
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+        dirs.sort();
+        while dirs.len() > max_backups {
+            let path = dirs.remove(0);
+            tokio::fs::remove_dir_all(path)
+                .await
+                .map_err(|e| AdminServiceError::InternalError(format!("清理旧备份失败: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    async fn run_command_from_config(&self, operation: &str) -> Result<(), AdminServiceError> {
+        let config = self.token_manager.config();
+        if config.update.restart_mode != "command" {
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "当前仅支持 command 重启模式，实际为 {}",
+                config.update.restart_mode
+            )));
+        }
+        let command_line = match operation {
+            "rollback" if !config.update.rollback_restart_command.trim().is_empty() => {
+                config.update.rollback_restart_command.trim()
+            }
+            _ => config.update.restart_command.trim(),
+        };
+        if command_line.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "未配置可执行的重启命令".to_string(),
+            ));
+        }
+        let status = Command::new("sh")
+            .arg("-lc")
+            .arg(command_line)
+            .status()
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("执行命令失败: {}", e)))?;
+        if !status.success() {
+            return Err(AdminServiceError::InternalError(format!(
+                "命令执行失败，退出码: {:?}",
+                status.code()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn run_healthcheck(&self) -> Result<(), AdminServiceError> {
+        let config = self.token_manager.config();
+        let response = timeout(
+            Duration::from_secs(config.update.healthcheck_timeout_seconds),
+            self.http_client
+                .get(&config.update.healthcheck_url)
+                .header(reqwest::header::USER_AGENT, "kiro-rs-admin")
+                .send(),
+        )
+        .await
+        .map_err(|_| AdminServiceError::UpstreamError("健康检查超时".to_string()))?
+        .map_err(|e| AdminServiceError::UpstreamError(format!("健康检查失败: {}", e)))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AdminServiceError::UpstreamError(format!(
+                "健康检查未通过: {} {}",
+                status, body
+            )));
+        }
+        Ok(())
+    }
+
+    fn resolve_workspace_path(&self, relative: &str) -> Result<PathBuf, AdminServiceError> {
+        let config_path = self
+            .token_manager
+            .config()
+            .config_path()
+            .ok_or_else(|| AdminServiceError::InternalError("配置文件路径未知".to_string()))?;
+        let workspace_root = config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let candidate = workspace_root.join(relative);
+        let normalized = candidate.components().fold(PathBuf::new(), |mut acc, component| {
+            match component {
+                std::path::Component::ParentDir => {
+                    acc.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => acc.push(other.as_os_str()),
+            }
+            acc
+        });
+        if !normalized.starts_with(&workspace_root) {
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "路径越界，禁止写入工作区外: {}",
+                relative
+            )));
+        }
+        Ok(normalized)
     }
 
     // ============ 余额缓存持久化 ============

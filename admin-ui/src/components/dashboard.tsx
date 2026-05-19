@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, BadgeInfo, ArrowUpRight } from 'lucide-react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, BadgeInfo, ArrowUpRight, Download, History, Power } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -20,10 +20,59 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useSystemVersion, useCheckSystemVersion } from '@/hooks/use-credentials'
+import {
+  useCredentials,
+  useDeleteCredential,
+  useResetFailure,
+  useLoadBalancingMode,
+  useSetLoadBalancingMode,
+  useSystemVersion,
+  useCheckSystemVersion,
+  useUpdateSystemVersion,
+  useRollbackSystemVersion,
+  useRestartSystem,
+  useSystemJob,
+} from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { BalanceResponse } from '@/types/api'
+import type { BalanceResponse, SystemOperationJob } from '@/types/api'
+
+function deploymentModeLabel(mode?: string) {
+  switch (mode) {
+    case 'binary':
+      return '二进制部署'
+    case 'docker':
+      return '容器部署'
+    case 'file':
+      return '文件部署'
+    default:
+      return mode || '未知'
+  }
+}
+
+function channelLabel(channel?: string | null) {
+  switch (channel) {
+    case 'stable':
+      return '稳定版'
+    case 'beta':
+      return '预览版'
+    default:
+      return channel || '未设置'
+  }
+}
+
+function operationLabel(job?: SystemOperationJob | null) {
+  switch (job?.operation) {
+    case 'update':
+      return '更新'
+    case 'rollback':
+      return '回滚'
+    case 'restart':
+      return '重启'
+    default:
+      return '系统任务'
+  }
+}
 
 interface DashboardProps {
   onLogout: () => void
@@ -47,6 +96,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
+  const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 12
@@ -65,6 +115,29 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
   const { data: systemVersion, isLoading: isLoadingVersion } = useSystemVersion()
   const { mutate: checkSystemVersion, isPending: isCheckingVersion } = useCheckSystemVersion()
+  const { mutate: updateSystemVersion, isPending: isUpdatingSystem } = useUpdateSystemVersion()
+  const { mutate: rollbackSystemVersion, isPending: isRollingBackSystem } = useRollbackSystemVersion()
+  const { mutate: restartSystem, isPending: isRestartingSystem } = useRestartSystem()
+  const { data: activeSystemJob } = useSystemJob(activeJobId, versionDialogOpen)
+
+  const latestSystemJob = activeSystemJob || systemVersion?.latestJob || null
+  const versionActionsBusy = isUpdatingSystem || isRollingBackSystem || isRestartingSystem
+
+  const jobStatusMeta = useMemo(() => {
+    const status = latestSystemJob?.status
+    switch (status) {
+      case 'running':
+        return { text: '执行中', variant: 'warning' as const }
+      case 'succeeded':
+        return { text: '已完成', variant: 'success' as const }
+      case 'rolled_back':
+        return { text: '已回滚', variant: 'outline' as const }
+      case 'failed':
+        return { text: '失败', variant: 'destructive' as const }
+      default:
+        return { text: '暂无任务', variant: 'secondary' as const }
+    }
+  }, [latestSystemJob?.status])
 
   // 计算分页
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
@@ -86,6 +159,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
   useEffect(() => {
     setCurrentPage(1)
   }, [data?.credentials.length])
+
+  useEffect(() => {
+    if (systemVersion?.latestJob?.jobId) {
+      setActiveJobId(prev => prev ?? systemVersion.latestJob?.jobId ?? null)
+    }
+  }, [systemVersion?.latestJob?.jobId])
 
   // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
   useEffect(() => {
@@ -525,12 +604,55 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const handleCheckVersion = () => {
     checkSystemVersion(undefined, {
-      onSuccess: () => {
+      onSuccess: (response) => {
+        setActiveJobId(response.latestJob?.jobId ?? null)
         toast.success('已刷新版本信息')
       },
       onError: (error) => {
         toast.error(`版本检查失败: ${extractErrorMessage(error)}`)
       }
+    })
+  }
+
+  const handleStartUpdate = () => {
+    updateSystemVersion(
+      systemVersion?.updateAvailable ? { version: systemVersion.latestVersion } : {},
+      {
+        onSuccess: (job) => {
+          setActiveJobId(job.jobId)
+          toast.success('已发起更新任务')
+        },
+        onError: (error) => {
+          toast.error(`发起更新失败: ${extractErrorMessage(error)}`)
+        },
+      }
+    )
+  }
+
+  const handleStartRollback = () => {
+    rollbackSystemVersion(
+      {},
+      {
+        onSuccess: (job) => {
+          setActiveJobId(job.jobId)
+          toast.success('已发起回滚任务')
+        },
+        onError: (error) => {
+          toast.error(`发起回滚失败: ${extractErrorMessage(error)}`)
+        },
+      }
+    )
+  }
+
+  const handleStartRestart = () => {
+    restartSystem(undefined, {
+      onSuccess: (job) => {
+        setActiveJobId(job.jobId)
+        toast.success('已发起重启任务')
+      },
+      onError: (error) => {
+        toast.error(`发起重启失败: ${extractErrorMessage(error)}`)
+      },
     })
   }
 
@@ -869,58 +991,147 @@ export function Dashboard({ onLogout }: DashboardProps) {
       />
 
       <Dialog open={versionDialogOpen} onOpenChange={setVersionDialogOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>版本信息</DialogTitle>
             <DialogDescription>
-              当前构建、发布说明和升级条件都集中在这里查看。
+              当前构建、发布渠道、最近任务和维护操作都集中在这里处理。
             </DialogDescription>
           </DialogHeader>
           {systemVersion ? (
             <div className="space-y-4 text-sm">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-md border bg-muted/20 px-3 py-3">
-                  <div className="text-xs text-muted-foreground">当前版本</div>
-                  <div className="mt-1 font-medium">{systemVersion.currentVersion}</div>
-                </div>
-                <div className="rounded-md border bg-muted/20 px-3 py-3">
-                  <div className="text-xs text-muted-foreground">最新版本</div>
-                  <div className="mt-1 font-medium">{systemVersion.latestVersion}</div>
-                </div>
-                <div className="rounded-md border bg-muted/20 px-3 py-3">
-                  <div className="text-xs text-muted-foreground">部署方式</div>
-                  <div className="mt-1 font-medium">{systemVersion.deploymentMode}</div>
-                </div>
-                <div className="rounded-md border bg-muted/20 px-3 py-3">
-                  <div className="text-xs text-muted-foreground">在线更新</div>
-                  <div className="mt-1">
-                    <Badge variant={systemVersion.canSelfUpdate ? 'success' : 'outline'}>
-                      {systemVersion.canSelfUpdate ? '可用' : '不可用'}
-                    </Badge>
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+                <div className="space-y-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <div className="text-xs text-muted-foreground">当前版本</div>
+                      <div className="mt-1 font-medium">{systemVersion.currentVersion}</div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <div className="text-xs text-muted-foreground">最新版本</div>
+                      <div className="mt-1 flex items-center gap-2 font-medium">
+                        <span>{systemVersion.latestVersion}</span>
+                        {systemVersion.updateAvailable && <Badge variant="warning">可更新</Badge>}
+                      </div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <div className="text-xs text-muted-foreground">部署方式</div>
+                      <div className="mt-1 font-medium">{deploymentModeLabel(systemVersion.deploymentMode)}</div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <div className="text-xs text-muted-foreground">发布渠道</div>
+                      <div className="mt-1 font-medium">{channelLabel(systemVersion.channel)}</div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <div className="text-xs text-muted-foreground">当前提交</div>
+                      <div className="mt-1 font-medium">{systemVersion.currentCommit || '未记录'}</div>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <div className="text-xs text-muted-foreground">在线维护</div>
+                      <div className="mt-1">
+                        <Badge variant={systemVersion.canSelfUpdate ? 'success' : 'outline'}>
+                          {systemVersion.canSelfUpdate ? '可用' : '不可用'}
+                        </Badge>
+                      </div>
+                    </div>
                   </div>
+                  <div className="rounded-md border bg-muted/20 px-3 py-3">
+                    <div className="text-xs text-muted-foreground">维护说明</div>
+                    <div className="mt-1 leading-6 text-foreground">{systemVersion.updateHint}</div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    <span>检查时间 {new Date(systemVersion.checkedAt).toLocaleString()}</span>
+                    {systemVersion.latestPublishedAt && (
+                      <span>发布时间 {new Date(systemVersion.latestPublishedAt).toLocaleString()}</span>
+                    )}
+                  </div>
+                  {systemVersion.releaseNotesUrl && (
+                    <a
+                      href={systemVersion.releaseNotesUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-primary hover:underline"
+                    >
+                      查看发布说明
+                      <ArrowUpRight className="h-3.5 w-3.5" />
+                    </a>
+                  )}
+                </div>
+                <div className="space-y-3 rounded-lg border bg-muted/15 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium">最近任务</div>
+                      <div className="text-xs text-muted-foreground">
+                        {latestSystemJob ? `${operationLabel(latestSystemJob)}任务状态` : '还没有维护任务记录'}
+                      </div>
+                    </div>
+                    <Badge variant={jobStatusMeta.variant}>{jobStatusMeta.text}</Badge>
+                  </div>
+                  {latestSystemJob ? (
+                    <div className="space-y-3 text-sm">
+                      <div className="rounded-md border bg-background px-3 py-3">
+                        <div className="text-xs text-muted-foreground">任务摘要</div>
+                        <div className="mt-1 font-medium">{latestSystemJob.message}</div>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="rounded-md border bg-background px-3 py-3">
+                          <div className="text-xs text-muted-foreground">任务类型</div>
+                          <div className="mt-1 font-medium">{operationLabel(latestSystemJob)}</div>
+                        </div>
+                        <div className="rounded-md border bg-background px-3 py-3">
+                          <div className="text-xs text-muted-foreground">目标版本 / 备份</div>
+                          <div className="mt-1 font-medium">{latestSystemJob.targetVersion || '当前实例'}</div>
+                        </div>
+                        <div className="rounded-md border bg-background px-3 py-3">
+                          <div className="text-xs text-muted-foreground">开始时间</div>
+                          <div className="mt-1 font-medium">
+                            {latestSystemJob.startedAt ? new Date(latestSystemJob.startedAt).toLocaleString() : '未开始'}
+                          </div>
+                        </div>
+                        <div className="rounded-md border bg-background px-3 py-3">
+                          <div className="text-xs text-muted-foreground">结束时间</div>
+                          <div className="mt-1 font-medium">
+                            {latestSystemJob.finishedAt ? new Date(latestSystemJob.finishedAt).toLocaleString() : '执行中'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                      这里会显示最近一次更新、回滚或重启的结果。
+                    </div>
+                  )}
                 </div>
               </div>
-              <div className="rounded-md border bg-muted/20 px-3 py-3">
-                <div className="text-xs text-muted-foreground">升级提示</div>
-                <div className="mt-1 leading-6 text-foreground">{systemVersion.updateHint}</div>
-              </div>
-              <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                <span>检查时间 {new Date(systemVersion.checkedAt).toLocaleString()}</span>
-                {systemVersion.latestPublishedAt && (
-                  <span>发布时间 {new Date(systemVersion.latestPublishedAt).toLocaleString()}</span>
-                )}
-              </div>
-              {systemVersion.releaseNotesUrl && (
-                <a
-                  href={systemVersion.releaseNotesUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-primary hover:underline"
+              <div className="grid gap-2 sm:grid-cols-3">
+                <Button
+                  variant="outline"
+                  onClick={handleStartUpdate}
+                  disabled={versionActionsBusy || !systemVersion.canSelfUpdate}
+                  title={systemVersion.canSelfUpdate ? '下载并执行更新流程' : '当前部署方式不支持从这里直接更新'}
                 >
-                  查看发布说明
-                  <ArrowUpRight className="h-3.5 w-3.5" />
-                </a>
-              )}
+                  <Download className="h-4 w-4" />
+                  更新到最新
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleStartRollback}
+                  disabled={versionActionsBusy || !systemVersion.canSelfUpdate}
+                  title={systemVersion.canSelfUpdate ? '回滚到最近一次备份' : '当前部署方式不支持从这里直接回滚'}
+                >
+                  <History className="h-4 w-4" />
+                  回滚
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleStartRestart}
+                  disabled={versionActionsBusy || !systemVersion.canSelfUpdate}
+                  title={systemVersion.canSelfUpdate ? '执行配置中的重启命令' : '当前部署方式不支持从这里直接重启'}
+                >
+                  <Power className="h-4 w-4" />
+                  重启服务
+                </Button>
+              </div>
             </div>
           ) : (
             <div className="rounded-md border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">

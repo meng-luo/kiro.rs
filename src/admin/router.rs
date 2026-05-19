@@ -9,9 +9,10 @@ use super::{
     handlers::{
         add_credential, check_system_version, delete_credential, force_refresh_token,
         get_all_credentials, get_credential_balance, get_load_balancing_mode,
-        get_system_version, recover_credential, reset_failure_count,
-        set_credential_disabled, set_credential_max_concurrent, set_credential_priority,
-        set_load_balancing_mode, test_credential,
+        get_system_job, get_system_version, recover_credential, reset_failure_count,
+        restart_system, rollback_system_version, set_credential_disabled,
+        set_credential_max_concurrent, set_credential_priority, set_load_balancing_mode,
+        test_credential, update_system_version,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -31,6 +32,10 @@ use super::{
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 /// - `GET /system/version` - 获取系统版本信息
 /// - `POST /system/version/check` - 检查系统版本信息
+/// - `POST /system/update` - 发起更新任务
+/// - `POST /system/rollback` - 发起回滚任务
+/// - `POST /system/restart` - 发起重启任务
+/// - `GET /system/update/jobs/:id` - 查询任务状态
 ///
 /// # 认证
 /// 需要 Admin API Key 认证，支持：
@@ -57,6 +62,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         .route("/system/version", get(get_system_version))
         .route("/system/version/check", post(check_system_version))
+        .route("/system/update", post(update_system_version))
+        .route("/system/rollback", post(rollback_system_version))
+        .route("/system/restart", post(restart_system))
+        .route("/system/update/jobs/{id}", get(get_system_job))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

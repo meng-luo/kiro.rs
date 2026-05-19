@@ -11,6 +11,9 @@ import type {
   AddCredentialResponse,
   CredentialTestRequest,
   SystemVersionResponse,
+  SystemOperationJob,
+  SystemUpdateRequest,
+  SystemRollbackRequest,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -131,6 +134,30 @@ export async function getSystemVersion(): Promise<SystemVersionResponse> {
 
 export async function checkSystemVersion(): Promise<SystemVersionResponse> {
   const { data } = await api.post<SystemVersionResponse>('/system/version/check')
+  return data
+}
+
+export async function updateSystemVersion(
+  payload: SystemUpdateRequest = {}
+): Promise<SystemOperationJob> {
+  const { data } = await api.post<SystemOperationJob>('/system/update', payload)
+  return data
+}
+
+export async function rollbackSystemVersion(
+  payload: SystemRollbackRequest = {}
+): Promise<SystemOperationJob> {
+  const { data } = await api.post<SystemOperationJob>('/system/rollback', payload)
+  return data
+}
+
+export async function restartSystem(): Promise<SystemOperationJob> {
+  const { data } = await api.post<SystemOperationJob>('/system/restart')
+  return data
+}
+
+export async function getSystemJob(jobId: string): Promise<SystemOperationJob> {
+  const { data } = await api.get<SystemOperationJob>(`/system/update/jobs/${jobId}`)
   return data
 }
 

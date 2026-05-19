@@ -1225,6 +1225,100 @@
       </section>
 
       <section class="section">
+        <h2>源仓库 PR 调研结论</h2>
+        <div class="callout.info">
+          截至 2026-05-19，已核对 <code>hank9999/kiro.rs</code> 的 open / closed PR。结论很明确：上游确实已经有人补过一批调度、管理端和验证能力，但这些改动大多是局部增强，还没有覆盖本次需求里的“CPA 式粘性路由 + sub2 式并发槽位 + Kiro 实际限频语义”这一整套闭环。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>PR</th>
+              <th>结论</th>
+              <th>可借鉴点</th>
+              <th>不足点</th>
+              <th>本项目取舍</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/63" target="_blank" rel="noreferrer">#63</a><br /><code>负载均衡和批量管理</code></td>
+              <td>已合并</td>
+              <td>把多账号调度、统计持久化、批量管理、管理面基础入口正式引入主线</td>
+              <td>当时的 balanced 还是“最少成功次数”思路，没有粘性路由、没有并发槽位、没有冷却回退</td>
+              <td>承认它是上游调度起点，但不够支撑当前需求</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/124" target="_blank" rel="noreferrer">#124</a><br /><code>balanced 改随机选择</code></td>
+              <td>未合并</td>
+              <td>说明上游已有共识：<code>success_count</code> 轮询太僵，纯最少次数不够自然</td>
+              <td>只是把“最少次数”换成“随机”，依然没有回答同一会话该粘哪一个、并发满了怎么办、全池冷却怎么办</td>
+              <td>不直接采用；随机只能是兜底，不是主调度策略</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/136" target="_blank" rel="noreferrer">#136</a><br /><code>API key 后缀指定凭证</code></td>
+              <td>未合并</td>
+              <td>允许外部系统显式命中某个账号，本质上接近“外部 pin”</td>
+              <td>需要下游主动传账号 ID；而当前线上对外只有一个 key，不能靠它完成 CPA 式粘性</td>
+              <td>可保留为调试/运维后门，但不能作为主方案</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/140" target="_blank" rel="noreferrer">#140</a><br /><code>RPM limit</code></td>
+              <td>进行中</td>
+              <td>补了限流规则、运行态、管理端编辑，以及“全体限流时等待最早恢复”这一层概念</td>
+              <td>核心假设仍然是“预定义窗口限流”。这更像 OpenAI / sub2 的规则系统，不是 Kiro 线上真实语义；日志已证明 Kiro 可以超额继续打，也不存在固定 5h / 7d 窗口</td>
+              <td>只借展示字段和状态表达，不把它的窗口模型当底层调度真相</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/111" target="_blank" rel="noreferrer">#111</a><br /><code>刷新失败禁用策略</code></td>
+              <td>已合并</td>
+              <td>把 <code>refresh_failure_count</code> 和普通调用失败拆开，禁用原因更清晰</td>
+              <td>它处理的是“Token 刷新连续失败”，不是“请求命中 429 / suspicious 后如何继续调度”；仍然偏硬禁用思路</td>
+              <td>字段和原因拆分值得保留，但不能替代冷却回退策略</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/108" target="_blank" rel="noreferrer">#108</a><br /><code>单账号强制刷新</code></td>
+              <td>未合并</td>
+              <td>说明上游也在补“单账号可操作性”</td>
+              <td>属于运维动作，不解决调度主脑问题</td>
+              <td>可作为后续管理面补充，不进入本次调度主线判断</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/40" target="_blank" rel="noreferrer">#40</a><br /><code>凭据验证 / 单账号验证</code></td>
+              <td>进行中</td>
+              <td>单账号验证入口、批量验证与结果分类，这和“测试一个账号到底能不能打”方向一致</td>
+              <td>验证本身不参与真实调度，不回答粘性命中、并发占槽、限频回退</td>
+              <td>交互可以借，语义仍按“单账号测试”处理，不包装成调度修复</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/163" target="_blank" rel="noreferrer">#163</a><br /><code>凭据管理增强</code></td>
+              <td>进行中</td>
+              <td>编辑、重登录、代理池、批量导入细节，适合增强管理面</td>
+              <td>侧重点是账号管理，不是调度选路和运行态退化策略</td>
+              <td>可单独吸收管理能力，不把它误判成调度修复</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/hank9999/kiro.rs/pull/34" target="_blank" rel="noreferrer">#34</a><br /><code>凭据卡片样式与余额刷新</code></td>
+              <td>未合并</td>
+              <td>说明上游前端有人持续补视觉和卡片信息密度</td>
+              <td>只改善显示，不改变调度行为</td>
+              <td>视觉不照搬，继续按当前 kiro-rs 前端骨架做增量改造</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout.warn" style="margin-top: 14px;">
+          上游 PR 里最接近本次需求的是 <code>#63</code>、<code>#124</code>、<code>#136</code>、<code>#140</code>、<code>#40</code>。但它们拼起来仍然缺三块关键能力：第一，会话级粘性路由；第二，账号并发槽位；第三，全池冷却时的软回退而不是直接宣告“全灭”。
+        </div>
+        <div class="callout.accent" style="margin-top: 14px;">
+          这也和本轮真实验证结果一致：test 实例已经承接线上流量，但当 19 个账号同时进入 <code>cooldown</code> 后，当前实现会把这些账号全部摘出可选集合，最终出现 <code>ready_ids = []</code>，并报“所有凭据均已禁用（19/20）”。这不是上游已有 PR 能直接解决的问题。
+        </div>
+        <ul>
+          <li>因此，本项目后续不应把“窗口限流配置”当成调度核心，而应把它降为展示层或附加约束层。</li>
+          <li>真正的核心仍然是：先按 CPA 风格做粘性选号，再叠加 sub2 风格并发槽位，最后在 Kiro 返回 429 / suspicious 时走软冷却和风险回退。</li>
+          <li>单账号测试、卡片状态翻译、运行态展示、批量恢复这些能力，上游 PR 可以提供局部参考，但不能替代调度主脑本身。</li>
+        </ul>
+      </section>
+
+      <section class="section">
         <h2>完整状态模型</h2>
         <div class="callout.accent">
           完整方案依然只是几个字段，只是要把它们放进明确的状态层里，而不是散着写。

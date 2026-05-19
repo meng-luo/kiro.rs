@@ -97,6 +97,26 @@ impl fmt::Display for DispatchState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchPath {
+    Preferred,
+    Sticky,
+    Balanced,
+    SoftFallback,
+}
+
+impl fmt::Display for DispatchPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            DispatchPath::Preferred => "preferred",
+            DispatchPath::Sticky => "sticky",
+            DispatchPath::Balanced => "balanced",
+            DispatchPath::SoftFallback => "soft_fallback",
+        };
+        write!(f, "{}", value)
+    }
+}
+
 /// 验证 refreshToken 的基本有效性
 pub(crate) fn validate_refresh_token(credentials: &KiroCredentials) -> anyhow::Result<()> {
     let refresh_token = credentials
@@ -462,6 +482,10 @@ struct CredentialEntry {
     recent_suspicious_count: u32,
     /// 最近一次被绑定的活跃时间
     sticky_detached: bool,
+    /// 最近一次选号路径
+    last_dispatch_path: Option<DispatchPath>,
+    /// 最近一次软回退时间
+    last_soft_fallback_at: Option<String>,
 }
 
 /// 禁用原因
@@ -561,6 +585,12 @@ pub struct CredentialEntrySnapshot {
     pub sticky_session_count: u32,
     /// 是否已解除粘性
     pub sticky_detached: bool,
+    /// 最近一次选号路径
+    pub dispatch_path: Option<String>,
+    /// 当前是否允许软回退
+    pub soft_fallback_eligible: bool,
+    /// 最近一次软回退时间
+    pub last_soft_fallback_at: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -663,6 +693,21 @@ pub struct CallContext {
     pub token: String,
     /// 当前请求占用的调度槽位
     pub lease: Option<DispatchLease>,
+    /// 选号路径
+    pub dispatch_path: DispatchPath,
+    /// 是否走软回退
+    pub used_soft_fallback: bool,
+    /// 账号开始请求时的状态
+    pub account_state_at_start: DispatchState,
+}
+
+#[derive(Clone)]
+struct SelectionResult {
+    id: u64,
+    credentials: KiroCredentials,
+    dispatch_path: DispatchPath,
+    used_soft_fallback: bool,
+    account_state_at_start: DispatchState,
 }
 
 impl MultiTokenManager {
@@ -724,6 +769,8 @@ impl MultiTokenManager {
                     recent_429_count: 0,
                     recent_suspicious_count: 0,
                     sticky_detached: false,
+                    last_dispatch_path: None,
+                    last_soft_fallback_at: None,
                 }
             })
             .collect();
@@ -821,7 +868,7 @@ impl MultiTokenManager {
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
-    fn select_next_credential(&self, options: &AcquireOptions) -> Option<(u64, KiroCredentials)> {
+    fn select_next_credential(&self, options: &AcquireOptions) -> Option<SelectionResult> {
         self.gc_sticky_bindings();
         let entries = self.entries.lock();
 
@@ -839,7 +886,13 @@ impl MultiTokenManager {
                         && !options.tried_account_ids.contains(&e.id)
                         && (!is_opus || e.credentials.supports_opus())
                 }) {
-                    return Some((entry.id, entry.credentials.clone()));
+                    return Some(SelectionResult {
+                        id: entry.id,
+                        credentials: entry.credentials.clone(),
+                        dispatch_path: DispatchPath::Preferred,
+                        used_soft_fallback: false,
+                        account_state_at_start: self.dispatch_state_of(entry, Utc::now()),
+                    });
                 }
                 if options.strict_preferred_account {
                     return None;
@@ -847,7 +900,6 @@ impl MultiTokenManager {
             }
         }
 
-        // 过滤可用凭据
         let available: Vec<_> = entries
             .iter()
             .filter(|e| {
@@ -864,7 +916,13 @@ impl MultiTokenManager {
 
         if let Some(preferred_account_id) = options.preferred_account_id {
             if let Some(entry) = available.iter().find(|e| e.id == preferred_account_id) {
-                return Some((entry.id, entry.credentials.clone()));
+                return Some(SelectionResult {
+                    id: entry.id,
+                    credentials: entry.credentials.clone(),
+                    dispatch_path: DispatchPath::Preferred,
+                    used_soft_fallback: false,
+                    account_state_at_start: self.dispatch_state_of(entry, Utc::now()),
+                });
             }
             if options.strict_preferred_account {
                 return None;
@@ -875,7 +933,13 @@ impl MultiTokenManager {
             if let Some(bound_id) = self.sticky_bindings.lock().get(session_key).map(|b| b.account_id)
             {
                 if let Some(entry) = available.iter().find(|e| e.id == bound_id) {
-                    return Some((entry.id, entry.credentials.clone()));
+                    return Some(SelectionResult {
+                        id: entry.id,
+                        credentials: entry.credentials.clone(),
+                        dispatch_path: DispatchPath::Sticky,
+                        used_soft_fallback: false,
+                        account_state_at_start: self.dispatch_state_of(entry, Utc::now()),
+                    });
                 }
             }
         }
@@ -883,14 +947,23 @@ impl MultiTokenManager {
         let mode = self.load_balancing_mode.lock().clone();
         let mode = mode.as_str();
 
-        match mode {
-            "balanced" => {
-                self.pick_round_robin_entry(&available)
-            }
-            _ => {
-                self.pick_priority_entry(&available)
-            }
+        let selected = match mode {
+            "balanced" => self.pick_round_robin_entry(&available),
+            _ => self.pick_priority_entry(&available),
+        };
+
+        if let Some((id, credentials)) = selected {
+            let entry = available.iter().find(|entry| entry.id == id)?;
+            return Some(SelectionResult {
+                id,
+                credentials,
+                dispatch_path: DispatchPath::Balanced,
+                used_soft_fallback: false,
+                account_state_at_start: self.dispatch_state_of(entry, Utc::now()),
+            });
         }
+
+        self.pick_soft_fallback_entry(&entries, is_opus, &options.tried_account_ids)
     }
 
     fn entry_schedulable(
@@ -971,6 +1044,81 @@ impl MultiTokenManager {
             .map(|entry| (entry.id, entry.credentials.clone()))
     }
 
+    fn pick_soft_fallback_entry(
+        &self,
+        entries: &[CredentialEntry],
+        is_opus: bool,
+        tried_account_ids: &HashSet<u64>,
+    ) -> Option<SelectionResult> {
+        let now = Utc::now();
+        let normal_group: Vec<_> = entries
+            .iter()
+            .filter(|entry| self.soft_fallback_eligible(entry, is_opus, tried_account_ids, false, now))
+            .collect();
+
+        if let Some((id, credentials)) = self.pick_round_robin_entry(&normal_group) {
+            let entry = normal_group.iter().find(|entry| entry.id == id)?;
+            return Some(SelectionResult {
+                id,
+                credentials,
+                dispatch_path: DispatchPath::SoftFallback,
+                used_soft_fallback: true,
+                account_state_at_start: self.dispatch_state_of(entry, now),
+            });
+        }
+
+        let suspicious_group: Vec<_> = entries
+            .iter()
+            .filter(|entry| self.soft_fallback_eligible(entry, is_opus, tried_account_ids, true, now))
+            .collect();
+
+        if let Some((id, credentials)) = self.pick_round_robin_entry(&suspicious_group) {
+            let entry = suspicious_group.iter().find(|entry| entry.id == id)?;
+            return Some(SelectionResult {
+                id,
+                credentials,
+                dispatch_path: DispatchPath::SoftFallback,
+                used_soft_fallback: true,
+                account_state_at_start: self.dispatch_state_of(entry, now),
+            });
+        }
+
+        None
+    }
+
+    fn soft_fallback_eligible(
+        &self,
+        entry: &CredentialEntry,
+        is_opus: bool,
+        tried_account_ids: &HashSet<u64>,
+        allow_suspicious: bool,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if entry.disabled || tried_account_ids.contains(&entry.id) {
+            return false;
+        }
+        if entry.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
+            return false;
+        }
+        if is_opus && !entry.credentials.supports_opus() {
+            return false;
+        }
+        if entry.inflight >= entry.max_concurrent {
+            return false;
+        }
+        if !entry
+            .cooldown_until
+            .is_some_and(|deadline| deadline > now)
+        {
+            return false;
+        }
+        match entry.last_rate_limit_kind {
+            Some(RateLimitKind::Normal429) => true,
+            Some(RateLimitKind::SuspiciousActivity) => allow_suspicious,
+            _ => false,
+        }
+    }
+
     fn gc_sticky_bindings(&self) {
         let now = Utc::now();
         self.sticky_bindings
@@ -1002,6 +1150,16 @@ impl MultiTokenManager {
             .values()
             .filter(|binding| binding.account_id == account_id)
             .count() as u32
+    }
+
+    fn mark_dispatch_selected(&self, id: u64, path: DispatchPath, used_soft_fallback: bool) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.last_dispatch_path = Some(path);
+            if used_soft_fallback {
+                entry.last_soft_fallback_at = Some(Utc::now().to_rfc3339());
+            }
+        }
     }
 
     /// 获取 API 调用上下文
@@ -1037,7 +1195,7 @@ impl MultiTokenManager {
                 );
             }
 
-            let (id, credentials) = {
+            let selection = {
                 let is_balanced = self.load_balancing_mode.lock().as_str() == "balanced";
 
                 // balanced 模式：每次请求都重新均衡选择，不固定 current_id
@@ -1061,7 +1219,13 @@ impl MultiTokenManager {
                                     &options.tried_account_ids,
                                 )
                         })
-                        .map(|e| (e.id, e.credentials.clone()))
+                        .map(|e| SelectionResult {
+                            id: e.id,
+                            credentials: e.credentials.clone(),
+                            dispatch_path: DispatchPath::Balanced,
+                            used_soft_fallback: false,
+                            account_state_at_start: self.dispatch_state_of(e, Utc::now()),
+                        })
                 };
 
                 if let Some(hit) = current_hit {
@@ -1091,21 +1255,27 @@ impl MultiTokenManager {
                         }
                     }
 
-                    if let Some((new_id, new_creds)) = best {
+                    if let Some(best) = best {
                         // 更新 current_id
                         let mut current_id = self.current_id.lock();
-                        *current_id = new_id;
-                        (new_id, new_creds)
+                        *current_id = best.id;
+                        best
                     } else {
                         let entries = self.entries.lock();
                         // 注意：必须在 bail! 之前计算 available_count，
                         // 因为 available_count() 会尝试获取 entries 锁，
                         // 而此时我们已经持有该锁，会导致死锁
                         let available = entries.iter().filter(|e| !e.disabled).count();
-                        anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
+                        anyhow::bail!(
+                            "当前没有可直接调度的凭据（启用: {}/{}，可能全部处于冷却、阻塞或并发饱和）",
+                            available,
+                            total
+                        );
                     }
                 }
             };
+            let id = selection.id;
+            let credentials = selection.credentials.clone();
 
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
@@ -1115,6 +1285,14 @@ impl MultiTokenManager {
                     }
                     self.acquire_slot(id, options.runtime_probe)?;
                     ctx.lease = Some(DispatchLease::new(id));
+                    ctx.dispatch_path = selection.dispatch_path;
+                    ctx.used_soft_fallback = selection.used_soft_fallback;
+                    ctx.account_state_at_start = selection.account_state_at_start;
+                    self.mark_dispatch_selected(
+                        id,
+                        selection.dispatch_path,
+                        selection.used_soft_fallback,
+                    );
                     return Ok(ctx);
                 }
                 Err(e) => {
@@ -1133,7 +1311,7 @@ impl MultiTokenManager {
                         return Err(e);
                     }
                     if !has_available {
-                        anyhow::bail!("所有凭据均已禁用（0/{}）", total);
+                        anyhow::bail!("当前没有可继续切换的凭据（0/{})", total);
                     }
                 }
             }
@@ -1188,6 +1366,9 @@ impl MultiTokenManager {
                 credentials: credentials.clone(),
                 token,
                 lease: None,
+                dispatch_path: DispatchPath::Preferred,
+                used_soft_fallback: false,
+                account_state_at_start: DispatchState::Ready,
             });
         }
 
@@ -1258,6 +1439,9 @@ impl MultiTokenManager {
             credentials: creds,
             token,
             lease: None,
+            dispatch_path: DispatchPath::Balanced,
+            used_soft_fallback: false,
+            account_state_at_start: DispatchState::Ready,
         })
     }
 
@@ -1876,6 +2060,15 @@ impl MultiTokenManager {
                     recent_suspicious_count: e.recent_suspicious_count,
                     sticky_session_count: self.sticky_count_for(e.id),
                     sticky_detached: e.sticky_detached,
+                    dispatch_path: e.last_dispatch_path.map(|path| path.to_string()),
+                    soft_fallback_eligible: self.soft_fallback_eligible(
+                        e,
+                        e.credentials.supports_opus(),
+                        &HashSet::new(),
+                        true,
+                        now,
+                    ),
+                    last_soft_fallback_at: e.last_soft_fallback_at.clone(),
                 })
                 .collect(),
             current_id,
@@ -2243,6 +2436,8 @@ impl MultiTokenManager {
                 recent_429_count: 0,
                 recent_suspicious_count: 0,
                 sticky_detached: false,
+                last_dispatch_path: None,
+                last_soft_fallback_at: None,
             });
         }
 

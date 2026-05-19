@@ -27,6 +27,21 @@ use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::websearch;
 
+pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state
+        .kiro_provider
+        .as_ref()
+        .map(|provider| provider.token_manager().snapshot());
+    Json(json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "currentId": snapshot.as_ref().map(|item| item.current_id),
+        "total": snapshot.as_ref().map(|item| item.total).unwrap_or(0),
+        "available": snapshot.as_ref().map(|item| item.available).unwrap_or(0),
+        "checkedAt": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
 /// 将 KiroProvider 错误映射为 HTTP 响应
 fn map_provider_error(err: Error) -> Response {
     let err_str = err.to_string();

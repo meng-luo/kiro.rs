@@ -11,6 +11,63 @@ pub enum TlsBackend {
     NativeTls,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_update_channel")]
+    pub channel: String,
+    #[serde(default = "default_update_github_repo")]
+    pub github_repo: String,
+    #[serde(default = "default_update_artifact_name_template")]
+    pub artifact_name_template: String,
+    #[serde(default = "default_update_download_dir")]
+    pub download_dir: String,
+    #[serde(default = "default_update_backup_dir")]
+    pub backup_dir: String,
+    #[serde(default = "default_update_max_backups")]
+    pub max_backups: usize,
+    #[serde(default = "default_update_healthcheck_url")]
+    pub healthcheck_url: String,
+    #[serde(default = "default_update_healthcheck_timeout_seconds")]
+    pub healthcheck_timeout_seconds: u64,
+    #[serde(default = "default_update_restart_mode")]
+    pub restart_mode: String,
+    #[serde(default)]
+    pub restart_command: String,
+    #[serde(default)]
+    pub rollback_restart_command: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub allow_prerelease: bool,
+    #[serde(default = "default_update_current_deployment_mode")]
+    pub current_deployment_mode: String,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel: default_update_channel(),
+            github_repo: default_update_github_repo(),
+            artifact_name_template: default_update_artifact_name_template(),
+            download_dir: default_update_download_dir(),
+            backup_dir: default_update_backup_dir(),
+            max_backups: default_update_max_backups(),
+            healthcheck_url: default_update_healthcheck_url(),
+            healthcheck_timeout_seconds: default_update_healthcheck_timeout_seconds(),
+            restart_mode: default_update_restart_mode(),
+            restart_command: String::new(),
+            rollback_restart_command: String::new(),
+            proxy_url: None,
+            allow_prerelease: false,
+            current_deployment_mode: default_update_current_deployment_mode(),
+        }
+    }
+}
+
 impl Default for TlsBackend {
     fn default() -> Self {
         Self::Rustls
@@ -109,6 +166,10 @@ pub struct Config {
     #[serde(default)]
     pub endpoints: HashMap<String, serde_json::Value>,
 
+    /// 在线更新 / 回滚配置
+    #[serde(default)]
+    pub update: UpdateConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -159,6 +220,46 @@ fn default_endpoint() -> String {
     crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
 }
 
+fn default_update_channel() -> String {
+    "stable".to_string()
+}
+
+fn default_update_github_repo() -> String {
+    "shusfun/kiro-rs".to_string()
+}
+
+fn default_update_artifact_name_template() -> String {
+    "kiro-rs-{version}-{target}.tar.gz".to_string()
+}
+
+fn default_update_download_dir() -> String {
+    "./downloads".to_string()
+}
+
+fn default_update_backup_dir() -> String {
+    "./backups".to_string()
+}
+
+fn default_update_max_backups() -> usize {
+    5
+}
+
+fn default_update_healthcheck_url() -> String {
+    "http://127.0.0.1:8991/health".to_string()
+}
+
+fn default_update_healthcheck_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_update_restart_mode() -> String {
+    "command".to_string()
+}
+
+fn default_update_current_deployment_mode() -> String {
+    "binary".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -184,6 +285,7 @@ impl Default for Config {
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
+            update: UpdateConfig::default(),
             config_path: None,
         }
     }

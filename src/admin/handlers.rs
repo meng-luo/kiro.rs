@@ -12,6 +12,7 @@ use super::{
     types::{
         AddCredentialRequest, CredentialTestRequest, SetDisabledRequest,
         SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
+        SystemRollbackRequest, SystemUpdateRequest,
     },
 };
 
@@ -213,5 +214,49 @@ pub async fn get_system_version(State(state): State<AdminState>) -> impl IntoRes
 /// POST /api/admin/system/version/check
 /// 检查系统版本信息
 pub async fn check_system_version(State(state): State<AdminState>) -> impl IntoResponse {
-    Json(state.service.get_system_version())
+    match state.service.check_system_version().await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/system/update
+pub async fn update_system_version(
+    State(state): State<AdminState>,
+    Json(payload): Json<SystemUpdateRequest>,
+) -> impl IntoResponse {
+    match state.service.start_system_update(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/system/rollback
+pub async fn rollback_system_version(
+    State(state): State<AdminState>,
+    Json(payload): Json<SystemRollbackRequest>,
+) -> impl IntoResponse {
+    match state.service.start_system_rollback(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/system/restart
+pub async fn restart_system(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.start_system_restart().await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/system/update/jobs/:id
+pub async fn get_system_job(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.service.get_system_job(&id) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
 }

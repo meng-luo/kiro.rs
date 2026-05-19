@@ -14,8 +14,12 @@ import {
   setLoadBalancingMode,
   getSystemVersion,
   checkSystemVersion,
+  updateSystemVersion,
+  rollbackSystemVersion,
+  restartSystem,
+  getSystemJob,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, SystemRollbackRequest, SystemUpdateRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -158,6 +162,49 @@ export function useCheckSystemVersion() {
     mutationFn: checkSystemVersion,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['systemVersion'] })
+    },
+  })
+}
+
+export function useUpdateSystemVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload?: SystemUpdateRequest) => updateSystemVersion(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['systemVersion'] })
+    },
+  })
+}
+
+export function useRollbackSystemVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload?: SystemRollbackRequest) => rollbackSystemVersion(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['systemVersion'] })
+    },
+  })
+}
+
+export function useRestartSystem() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: restartSystem,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['systemVersion'] })
+    },
+  })
+}
+
+export function useSystemJob(jobId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ['systemJob', jobId],
+    queryFn: () => getSystemJob(jobId!),
+    enabled: enabled && Boolean(jobId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      if (!status) return 2000
+      return status === 'running' ? 2000 : false
     },
   })
 }

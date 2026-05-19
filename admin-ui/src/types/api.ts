@@ -16,6 +16,21 @@ export interface SystemVersionResponse {
   canSelfUpdate: boolean
   updateHint: string
   checkedAt: string
+  currentCommit?: string | null
+  channel?: string | null
+  latestJob?: SystemOperationJob | null
+}
+
+export interface SystemOperationJob {
+  jobId: string
+  operation: string
+  status: 'idle' | 'running' | 'succeeded' | 'failed' | 'rolled_back'
+  targetVersion?: string | null
+  currentVersion?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  message: string
+  canRetry: boolean
 }
 
 // 单个凭据状态
@@ -48,6 +63,9 @@ export interface CredentialStatusItem {
   recentSuspiciousCount: number
   stickySessionCount: number
   stickyDetached: boolean
+  dispatchPath?: 'preferred' | 'sticky' | 'balanced' | 'soft_fallback'
+  softFallbackEligible: boolean
+  lastSoftFallbackAt?: string | null
 }
 
 // 余额响应
@@ -97,6 +115,9 @@ export interface CredentialTestEvent {
   type: 'test_start' | 'content' | 'tool_use' | 'context_usage' | 'upstream_error' | 'upstream_exception' | 'test_complete'
   accountId?: number
   model?: string
+  dispatchPath?: 'preferred' | 'sticky' | 'balanced' | 'soft_fallback'
+  usedSoftFallback?: boolean
+  accountStateAtStart?: string
   text?: string
   name?: string
   input?: string
@@ -133,4 +154,12 @@ export interface AddCredentialResponse {
   message: string
   credentialId: number
   email?: string
+}
+
+export interface SystemUpdateRequest {
+  version?: string
+}
+
+export interface SystemRollbackRequest {
+  backupName?: string
 }

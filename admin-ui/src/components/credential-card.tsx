@@ -217,6 +217,38 @@ function probeStatusText(credential: CredentialStatusItem) {
   }
 }
 
+function dispatchPathLabel(path?: CredentialStatusItem['dispatchPath']) {
+  switch (path) {
+    case 'preferred':
+      return { text: '指定账号', title: '这次请求固定命中当前账号。' }
+    case 'sticky':
+      return { text: '会话粘性', title: '这次请求沿用了已有会话绑定。' }
+    case 'balanced':
+      return { text: '均衡分配', title: '这次请求按当前调度策略自动选中。' }
+    case 'soft_fallback':
+      return { text: '软回退', title: '常规可用账号不足时，临时回退到轻度限频账号。' }
+    default:
+      return { text: '暂无记录', title: '还没有最近一次调度路径记录。' }
+  }
+}
+
+function accountStateLabel(state?: string) {
+  switch (state) {
+    case 'ready':
+      return { text: '可直接承接', title: '开始请求时账号可直接接单。' }
+    case 'saturated':
+      return { text: '并发已满', title: '开始请求时账号并发已满。' }
+    case 'cooldown':
+      return { text: '冷却中', title: '开始请求时账号处于本地冷却。' }
+    case 'blocked':
+      return { text: '本地阻塞', title: '开始请求时账号处于本地阻塞。' }
+    case 'disabled':
+      return { text: '已停用', title: '开始请求时账号已停用。' }
+    default:
+      return { text: state || '未知', title: state || '开始请求时的账号状态。' }
+  }
+}
+
 function terminalClass(event: CredentialTestEvent) {
   switch (event.type) {
     case 'content':
@@ -238,7 +270,7 @@ function terminalClass(event: CredentialTestEvent) {
 function terminalText(event: CredentialTestEvent) {
   switch (event.type) {
     case 'test_start':
-      return `开始测试，模型：${event.model ?? '-'}`
+      return `开始测试，模型：${event.model ?? '-'}，命中方式：${dispatchPathLabel(event.dispatchPath).text}，起始状态：${accountStateLabel(event.accountStateAtStart).text}${event.usedSoftFallback ? '，已走软回退' : ''}`
     case 'content':
       return event.text ?? ''
     case 'tool_use':
@@ -286,6 +318,7 @@ export function CredentialCard({
   const authMethod = authMethodLabel(credential.authMethod)
   const disabledReason = disabledReasonLabel(credential.disabledReason)
   const balanceMeta = balanceLabel(credential)
+  const dispatchPathMeta = dispatchPathLabel(credential.dispatchPath)
   const loadPercentage = credential.maxConcurrent > 0
     ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
     : 0
@@ -318,6 +351,11 @@ export function CredentialCard({
           : '当前仍保留会话绑定，用于同会话稳定命中。',
       },
       {
+        label: '最近调度',
+        value: dispatchPathMeta.text,
+        title: dispatchPathMeta.title,
+      },
+      {
         label: credential.cooldownRemainingMs ? '冷却剩余' : '最近 429',
         value: credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : `${credential.recent429Count} 次`,
         title: credential.cooldownRemainingMs
@@ -339,6 +377,13 @@ export function CredentialCard({
         value: formatLastUsed(credential.lastUsedAt),
         title: '最后一次承接请求的时间。',
       },
+      {
+        label: '软回退资格',
+        value: credential.softFallbackEligible ? '当前允许' : '当前不参与',
+        title: credential.softFallbackEligible
+          ? '当常规可用账号不足时，这个账号允许进入软回退候选。'
+          : '当前状态下，这个账号不会进入软回退候选。',
+      },
     ]
 
     if (balance || loadingBalance) {
@@ -354,7 +399,7 @@ export function CredentialCard({
     }
 
     return items
-  }, [balance, balanceMeta.text, credential, loadingBalance])
+  }, [balance, balanceMeta.text, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance])
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -501,6 +546,12 @@ export function CredentialCard({
                       {authMethod.text}
                     </Badge>
                   )}
+                  <Badge
+                    variant={credential.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'}
+                    title={dispatchPathMeta.title}
+                  >
+                    {dispatchPathMeta.text}
+                  </Badge>
                   <Badge variant="outline" title="该账号当前使用的接入端点。">
                     {credential.endpoint}
                   </Badge>
@@ -515,6 +566,11 @@ export function CredentialCard({
                   <span title={credential.stickyDetached ? '风控触发后，会话已自动切走。' : '当前仍保留会话绑定。'}>
                     {credential.stickyDetached ? '已解除粘性' : `${credential.stickySessionCount} 个活跃会话`}
                   </span>
+                  {credential.lastSoftFallbackAt && (
+                    <span title="最近一次通过软回退再次接单的时间。">
+                      最近软回退 {formatLastUsed(credential.lastSoftFallbackAt)}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -640,6 +696,17 @@ export function CredentialCard({
                 <div className="text-xs text-muted-foreground">粘性状态</div>
                 <div className="mt-1 text-sm font-medium">
                   {credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个活跃会话`}
+                </div>
+              </div>
+              <div className="rounded-md border bg-background px-3 py-3">
+                <div className="text-xs text-muted-foreground" title={dispatchPathMeta.title}>最近调度路径</div>
+                <div className="mt-1 text-sm font-medium">{dispatchPathMeta.text}</div>
+              </div>
+              <div className="rounded-md border bg-background px-3 py-3">
+                <div className="text-xs text-muted-foreground">软回退资格</div>
+                <div className="mt-1 text-sm font-medium">
+                  {credential.softFallbackEligible ? '当前允许' : '当前不参与'}
+                  {credential.lastSoftFallbackAt ? ` · 最近 ${formatLastUsed(credential.lastSoftFallbackAt)}` : ''}
                 </div>
               </div>
             </div>

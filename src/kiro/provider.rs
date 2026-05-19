@@ -48,6 +48,9 @@ pub struct KiroProvider {
 pub struct ProviderResponse {
     pub response: reqwest::Response,
     pub lease: DispatchLease,
+    pub dispatch_path: String,
+    pub used_soft_fallback: bool,
+    pub account_state_at_start: String,
 }
 
 impl KiroProvider {
@@ -411,6 +414,9 @@ impl KiroProvider {
                 return Ok(ProviderResponse {
                     response,
                     lease,
+                    dispatch_path: ctx.dispatch_path.to_string(),
+                    used_soft_fallback: ctx.used_soft_fallback,
+                    account_state_at_start: ctx.account_state_at_start.to_string(),
                 });
             }
 

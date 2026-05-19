@@ -2,6 +2,20 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemOperationJobResponse {
+    pub job_id: String,
+    pub operation: String,
+    pub status: String,
+    pub target_version: Option<String>,
+    pub current_version: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub message: String,
+    pub can_retry: bool,
+}
+
 // ============ 凭据状态 ============
 
 /// 系统版本信息响应
@@ -28,6 +42,15 @@ pub struct SystemVersionResponse {
     pub update_hint: String,
     /// 最近一次检查时间（RFC3339）
     pub checked_at: String,
+    /// 当前构建 commit（如可得）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_commit: Option<String>,
+    /// 发布渠道
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// 最近一次系统任务
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_job: Option<SystemOperationJobResponse>,
 }
 
 /// 所有凭据状态响应
@@ -108,6 +131,14 @@ pub struct CredentialStatusItem {
     pub sticky_session_count: u32,
     /// 是否已解除粘性
     pub sticky_detached: bool,
+    /// 本次展示口径下的选号路径
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_path: Option<String>,
+    /// 当前是否允许软回退
+    pub soft_fallback_eligible: bool,
+    /// 最近一次软回退时间（RFC3339）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_soft_fallback_at: Option<String>,
 }
 
 // ============ 操作请求 ============
@@ -145,6 +176,20 @@ pub struct CredentialTestRequest {
     /// 测试提示词
     #[serde(default)]
     pub prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemUpdateRequest {
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemRollbackRequest {
+    #[serde(default)]
+    pub backup_name: Option<String>,
 }
 
 /// 添加凭据请求
