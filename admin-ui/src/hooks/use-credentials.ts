@@ -2,7 +2,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getCredentials,
   setCredentialDisabled,
+  setCredentialMaxConcurrent,
   setCredentialPriority,
+  recoverCredential,
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
@@ -52,6 +54,27 @@ export function useSetPriority() {
   return useMutation({
     mutationFn: ({ id, priority }: { id: number; priority: number }) =>
       setCredentialPriority(id, priority),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useSetMaxConcurrent() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, maxConcurrent }: { id: number; maxConcurrent: number }) =>
+      setCredentialMaxConcurrent(id, maxConcurrent),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useRecoverCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => recoverCredential(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

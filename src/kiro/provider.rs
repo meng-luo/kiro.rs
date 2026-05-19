@@ -129,6 +129,15 @@ impl KiroProvider {
         self.call_api_with_retry(request_body, true).await
     }
 
+    pub async fn call_api_stream_for_account(
+        &self,
+        request_body: &str,
+        options: AcquireOptions,
+    ) -> anyhow::Result<ProviderResponse> {
+        self.call_api_with_retry_and_options(request_body, true, Some(options))
+            .await
+    }
+
     /// 发送 MCP API 请求（WebSearch 等工具调用）
     pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
         self.call_mcp_with_retry(request_body).await
@@ -290,6 +299,16 @@ impl KiroProvider {
         request_body: &str,
         is_stream: bool,
     ) -> anyhow::Result<ProviderResponse> {
+        self.call_api_with_retry_and_options(request_body, is_stream, None)
+            .await
+    }
+
+    async fn call_api_with_retry_and_options(
+        &self,
+        request_body: &str,
+        is_stream: bool,
+        base_options: Option<AcquireOptions>,
+    ) -> anyhow::Result<ProviderResponse> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
@@ -300,11 +319,17 @@ impl KiroProvider {
         let model = Self::extract_model_from_request(request_body);
         let session_key = Self::extract_session_key(request_body);
         let mut tried_account_ids: HashSet<u64> = HashSet::new();
+        let mut base_options = base_options.unwrap_or_else(|| AcquireOptions::new(model.clone()));
+        if base_options.model.is_none() {
+            base_options.model = model.clone();
+        }
+        if base_options.session_key.is_none() {
+            base_options.session_key = session_key.clone();
+        }
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
-            let mut acquire_options = AcquireOptions::new(model.clone());
-            acquire_options.session_key = session_key.clone();
+            let mut acquire_options = base_options.clone();
             acquire_options.tried_account_ids = tried_account_ids.clone();
             let mut ctx = match self
                 .token_manager

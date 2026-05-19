@@ -128,6 +128,25 @@ pub struct SetPriorityRequest {
     pub priority: u32,
 }
 
+/// 修改并发上限请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMaxConcurrentRequest {
+    /// 新并发上限
+    pub max_concurrent: u32,
+}
+
+/// 单账号测试请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialTestRequest {
+    /// 测试模型 ID
+    pub model_id: String,
+    /// 测试提示词
+    #[serde(default)]
+    pub prompt: String,
+}
+
 /// 添加凭据请求
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

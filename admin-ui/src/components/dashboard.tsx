@@ -6,6 +6,14 @@ import { storage } from '@/lib/storage'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { CredentialCard } from '@/components/credential-card'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
@@ -24,6 +32,7 @@ interface DashboardProps {
 export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
+  const [versionDialogOpen, setVersionDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
@@ -65,7 +74,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
   const cooldownCredentialCount = data?.credentials.filter(credential => credential.dispatchState === 'cooldown').length || 0
   const saturatedCredentialCount = data?.credentials.filter(credential => credential.dispatchState === 'saturated').length || 0
-  const blockedCredentialCount = data?.credentials.filter(credential => credential.dispatchState === 'blocked' && !credential.disabled).length || 0
+  const blockedCredentialCount = data?.credentials.filter(
+    credential => credential.dispatchState === 'blocked' && !credential.disabled
+  ).length || 0
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
     return Boolean(credential?.disabled)
@@ -564,9 +575,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <Button
               variant="outline"
               size="sm"
-              onClick={handleCheckVersion}
-              disabled={isLoadingVersion || isCheckingVersion}
-              title="检查版本信息"
+              onClick={() => setVersionDialogOpen(true)}
+              disabled={isLoadingVersion}
+              title="查看版本信息"
             >
               <BadgeInfo className="h-4 w-4 mr-2" />
               {isLoadingVersion ? '版本...' : (systemVersion ? `${systemVersion.currentVersion}` : '版本')}
@@ -596,7 +607,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       {/* 主内容 */}
       <main className="container mx-auto px-4 md:px-8 py-6">
         {/* 统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6 mb-6">
+        <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-7 mb-6">
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -660,6 +671,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
               <div className="text-2xl font-bold text-orange-600">{blockedCredentialCount}</div>
             </CardContent>
           </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                已禁用
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-slate-600">{disabledCredentialCount}</div>
+            </CardContent>
+          </Card>
         </div>
 
         {/* 凭据列表 */}
@@ -676,38 +697,47 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 </div>
               )}
             </div>
-            <div className="flex gap-2">
-              {selectedIds.size > 0 && (
-                <>
-                  <Button onClick={handleBatchVerify} size="sm" variant="outline">
-                    <CheckCircle2 className="h-4 w-4 mr-2" />
-                    批量验活
-                  </Button>
-                  <Button
-                    onClick={handleBatchForceRefresh}
-                    size="sm"
-                    variant="outline"
-                    disabled={batchRefreshing}
-                  >
-                    <RefreshCw className={`h-4 w-4 mr-2 ${batchRefreshing ? 'animate-spin' : ''}`} />
-                    {batchRefreshing ? `刷新中... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
-                  </Button>
-                  <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
-                    <RotateCcw className="h-4 w-4 mr-2" />
-                    恢复异常
-                  </Button>
-                  <Button
-                    onClick={handleBatchDelete}
-                    size="sm"
-                    variant="destructive"
-                    disabled={selectedDisabledCount === 0}
-                    title={selectedDisabledCount === 0 ? '只能删除已禁用凭据' : undefined}
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    批量删除
-                  </Button>
-                </>
-              )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={handleBatchVerify}
+                size="sm"
+                variant="outline"
+                disabled={selectedIds.size === 0}
+                title={selectedIds.size === 0 ? '请先选择要巡检的账号' : undefined}
+              >
+                <CheckCircle2 className="h-4 w-4 mr-2" />
+                批量验活
+              </Button>
+              <Button
+                onClick={handleBatchForceRefresh}
+                size="sm"
+                variant="outline"
+                disabled={selectedIds.size === 0 || batchRefreshing}
+                title={selectedIds.size === 0 ? '请先选择要刷新的账号' : undefined}
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${batchRefreshing ? 'animate-spin' : ''}`} />
+                {batchRefreshing ? `刷新中... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
+              </Button>
+              <Button
+                onClick={handleBatchResetFailure}
+                size="sm"
+                variant="outline"
+                disabled={selectedIds.size === 0}
+                title={selectedIds.size === 0 ? '请先选择要恢复的账号' : undefined}
+              >
+                <RotateCcw className="h-4 w-4 mr-2" />
+                恢复异常
+              </Button>
+              <Button
+                onClick={handleBatchDelete}
+                size="sm"
+                variant="destructive"
+                disabled={selectedIds.size === 0 || selectedDisabledCount === 0}
+                title={selectedIds.size === 0 ? '请先选择要删除的账号' : (selectedDisabledCount === 0 ? '只能删除已禁用账号' : undefined)}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                批量删除
+              </Button>
               {verifying && !verifyDialogOpen && (
                 <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary">
                   <CheckCircle2 className="h-4 w-4 mr-2 animate-spin" />
@@ -838,33 +868,47 @@ export function Dashboard({ onLogout }: DashboardProps) {
         onCancel={handleCancelVerify}
       />
 
-      {/* 版本信息提示 */}
-      {systemVersion && (
-        <div className="fixed bottom-4 right-4 z-40 max-w-md">
-          <Card className="shadow-lg border-muted/40">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <BadgeInfo className="h-4 w-4" />
-                版本信息
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">当前版本</span>
-                <span className="font-medium">{systemVersion.currentVersion}</span>
+      <Dialog open={versionDialogOpen} onOpenChange={setVersionDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>版本信息</DialogTitle>
+            <DialogDescription>
+              当前构建、发布说明和升级条件都集中在这里查看。
+            </DialogDescription>
+          </DialogHeader>
+          {systemVersion ? (
+            <div className="space-y-4 text-sm">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-md border bg-muted/20 px-3 py-3">
+                  <div className="text-xs text-muted-foreground">当前版本</div>
+                  <div className="mt-1 font-medium">{systemVersion.currentVersion}</div>
+                </div>
+                <div className="rounded-md border bg-muted/20 px-3 py-3">
+                  <div className="text-xs text-muted-foreground">最新版本</div>
+                  <div className="mt-1 font-medium">{systemVersion.latestVersion}</div>
+                </div>
+                <div className="rounded-md border bg-muted/20 px-3 py-3">
+                  <div className="text-xs text-muted-foreground">部署方式</div>
+                  <div className="mt-1 font-medium">{systemVersion.deploymentMode}</div>
+                </div>
+                <div className="rounded-md border bg-muted/20 px-3 py-3">
+                  <div className="text-xs text-muted-foreground">在线更新</div>
+                  <div className="mt-1">
+                    <Badge variant={systemVersion.canSelfUpdate ? 'success' : 'outline'}>
+                      {systemVersion.canSelfUpdate ? '可用' : '不可用'}
+                    </Badge>
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">部署方式</span>
-                <span className="font-medium">{systemVersion.deploymentMode}</span>
+              <div className="rounded-md border bg-muted/20 px-3 py-3">
+                <div className="text-xs text-muted-foreground">升级提示</div>
+                <div className="mt-1 leading-6 text-foreground">{systemVersion.updateHint}</div>
               </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">在线更新</span>
-                <Badge variant={systemVersion.canSelfUpdate ? 'success' : 'outline'}>
-                  {systemVersion.canSelfUpdate ? '可用' : '不可用'}
-                </Badge>
-              </div>
-              <div className="rounded-md bg-muted p-3 text-muted-foreground">
-                {systemVersion.updateHint}
+              <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                <span>检查时间 {new Date(systemVersion.checkedAt).toLocaleString()}</span>
+                {systemVersion.latestPublishedAt && (
+                  <span>发布时间 {new Date(systemVersion.latestPublishedAt).toLocaleString()}</span>
+                )}
               </div>
               {systemVersion.releaseNotesUrl && (
                 <a
@@ -877,10 +921,23 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   <ArrowUpRight className="h-3.5 w-3.5" />
                 </a>
               )}
-            </CardContent>
-          </Card>
-        </div>
-      )}
+            </div>
+          ) : (
+            <div className="rounded-md border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+              版本信息暂时不可用。
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setVersionDialogOpen(false)}>
+              关闭
+            </Button>
+            <Button onClick={handleCheckVersion} disabled={isCheckingVersion}>
+              <RefreshCw className={`h-4 w-4 ${isCheckingVersion ? 'animate-spin' : ''}`} />
+              {isCheckingVersion ? '检查中...' : '重新检查'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

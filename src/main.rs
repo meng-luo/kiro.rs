@@ -158,6 +158,8 @@ async fn main() {
     });
 
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
+    let kiro_provider = Arc::new(kiro_provider);
+    let provider_for_admin = kiro_provider.clone();
     let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
         Some(kiro_provider),
@@ -177,8 +179,11 @@ async fn main() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
             anthropic_app
         } else {
-            let admin_service =
-                admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
+            let admin_service = admin::AdminService::new(
+                token_manager.clone(),
+                provider_for_admin.clone(),
+                endpoint_names.clone(),
+            );
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 

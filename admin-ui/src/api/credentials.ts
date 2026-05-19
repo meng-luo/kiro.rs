@@ -4,10 +4,12 @@ import type {
   CredentialsStatusResponse,
   BalanceResponse,
   SuccessResponse,
+  SetMaxConcurrentRequest,
   SetDisabledRequest,
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  CredentialTestRequest,
   SystemVersionResponse,
 } from '@/types/api'
 
@@ -55,6 +57,22 @@ export async function setCredentialPriority(
     `/credentials/${id}/priority`,
     { priority } as SetPriorityRequest
   )
+  return data
+}
+
+export async function setCredentialMaxConcurrent(
+  id: number,
+  maxConcurrent: number
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(
+    `/credentials/${id}/max-concurrent`,
+    { maxConcurrent } as SetMaxConcurrentRequest
+  )
+  return data
+}
+
+export async function recoverCredential(id: number): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/recover`)
   return data
 }
 
@@ -114,4 +132,19 @@ export async function getSystemVersion(): Promise<SystemVersionResponse> {
 export async function checkSystemVersion(): Promise<SystemVersionResponse> {
   const { data } = await api.post<SystemVersionResponse>('/system/version/check')
   return data
+}
+
+export async function testCredential(
+  id: number,
+  payload: CredentialTestRequest
+): Promise<Response> {
+  const apiKey = storage.getApiKey()
+  return fetch(`/api/admin/credentials/${id}/test`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'x-api-key': apiKey } : {}),
+    },
+    body: JSON.stringify(payload),
+  })
 }

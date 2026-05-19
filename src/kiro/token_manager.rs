@@ -582,6 +582,9 @@ pub struct AcquireOptions {
     pub model: Option<String>,
     pub session_key: Option<String>,
     pub tried_account_ids: HashSet<u64>,
+    pub preferred_account_id: Option<u64>,
+    pub strict_preferred_account: bool,
+    pub runtime_probe: bool,
 }
 
 impl AcquireOptions {
@@ -590,6 +593,9 @@ impl AcquireOptions {
             model,
             session_key: None,
             tried_account_ids: HashSet::new(),
+            preferred_account_id: None,
+            strict_preferred_account: false,
+            runtime_probe: false,
         }
     }
 }
@@ -826,6 +832,21 @@ impl MultiTokenManager {
             .map(|m| m.to_lowercase().contains("opus"))
             .unwrap_or(false);
 
+        if let Some(preferred_account_id) = options.preferred_account_id {
+            if options.runtime_probe {
+                if let Some(entry) = entries.iter().find(|e| {
+                    e.id == preferred_account_id
+                        && !options.tried_account_ids.contains(&e.id)
+                        && (!is_opus || e.credentials.supports_opus())
+                }) {
+                    return Some((entry.id, entry.credentials.clone()));
+                }
+                if options.strict_preferred_account {
+                    return None;
+                }
+            }
+        }
+
         // 过滤可用凭据
         let available: Vec<_> = entries
             .iter()
@@ -839,6 +860,15 @@ impl MultiTokenManager {
 
         if available.is_empty() {
             return None;
+        }
+
+        if let Some(preferred_account_id) = options.preferred_account_id {
+            if let Some(entry) = available.iter().find(|e| e.id == preferred_account_id) {
+                return Some((entry.id, entry.credentials.clone()));
+            }
+            if options.strict_preferred_account {
+                return None;
+            }
         }
 
         if let Some(session_key) = options.session_key.as_deref() {
@@ -870,6 +900,9 @@ impl MultiTokenManager {
         tried_account_ids: &HashSet<u64>,
     ) -> bool {
         if entry.disabled || tried_account_ids.contains(&entry.id) {
+            return false;
+        }
+        if entry.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
             return false;
         }
         if is_opus && !entry.credentials.supports_opus() {
@@ -1009,7 +1042,7 @@ impl MultiTokenManager {
 
                 // balanced 模式：每次请求都重新均衡选择，不固定 current_id
                 // priority 模式：优先使用 current_id 指向的凭据
-                let current_hit = if is_balanced {
+                let current_hit = if is_balanced || options.strict_preferred_account {
                     None
                 } else {
                     let entries = self.entries.lock();
@@ -1080,7 +1113,7 @@ impl MultiTokenManager {
                     if let Some(session_key) = options.session_key.as_deref() {
                         self.bind_session(session_key, id);
                     }
-                    self.acquire_slot(id)?;
+                    self.acquire_slot(id, options.runtime_probe)?;
                     ctx.lease = Some(DispatchLease::new(id));
                     return Ok(ctx);
                 }
@@ -1096,6 +1129,9 @@ impl MultiTokenManager {
                     };
                     options.tried_account_ids.insert(id);
                     attempt_count += 1;
+                    if options.strict_preferred_account {
+                        return Err(e);
+                    }
                     if !has_available {
                         anyhow::bail!("所有凭据均已禁用（0/{}）", total);
                     }
@@ -1375,21 +1411,23 @@ impl MultiTokenManager {
         }
     }
 
-    fn acquire_slot(&self, id: u64) -> anyhow::Result<()> {
+    fn acquire_slot(&self, id: u64, runtime_probe: bool) -> anyhow::Result<()> {
         let mut entries = self.entries.lock();
         let entry = entries
             .iter_mut()
             .find(|e| e.id == id)
             .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
 
-        if entry
-            .cooldown_until
-            .is_some_and(|deadline| deadline > Utc::now())
-        {
-            anyhow::bail!("凭据 #{} 仍在冷却中", id);
-        }
-        if entry.inflight >= entry.max_concurrent {
-            anyhow::bail!("凭据 #{} 并发已满", id);
+        if !runtime_probe {
+            if entry
+                .cooldown_until
+                .is_some_and(|deadline| deadline > Utc::now())
+            {
+                anyhow::bail!("凭据 #{} 仍在冷却中", id);
+            }
+            if entry.inflight >= entry.max_concurrent {
+                anyhow::bail!("凭据 #{} 并发已满", id);
+            }
         }
         entry.inflight += 1;
         Ok(())
@@ -1909,6 +1947,58 @@ impl MultiTokenManager {
             entry.disabled_reason = None;
         }
         // 持久化更改
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 手动恢复本地运行态阻塞，不表示上游账号已恢复。
+    ///
+    /// 仅清理本地失败计数、冷却态和刷新阻塞，不会覆盖配置无效等硬禁用原因。
+    pub fn recover_runtime_state(&self, id: u64) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+
+            if entry.disabled_reason == Some(DisabledReason::InvalidConfig) {
+                anyhow::bail!(
+                    "凭据 #{} 因配置无效被禁用，请修正配置后重启服务",
+                    id
+                );
+            }
+
+            if matches!(
+                entry.disabled_reason,
+                Some(DisabledReason::QuotaExceeded | DisabledReason::InvalidRefreshToken)
+            ) {
+                anyhow::bail!("凭据 #{} 当前状态不支持手动恢复", id);
+            }
+
+            entry.failure_count = 0;
+            entry.refresh_failure_count = 0;
+            entry.disabled = false;
+            entry.disabled_reason = None;
+            self.clear_runtime_block(entry);
+        }
+
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 设置账号并发上限并立即生效。
+    pub fn set_max_concurrent(&self, id: u64, max_concurrent: u32) -> anyhow::Result<()> {
+        let sanitized = max_concurrent.max(1);
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.max_concurrent = sanitized;
+            entry.credentials.max_concurrent = Some(sanitized);
+        }
         self.persist_credentials()?;
         Ok(())
     }

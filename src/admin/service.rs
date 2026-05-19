@@ -5,19 +5,31 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
+use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::time::{Duration, timeout};
+use uuid::Uuid;
 
+use crate::kiro::model::events::Event;
+use crate::kiro::model::requests::conversation::{ConversationState, CurrentMessage, UserInputMessage};
+use crate::kiro::model::requests::kiro::KiroRequest;
+use crate::kiro::provider::KiroProvider;
+use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{AcquireOptions, MultiTokenManager};
 use crate::model::config::Config;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
+    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem, CredentialTestRequest,
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
-    SystemVersionResponse,
+    SetMaxConcurrentRequest, SystemVersionResponse,
 };
+
+pub type TestEventStream =
+    std::pin::Pin<Box<dyn Stream<Item = Result<serde_json::Value, AdminServiceError>> + Send>>;
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
@@ -38,6 +50,7 @@ struct CachedBalance {
 /// 封装所有 Admin API 的业务逻辑
 pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
+    provider: Arc<KiroProvider>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
@@ -48,6 +61,7 @@ pub struct AdminService {
 impl AdminService {
     pub fn new(
         token_manager: Arc<MultiTokenManager>,
+        provider: Arc<KiroProvider>,
         known_endpoints: impl IntoIterator<Item = String>,
     ) -> Self {
         let cache_path = token_manager
@@ -58,6 +72,7 @@ impl AdminService {
 
         Self {
             token_manager,
+            provider,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
@@ -144,6 +159,24 @@ impl AdminService {
     pub fn reset_and_enable(&self, id: u64) -> Result<(), AdminServiceError> {
         self.token_manager
             .reset_and_enable(id)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 手动恢复本地运行态阻塞
+    pub fn recover_credential(&self, id: u64) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .recover_runtime_state(id)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 设置账号并发上限
+    pub fn set_max_concurrent(
+        &self,
+        id: u64,
+        payload: SetMaxConcurrentRequest,
+    ) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .set_max_concurrent(id, payload.max_concurrent)
             .map_err(|e| self.classify_error(e, id))
     }
 
@@ -378,6 +411,134 @@ impl AdminService {
             .force_refresh_token_for(id)
             .await
             .map_err(|e| self.classify_balance_error(e, id))
+    }
+
+    /// 对单个账号发起真实流式测试，实时返回测试事件流。
+    pub async fn test_credential(
+        &self,
+        id: u64,
+        payload: CredentialTestRequest,
+    ) -> Result<TestEventStream, AdminServiceError> {
+        let prompt = if payload.prompt.trim().is_empty() {
+            "请回复一句简短的话，确认连接已可用。".to_string()
+        } else {
+            payload.prompt.trim().to_string()
+        };
+        let model_id = payload.model_id.clone();
+
+        let request_body = serde_json::to_string(&KiroRequest {
+            conversation_state: ConversationState::new(Uuid::new_v4().to_string())
+                .with_agent_continuation_id(Uuid::new_v4().to_string())
+                .with_agent_task_type("vibe")
+                .with_chat_trigger_type("MANUAL")
+                .with_current_message(CurrentMessage::new(
+                    UserInputMessage::new(prompt.clone(), payload.model_id.clone())
+                        .with_origin("AI_EDITOR"),
+                )),
+            profile_arn: None,
+        })
+        .map_err(|e| AdminServiceError::InternalError(format!("测试请求序列化失败: {}", e)))?;
+
+        let mut options = AcquireOptions::new(Some(payload.model_id.clone()));
+        options.preferred_account_id = Some(id);
+        options.strict_preferred_account = true;
+        options.runtime_probe = true;
+
+        let provider_response = self
+            .provider
+            .call_api_stream_for_account(&request_body, options)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?;
+
+        let token_manager = self.provider.token_manager().clone();
+        let mut stream = provider_response.response.bytes_stream();
+        let mut lease = Some(provider_response.lease);
+        let mut decoder = EventStreamDecoder::new();
+        let mut content = String::new();
+
+        let output = async_stream::try_stream! {
+            yield json!({
+                "type": "test_start",
+                "accountId": id,
+                "model": model_id,
+            });
+
+            loop {
+                let next_chunk = timeout(Duration::from_secs(30), stream.next())
+                    .await
+                    .map_err(|_| AdminServiceError::UpstreamError("测试请求超时".to_string()))?;
+
+                match next_chunk {
+                    Some(Ok(chunk)) => {
+                        if let Err(e) = decoder.feed(&chunk) {
+                            tracing::warn!("测试流解码缓冲区异常: {}", e);
+                        }
+
+                        for frame in decoder.decode_iter().flatten() {
+                            if let Ok(event) = Event::from_frame(frame) {
+                                match event {
+                                    Event::AssistantResponse(resp) if !resp.content.is_empty() => {
+                                        content.push_str(&resp.content);
+                                        yield json!({
+                                            "type": "content",
+                                            "text": resp.content,
+                                        });
+                                    }
+                                    Event::ToolUse(tool_use) => {
+                                        yield json!({
+                                            "type": "tool_use",
+                                            "name": tool_use.name,
+                                            "input": tool_use.input,
+                                            "stop": tool_use.stop,
+                                        });
+                                    }
+                                    Event::ContextUsage(ctx) => {
+                                        yield json!({
+                                            "type": "context_usage",
+                                            "percentage": ctx.context_usage_percentage,
+                                        });
+                                    }
+                                    Event::Error { error_code, error_message } => {
+                                        yield json!({
+                                            "type": "upstream_error",
+                                            "code": error_code,
+                                            "message": error_message,
+                                        });
+                                    }
+                                    Event::Exception { exception_type, message } => {
+                                        yield json!({
+                                            "type": "upstream_exception",
+                                            "exceptionType": exception_type,
+                                            "message": message,
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        if let Some(mut current_lease) = lease.take() {
+                            token_manager.release_slot(&mut current_lease);
+                        }
+                        Err(AdminServiceError::UpstreamError(format!("读取测试流失败: {}", e)))?;
+                    }
+                    None => {
+                        if let Some(mut current_lease) = lease.take() {
+                            token_manager.release_slot(&mut current_lease);
+                        }
+                        yield json!({
+                            "type": "test_complete",
+                            "success": true,
+                            "summary": content,
+                        });
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(output))
     }
 
     // ============ 余额缓存持久化 ============

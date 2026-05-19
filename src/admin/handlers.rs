@@ -3,14 +3,15 @@
 use axum::{
     Json,
     extract::{Path, State},
-    response::IntoResponse,
+    response::{IntoResponse, sse::{Event, Sse}},
 };
+use futures::StreamExt;
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse,
+        AddCredentialRequest, CredentialTestRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
     },
 };
 
@@ -70,6 +71,40 @@ pub async fn reset_failure_count(
     }
 }
 
+/// POST /api/admin/credentials/:id/recover
+/// 手动清理本地运行态阻塞
+pub async fn recover_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.recover_credential(id) {
+        Ok(_) => Json(SuccessResponse::new(format!(
+            "凭据 #{} 本地阻塞已清理",
+            id
+        )))
+        .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/max-concurrent
+/// 设置账号并发上限
+pub async fn set_credential_max_concurrent(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetMaxConcurrentRequest>,
+) -> impl IntoResponse {
+    let max_concurrent = payload.max_concurrent;
+    match state.service.set_max_concurrent(id, payload) {
+        Ok(_) => Json(SuccessResponse::new(format!(
+            "凭据 #{} 并发上限已设置为 {}",
+            id, max_concurrent
+        )))
+        .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/credentials/:id/balance
 /// 获取指定凭据的余额
 pub async fn get_credential_balance(
@@ -118,6 +153,34 @@ pub async fn force_refresh_token(
             id
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/test
+/// 对单个账号发起真实流式测试
+pub async fn test_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<CredentialTestRequest>,
+) -> impl IntoResponse {
+    match state.service.test_credential(id, payload).await {
+        Ok(events) => {
+            let stream = events.map(|item| match item {
+                Ok(payload) => Ok::<Event, std::convert::Infallible>(
+                    Event::default().data(payload.to_string())
+                ),
+                Err(err) => Ok(Event::default().data(
+                    serde_json::json!({
+                        "type": "test_complete",
+                        "success": false,
+                        "message": err.to_string(),
+                    })
+                    .to_string(),
+                )),
+            });
+            Sse::new(stream).into_response()
+        }
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

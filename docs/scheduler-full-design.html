@@ -1,0 +1,2966 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>kiro-rs 调度完整改造设计</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f2efe8;
+        --panel: #fffdf8;
+        --text: #1b1f26;
+        --muted: #5c6573;
+        --line: #d7cfbf;
+        --accent: #7c300f;
+        --accent-soft: #f3e0d6;
+        --warn: #9a6700;
+        --warn-soft: #fff2cf;
+        --ok: #165b43;
+        --ok-soft: #dbf2e7;
+        --info: #28598a;
+        --info-soft: #e1eefb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        background: linear-gradient(180deg, #f7f4ed 0%, var(--bg) 100%);
+        color: var(--text);
+        line-height: 1.66;
+      }
+
+      main {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 38px 18px 64px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        line-height: 1.2;
+      }
+
+      h1 {
+        font-size: 34px;
+      }
+
+      h2 {
+        font-size: 22px;
+        margin-bottom: 14px;
+      }
+
+      h3 {
+        font-size: 16px;
+        margin-bottom: 8px;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      .hero,
+      .section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(40, 24, 12, 0.05);
+      }
+
+      .hero {
+        padding: 28px;
+      }
+
+      .hero p {
+        margin-top: 12px;
+        color: var(--muted);
+        max-width: 820px;
+      }
+
+      .meta {
+        margin-top: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 0 12px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .section {
+        margin-top: 20px;
+        padding: 22px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+      }
+
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 12px;
+      }
+
+      .card-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 16px;
+        font-weight: 600;
+        flex-wrap: wrap;
+      }
+
+      .kpi {
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+
+      .label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .badge.ready {
+        background: var(--ok-soft);
+        color: var(--ok);
+      }
+
+      .badge.saturated {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+
+      .badge.cooldown {
+        background: var(--info-soft);
+        color: var(--info);
+      }
+
+      .badge.blocked {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+
+      .badge.disabled {
+        background: #ece7df;
+        color: var(--muted);
+      }
+
+      .badge.current {
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      .callout {
+        padding: 14px 16px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+      }
+
+      .callout.warn {
+        background: var(--warn-soft);
+        border-color: #ead091;
+      }
+
+      .callout.ok {
+        background: var(--ok-soft);
+        border-color: #9fd0b8;
+      }
+
+      .callout.info {
+        background: var(--info-soft);
+        border-color: #b8d1ee;
+      }
+
+      .callout.accent {
+        background: var(--accent-soft);
+        border-color: #e4bca9;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        background: #fff;
+        border: 1px solid var(--line);
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+
+      th {
+        background: #faf6ee;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      ul {
+        margin: 12px 0 0;
+        padding-left: 20px;
+      }
+
+      li + li {
+        margin-top: 7px;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        background: #f6efe3;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+
+      pre {
+        margin: 12px 0 0;
+        padding: 14px;
+        border-radius: 8px;
+        background: #221b14;
+        color: #f6efe5;
+        overflow: auto;
+        font-size: 13px;
+        line-height: 1.56;
+      }
+
+      .small {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .proto-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 14px;
+        margin-top: 14px;
+      }
+
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .metric-card {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+      }
+
+      .metric-value {
+        margin-top: 8px;
+        font-size: 28px;
+        font-weight: 700;
+      }
+
+      .metric-value.ok {
+        color: var(--ok);
+      }
+
+      .metric-value.info {
+        color: var(--info);
+      }
+
+      .metric-value.warn {
+        color: var(--warn);
+      }
+
+      .metric-value.muted {
+        color: var(--muted);
+      }
+
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .stat-row:last-child {
+        border-bottom: none;
+      }
+
+      .stat-label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .stat-value {
+        font-size: 14px;
+        font-weight: 500;
+        text-align: right;
+      }
+
+      .progress-bar {
+        width: 100%;
+        height: 8px;
+        margin-top: 8px;
+        background: #e5dccf;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: var(--accent);
+      }
+
+      .progress-fill.ok {
+        background: var(--ok);
+      }
+
+      .progress-fill.warn {
+        background: var(--warn);
+      }
+
+      .progress-fill.danger {
+        background: #c53030;
+      }
+
+      .error-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .error-badge.normal-429 {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+
+      .error-badge.suspicious {
+        background: #fde6e6;
+        color: #c53030;
+      }
+
+      .sticky-indicator {
+        font-size: 12px;
+        color: var(--info);
+      }
+
+      .ux-frame {
+        margin-top: 16px;
+        overflow: hidden;
+        border: 1px solid #dfe3ea;
+        border-radius: 10px;
+        background: #f8fafc;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+      }
+
+      .ux-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        min-height: 58px;
+        padding: 0 18px;
+        border-bottom: 1px solid #e5e7eb;
+        background: rgba(255, 255, 255, 0.94);
+      }
+
+      .ux-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .ux-brand-mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: #4338ca;
+        font-size: 13px;
+      }
+
+      .ux-actions,
+      .ux-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .ux-shell {
+        padding: 18px;
+      }
+
+      .ux-stat-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .ux-stat-card,
+      .ux-panel,
+      .ux-credential-card {
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+      }
+
+      .ux-stat-card {
+        padding: 14px 16px;
+      }
+
+      .ux-stat-title {
+        font-size: 12px;
+        color: #6b7280;
+      }
+
+      .ux-stat-value {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 24px;
+        font-weight: 700;
+        color: #111827;
+      }
+
+      .ux-panel {
+        margin-top: 16px;
+        padding: 16px;
+      }
+
+      .ux-panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .ux-panel-title {
+        font-size: 19px;
+        font-weight: 600;
+      }
+
+      .ux-muted {
+        color: #6b7280;
+      }
+
+      .ux-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 34px;
+        padding: 0 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #fff;
+        color: #111827;
+        font-size: 13px;
+        font-weight: 500;
+      }
+
+      .ux-button.primary {
+        border-color: #111827;
+        background: #111827;
+        color: #fff;
+      }
+
+      .ux-button.destructive {
+        border-color: #ef4444;
+        color: #ef4444;
+      }
+
+      .ux-button.ghost {
+        background: #f8fafc;
+      }
+
+      .ux-button.active {
+        border-color: #111827;
+        background: #111827;
+        color: #fff;
+      }
+
+      .ux-badge {
+        display: inline-flex;
+        align-items: center;
+        height: 22px;
+        padding: 0 8px;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .ux-badge.success {
+        background: #22c55e;
+        color: #fff;
+      }
+
+      .ux-badge.warning {
+        background: #f59e0b;
+        color: #fff;
+      }
+
+      .ux-badge.danger {
+        background: #ef4444;
+        color: #fff;
+      }
+
+      .ux-badge.secondary {
+        background: #f3f4f6;
+        color: #111827;
+      }
+
+      .ux-badge.outline {
+        border-color: #d1d5db;
+        background: #fff;
+        color: #374151;
+      }
+
+      .ux-badge.info {
+        border-color: #bfdbfe;
+        background: #eff6ff;
+        color: #2563eb;
+      }
+
+      .ux-selection {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .ux-checkbox {
+        width: 16px;
+        height: 16px;
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+
+      .ux-checkbox.checked {
+        position: relative;
+        border-color: #111827;
+        background: #111827;
+      }
+
+      .ux-checkbox.checked::after {
+        content: "";
+        position: absolute;
+        left: 4px;
+        top: 1px;
+        width: 5px;
+        height: 9px;
+        border: solid #fff;
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg);
+      }
+
+      .ux-credential-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .ux-credential-card {
+        padding: 16px;
+        transition: box-shadow 0.2s ease, border-color 0.2s ease;
+      }
+
+      .ux-credential-card.current {
+        box-shadow: inset 0 0 0 2px #111827;
+      }
+
+      .ux-credential-card.selected {
+        border-color: #94a3b8;
+        box-shadow: 0 0 0 2px rgba(148, 163, 184, 0.18);
+      }
+
+      .ux-credential-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .ux-credential-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        font-size: 17px;
+        font-weight: 600;
+      }
+
+      .ux-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #6b7280;
+        font-size: 12px;
+      }
+
+      .ux-toggle-track {
+        position: relative;
+        width: 34px;
+        height: 20px;
+        border-radius: 999px;
+        background: #111827;
+        cursor: pointer;
+      }
+
+      .ux-toggle-track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 16px;
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        background: #fff;
+      }
+
+      .ux-toggle-track.off {
+        background: #cbd5e1;
+      }
+
+      .ux-toggle-track.off::after {
+        left: 2px;
+      }
+
+      .ux-info-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px 18px;
+        font-size: 13px;
+      }
+
+      .ux-info-item {
+        min-height: 36px;
+      }
+
+      .ux-info-label {
+        color: #6b7280;
+      }
+
+      .ux-info-value {
+        margin-top: 3px;
+        font-weight: 600;
+        color: #111827;
+      }
+
+      .ux-info-value.danger {
+        color: #ef4444;
+      }
+
+      .ux-info-value.warn {
+        color: #d97706;
+      }
+
+      .ux-divider {
+        height: 1px;
+        margin: 14px 0 12px;
+        background: #e5e7eb;
+      }
+
+      .ux-button-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .ux-progress {
+        margin-top: 4px;
+        width: 100%;
+        height: 8px;
+        border-radius: 999px;
+        background: #e5e7eb;
+        overflow: hidden;
+      }
+
+      .ux-progress-fill {
+        height: 100%;
+        border-radius: 999px;
+        background: #22c55e;
+      }
+
+      .ux-progress-fill.warn {
+        background: #f59e0b;
+      }
+
+      .ux-progress-fill.danger {
+        background: #ef4444;
+      }
+
+      .ux-inline-input {
+        width: 64px;
+        height: 30px;
+        padding: 0 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #fff;
+        font-size: 13px;
+      }
+
+      .ux-inline-edit {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .ux-scene-switcher {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+      }
+
+      .ux-live-note {
+        margin-top: 12px;
+        font-size: 13px;
+        color: #64748b;
+      }
+
+      .ux-with-tip {
+        position: relative;
+        cursor: help;
+      }
+
+      .ux-with-tip:hover::after,
+      .ux-with-tip:focus-visible::after {
+        content: attr(data-tip);
+        position: absolute;
+        left: 0;
+        top: calc(100% + 8px);
+        width: 220px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.96);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1.5;
+        white-space: normal;
+        z-index: 30;
+        box-shadow: 0 14px 30px rgba(15, 23, 42, 0.2);
+      }
+
+      .ux-hint {
+        display: inline-flex;
+        align-items: center;
+        border-bottom: 1px dotted #94a3b8;
+      }
+
+      .ux-modal {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.45);
+        z-index: 20;
+      }
+
+      .ux-modal.open {
+        display: flex;
+      }
+
+      .ux-modal-card {
+        width: min(560px, 100%);
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 20px 60px rgba(15, 23, 42, 0.2);
+      }
+
+      .ux-modal-head,
+      .ux-modal-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px;
+      }
+
+      .ux-modal-head {
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .ux-modal-foot {
+        border-top: 1px solid #e5e7eb;
+        justify-content: flex-end;
+      }
+
+      .ux-modal-body {
+        padding: 18px;
+      }
+
+      .ux-modal-title {
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      .ux-form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .ux-field label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 12px;
+        color: #6b7280;
+      }
+
+      .ux-field input,
+      .ux-field select {
+        width: 100%;
+        height: 36px;
+        padding: 0 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #fff;
+        font-size: 13px;
+      }
+
+      .ux-switch-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid #eef2f7;
+      }
+
+      .ux-switch-row:last-child {
+        border-bottom: none;
+      }
+
+      .ux-test-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 16px;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background: #fff;
+        color: #111827;
+      }
+
+      .ux-test-card-main {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        min-width: 0;
+      }
+
+      .ux-test-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 52px;
+        height: 52px;
+        border-radius: 8px;
+        background: #eff6ff;
+        color: #2563eb;
+        font-size: 20px;
+        flex: 0 0 auto;
+      }
+
+      .ux-test-name {
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.25;
+        word-break: break-all;
+      }
+
+      .ux-test-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
+        font-size: 12px;
+        color: #6b7280;
+        flex-wrap: wrap;
+      }
+
+      .ux-test-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 0 8px;
+        border-radius: 6px;
+        background: #f3f4f6;
+        color: #374151;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+
+      .ux-test-status {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        padding: 0 14px;
+        border-radius: 999px;
+        background: #dcfce7;
+        color: #15803d;
+        font-size: 13px;
+        font-weight: 700;
+        white-space: nowrap;
+        flex: 0 0 auto;
+      }
+
+      .ux-test-field {
+        margin-top: 18px;
+      }
+
+      .ux-test-label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #374151;
+      }
+
+      .ux-test-select {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        min-height: 40px;
+        padding: 0 16px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #fff;
+        color: #111827;
+        font-size: 14px;
+      }
+
+      .ux-test-select-arrow {
+        color: #6b7280;
+        font-size: 16px;
+      }
+
+      .ux-test-prompt {
+        width: 100%;
+        min-height: 84px;
+        padding: 12px 14px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #fff;
+        color: #111827;
+        font-size: 14px;
+        resize: vertical;
+      }
+
+      .ux-test-prompt-hint {
+        margin-top: 6px;
+        font-size: 12px;
+        color: #6b7280;
+      }
+
+      .ux-terminal {
+        margin-top: 16px;
+        min-height: 208px;
+        max-height: 260px;
+        overflow-y: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background: #f8fafc;
+        padding: 16px 18px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.7;
+        color: #334155;
+      }
+
+      .ux-terminal-line {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .ux-terminal-line.dim {
+        color: #94a3b8;
+      }
+
+      .ux-terminal-line.info {
+        color: #2563eb;
+      }
+
+      .ux-terminal-line.ok {
+        color: #16a34a;
+      }
+
+      .ux-terminal-line.warn {
+        color: #d97706;
+      }
+
+      .ux-terminal-line.error {
+        color: #dc2626;
+      }
+
+      .ux-terminal-line.streaming {
+        color: #0f766e;
+      }
+
+      .ux-test-footnote {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-top: 14px;
+        font-size: 12px;
+        color: #6b7280;
+        flex-wrap: wrap;
+      }
+
+      @media (max-width: 680px) {
+        main {
+          padding: 22px 14px 42px;
+        }
+
+        .hero,
+        .section {
+          padding: 18px;
+        }
+
+        h1 {
+          font-size: 28px;
+        }
+      }
+
+      @media (max-width: 980px) {
+        .ux-stat-grid,
+        .ux-credential-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .ux-test-card {
+          align-items: flex-start;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .ux-stat-grid,
+        .ux-credential-grid,
+        .ux-info-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .ux-header,
+        .ux-panel-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <h1>kiro-rs 调度完整改造设计</h1>
+        <p>
+          这份设计不再追求“最小能跑”，而是按上线标准收敛成一版完整方案：
+          调度主脑参考 CPA，并发槽位参考 sub2api，实际落地面只在
+          <code>kiro-rs</code>，不改线上 <code>sub2</code>。
+        </p>
+        <div class="meta">
+          <span class="tag">目标：完整可上线</span>
+          <span class="tag">范围：kiro-rs 内部改造</span>
+          <span class="tag">输入：生产日志 + CPA + sub2api 并发实现</span>
+          <span class="tag">日期：2026-05-19</span>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>文档定位</h2>
+        <div class="callout.info">
+          这份文档现在同时承担两件事：一是定义调度内核和接口，二是给出管理面的 UI 原型展示。后续只维护这一份。
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>设计目标</h2>
+        <div class="callout.accent">
+          这里直接写死主需求，避免后面再被兼容字段、局部展示或测试细节带偏。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>主目标</th>
+              <th>定稿口径</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>调度主脑</td>
+              <td><code>kiro-rs</code> 调度参考 <code>CPA</code> 的粘性路由，按会话稳定命中同一账号；命中风险时自动脱粘。</td>
+            </tr>
+            <tr>
+              <td>并发窗口</td>
+              <td>每个账号增加 <code>sub2api</code> 风格的并发上限、槽位占用与释放路径，解决“账号能用但被打爆”的问题。</td>
+            </tr>
+            <tr>
+              <td>下游兼容</td>
+              <td>保留 <code>sub2</code> 需要的字段和展示口径，但不让 <code>sub2</code> 反向决定底层调度。</td>
+            </tr>
+            <tr>
+              <td>管理面</td>
+              <td>补单账号测试和运行态可视化，交互结构参考 <code>sub2</code>，视觉语言沿用现有 <code>kiro-rs admin-ui</code>。</td>
+            </tr>
+            <tr>
+              <td>版本治理</td>
+              <td>管理面可补版本检测、发布说明入口与部署方式提示；是否同时纳入自动更新能力，取决于部署方式与运维边界。</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>前提边界</h2>
+        <div class="callout.warn">
+          下面这些边界先冻结，后续实现都按这个范围走，不再反复摇摆。
+        </div>
+        <ul>
+          <li><code>kiro</code> 账号本体没有可直接复用的 5h / 7d 账号窗口语义，这里的“窗口限制”只解释成账号并发窗口。</li>
+          <li>生产日志已经证明，真正的底层问题是 <code>429</code> 与 <code>suspicious activity</code> 后缺少摘流，而不是单纯“没号了”。</li>
+          <li>线上 <code>sub2</code> 不改；参考 <code>sub2</code> 只为了并发槽位、测试交互、兼容参数和视觉口径。</li>
+          <li>UX 范围以本稿为准，后续实现阶段在这套结构内细化，不另起一套后台。</li>
+          <li>单账号测试保留 <code>sub2</code> 的功能结构，但视觉必须贴近现有 <code>kiro-rs admin-ui</code>。</li>
+          <li>不引入 <code>kiro</code> 上游不支持的能力，不把本地状态误写成上游真实能力。</li>
+          <li>批量测活只作为巡检补充，不替代单账号测试。</li>
+          <li><code>sub2</code> 已有版本检测与在线更新链路；本项目若引入同类能力，需要先区分“版本信息展示”和“自动替换重启”两类范围。</li>
+          <li>源码运行、容器运行、二进制路径不可写、无重启托管时，在线更新能力是否可落地，取决于实例部署条件。</li>
+        </ul>
+      </section>
+
+      <section class="section">
+        <h2>参考源码结论</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>来源</th>
+              <th>能借什么</th>
+              <th>不借什么</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CPA</td>
+              <td>粘性路由主脑、会话命中优先、失败后脱粘、状态驱动选号</td>
+              <td>不直接照搬 provider/model shard 复杂度，但它就是本次调度主脑参考</td>
+            </tr>
+            <tr>
+              <td>sub2api</td>
+              <td>账号槽位、等待队列、占槽释放时机、单账号测试交互、管理面展示口径</td>
+              <td>不把它的选号逻辑、不把 OpenAI 特有语义硬套到 Kiro</td>
+            </tr>
+            <tr>
+              <td>sub2 更新链路</td>
+              <td>版本徽标、GitHub Release 检测、更新日志入口、Linux 单机场景下的重启/回滚思路</td>
+              <td>需要结合本项目部署方式评估是否能复用整套自更新流程</td>
+            </tr>
+            <tr>
+              <td>superman2003/sub2api</td>
+              <td>Kiro 相关 usage 展示、prompt cache 视觉补偿</td>
+              <td>不把它当作调度主骨架</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>完整状态模型</h2>
+        <div class="callout.accent">
+          完整方案依然只是几个字段，只是要把它们放进明确的状态层里，而不是散着写。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>字段</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>账号静态配置</td>
+              <td><code>priority</code>、<code>maxConcurrent</code>、<code>supportsOpus</code>、<code>disabled</code></td>
+              <td>来自配置文件或管理面板，重启后仍存在</td>
+            </tr>
+            <tr>
+              <td>账号运行态</td>
+              <td><code>inflight</code>、<code>cooldownUntil</code>、<code>last429Kind</code>、<code>recent429Count</code>、<code>recentSuspiciousCount</code>、<code>refreshFailureCount</code></td>
+              <td>只在进程内维护，决定调度器当前能不能选这个账号</td>
+            </tr>
+            <tr>
+              <td>会话粘性态</td>
+              <td><code>sessionKey -> accountId</code>、<code>boundAt</code>、<code>expiresAt</code></td>
+              <td>用于会话稳定路由；若上层传显式 pin，则先消费 pin</td>
+            </tr>
+            <tr>
+              <td>请求态</td>
+              <td><code>requestId</code>、<code>triedAccountIds</code>、<code>selectedAccountId</code></td>
+              <td>单次请求内的防重复撞击</td>
+            </tr>
+            <tr>
+              <td>展示兼容态</td>
+              <td><code>currentLoad</code>、<code>maxConcurrent</code>、<code>cooldownRemainingMs</code>、<code>stickyHit</code></td>
+              <td>给 sub2 参数兼容和前端展示，不作为底层真相</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>账号状态机</h2>
+        <pre>ready
+  -> inflight 满 -> saturated
+  -> 普通 429 -> cooldown(short)
+  -> suspicious -> cooldown(long)
+  -> refresh 429 连续失败 -> refresh_blocked / disabled
+  -> 403 suspended -> disabled
+
+saturated
+  -> inflight 释放 -> ready
+
+cooldown(short/long)
+  -> 到时 -> ready
+  -> 冷却中再命中更重错误 -> 延长冷却 / 升级
+
+refresh_blocked
+  -> 达阈值 -> disabled
+  -> 人工恢复或后续成功刷新 -> ready
+
+disabled
+  -> 仅人工启用或显式恢复</pre>
+      </section>
+
+      <section class="section">
+        <h2>选号顺序</h2>
+        <div class="callout.ok">
+          选择顺序必须固定，不允许“报错了再临场猜”。
+        </div>
+        <pre>Layer 1: 硬过滤
+- disabled
+- cooldownUntil > now
+- inflight >= maxConcurrent
+- 模型不兼容
+- 本次请求已经试过
+
+Layer 2: 显式 pin 命中
+- 上层已指定 preferred / pinned account
+- 该账号仍满足 Layer 1
+- 命中则直接选
+
+Layer 3: 粘性命中
+- 有 sessionKey
+- sticky 账号仍满足 Layer 1
+- 命中则直接选
+
+Layer 4: 全局选号
+- 先按 priority 分组
+- 同优先级内按 round-robin
+- 再过一层并发槽位判断
+- 若启用负载感知，则优先 inflight 更低的账号
+
+Layer 5: 失败回退
+- 当前账号写入 triedAccountIds
+- 重新从 Layer 1 开始
+- 单次请求不重复打已试账号</pre>
+      </section>
+
+      <section class="section">
+        <h2>粘性路由规则</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>规则</th>
+              <th>处理</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>上层显式 pin</td>
+              <td>优先于 session 粘性；调度器先判断 pin 账号当前能否接单</td>
+            </tr>
+            <tr>
+              <td>新会话第一次请求</td>
+              <td>正常选号，成功后绑定 <code>sessionKey -> accountId</code></td>
+            </tr>
+            <tr>
+              <td>命中粘性账号且账号健康</td>
+              <td>直接复用，保持会话稳定</td>
+            </tr>
+            <tr>
+              <td>粘性账号并发满</td>
+              <td>脱粘本次请求，走全局选号；可保留映射短时间不删</td>
+            </tr>
+            <tr>
+              <td>粘性账号命中普通 429</td>
+              <td>当前请求脱粘，账号进入短冷却</td>
+            </tr>
+            <tr>
+              <td>粘性账号命中 suspicious</td>
+              <td>立即脱粘并解绑，账号进入长冷却</td>
+            </tr>
+            <tr>
+              <td>粘性账号被禁用 / suspended</td>
+              <td>立即解绑，后续不再尝试命中</td>
+            </tr>
+            <tr>
+              <td>粘性 TTL</td>
+              <td>带过期时间，避免陈旧绑定长期残留</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>并发槽位设计</h2>
+        <div class="callout.info">
+          这部分明确借 sub2 的实现思路，但只借“并发门”，不借它的选号主脑。
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h3>占槽时机</h3>
+            <ul>
+              <li>不是“选中就占”</li>
+              <li>而是准备真正发请求时占</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>释放时机</h3>
+            <ul>
+              <li>成功释放</li>
+              <li>失败释放</li>
+              <li>超时释放</li>
+              <li>流式中断也释放</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>等待队列</h3>
+            <ul>
+              <li>可按阶段决定是否提供阻塞等待</li>
+              <li>完整方案包含账号级等待计划</li>
+            </ul>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>项</th>
+              <th>需求描述</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>maxConcurrent</code></td>
+              <td>每账号独立配置，默认值可以统一设定</td>
+            </tr>
+            <tr>
+              <td><code>inflight</code></td>
+              <td>内存原子计数或锁保护计数</td>
+            </tr>
+            <tr>
+              <td>等待计划</td>
+              <td>可返回“等待时长 / 当前排队人数”给前端或兼容层</td>
+            </tr>
+            <tr>
+              <td>单请求保护</td>
+              <td>一个请求绝不重复占同一账号第二次</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>错误分类与状态转移</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>错误</th>
+              <th>运行态处理</th>
+              <th>是否脱粘</th>
+              <th>是否禁用</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>普通 <code>429</code></td>
+              <td>短冷却，累积计数</td>
+              <td>是</td>
+              <td>否</td>
+            </tr>
+            <tr>
+              <td><code>suspicious activity</code></td>
+              <td>长冷却，必要时提高后续冷却时长</td>
+              <td>是</td>
+              <td>否，先不直接禁用</td>
+            </tr>
+            <tr>
+              <td>refresh <code>429</code></td>
+              <td>走刷新失败计数，与 API 429 分开</td>
+              <td>是</td>
+              <td>达到阈值后是</td>
+            </tr>
+            <tr>
+              <td><code>403 suspended</code></td>
+              <td>直接标记不可调度</td>
+              <td>是</td>
+              <td>是</td>
+            </tr>
+            <tr>
+              <td><code>400 Improperly formed request</code></td>
+              <td>只记请求错误，不污染账号健康</td>
+              <td>否</td>
+              <td>否</td>
+            </tr>
+            <tr>
+              <td>网络错误 / 5xx</td>
+              <td>短暂回退，不直接污染账号</td>
+              <td>按策略可不脱粘</td>
+              <td>否</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>sub2 参数兼容层</h2>
+        <div class="callout.info">
+          兼容层的职责是“把 kiro-rs 的真实运行态翻译成 sub2 看得懂的字段”，不是反过来决定底层调度。sub2 在这里是消费者，不是调度器。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>兼容字段</th>
+              <th>来源</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>currentLoad</code></td>
+              <td><code>inflight</code></td>
+              <td>前端显示当前账号忙不忙</td>
+            </tr>
+            <tr>
+              <td><code>maxLoad</code></td>
+              <td><code>maxConcurrent</code></td>
+              <td>显示并发上限</td>
+            </tr>
+            <tr>
+              <td><code>cooldownRemainingMs</code></td>
+              <td><code>cooldownUntil - now</code></td>
+              <td>显示多久后可以再试</td>
+            </tr>
+            <tr>
+              <td><code>lastRateLimitKind</code></td>
+              <td><code>last429Kind</code></td>
+              <td>前端区分普通限频和风控限频</td>
+            </tr>
+            <tr>
+              <td><code>stickyHit</code></td>
+              <td>pin 或 session 粘性命中结果</td>
+              <td>辅助调试和观测</td>
+            </tr>
+            <tr>
+              <td><code>dispatchState</code></td>
+              <td>账号状态机</td>
+              <td>前端用颜色或标签表达当前状态</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>前端可视化</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>账号列表</h3>
+            <ul>
+              <li>显示状态：可用 / 冷却中 / 并发满 / 禁用</li>
+              <li>显示并发：<code>inflight / maxConcurrent</code></li>
+              <li>显示最近限频类型</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>详情侧栏</h3>
+            <ul>
+              <li>最近 429 次数</li>
+              <li>最近 suspicious 次数</li>
+              <li>冷却剩余时间</li>
+              <li>当前粘性会话数</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>用户感知</h3>
+            <ul>
+              <li>只讲“当前忙、稍后再试、已切换其他账号”</li>
+              <li>不暴露内部实现词汇</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>版本信息</h3>
+            <ul>
+              <li>显示当前版本、最新版本、发布时间和更新说明入口</li>
+              <li>根据部署方式展示“可更新”或“仅提示升级步骤”</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>现有前端基线</h2>
+        <div class="callout.info">
+          前端不是从零做新后台，而是在现有 <code>admin-ui</code> 上增量改造。当前真实页面骨架来自
+          <code>admin-ui/src/components/dashboard.tsx</code> 和
+          <code>admin-ui/src/components/credential-card.tsx</code>。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>区域</th>
+              <th>现状</th>
+              <th>改造原则</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>顶部导航</td>
+              <td>Kiro Admin、负载模式切换、刷新、暗黑模式、退出</td>
+              <td>保留，不新增调度主控入口；版本入口收进右上角轻量徽标或弹窗，不占主流程</td>
+            </tr>
+            <tr>
+              <td>统计卡</td>
+              <td>当前已经扩到运行态视角：凭据总数、可用凭据、当前活跃、冷却中、并发饱和、本地阻塞、已禁用</td>
+              <td>沿用同一套 <code>Card</code> 样式，只扩成更多状态卡</td>
+            </tr>
+            <tr>
+              <td>凭据列表工具条</td>
+              <td>批量验活、批量刷新、恢复异常、清除已禁用、导入、添加</td>
+              <td>保留工具条，但把“批量验活”降成巡检动作；单账号测试放进卡片主操作</td>
+            </tr>
+            <tr>
+              <td>凭据卡片</td>
+              <td>3 列网格，卡片头已有 checkbox、当前标记、禁用标记、authMethod、endpoint、启用开关</td>
+              <td>新增调度状态必须塞进现有卡片，不新建独立调度卡</td>
+            </tr>
+            <tr>
+              <td>卡片内容区</td>
+              <td>当前是 2 列信息网格，新增并发、冷却、风控、粘性和额度观察项；可改配置统一收进弹窗</td>
+              <td>新字段继续走 2 列信息网格，避免样式断层</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>Dashboard 改造</h2>
+        <div class="callout.accent">
+          统计区继续沿用现有卡片系统，但状态必须完整。当前定稿是 7 张卡：总数、可用、当前活跃、冷却中、并发饱和、本地阻塞、已禁用。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>位置</th>
+              <th>改动</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>统计卡容器</td>
+              <td>从 <code>md:grid-cols-3</code> 扩到 <code>xl:grid-cols-7</code></td>
+              <td>中小屏仍可自动换行，不破坏现有布局</td>
+            </tr>
+            <tr>
+              <td>新增统计卡 1</td>
+              <td>冷却中</td>
+              <td>值来自 <code>dispatchState === cooldown</code></td>
+            </tr>
+            <tr>
+              <td>新增统计卡 2</td>
+              <td>并发饱和</td>
+              <td>值来自 <code>dispatchState === saturated</code></td>
+            </tr>
+            <tr>
+              <td>新增统计卡 3</td>
+              <td>本地阻塞</td>
+              <td>和“停止调度”拆开统计，避免临时阻塞和人工停用混在一起</td>
+            </tr>
+            <tr>
+              <td>新增统计卡 4</td>
+              <td>已禁用</td>
+              <td>只统计人工停用或硬禁用账号，不和 blocked 混用</td>
+            </tr>
+            <tr>
+              <td>当前活跃卡</td>
+              <td>保留 <code>#currentId + 活跃 Badge</code></td>
+              <td>不把“当前活跃”改成调度状态统计，避免失去当前账号定位</td>
+            </tr>
+            <tr>
+              <td>负载模式按钮</td>
+              <td>保留现有 priority / balanced 切换</td>
+              <td>调度细节不放这里，避免概念串台</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>版本检测与更新能力</h2>
+        <div class="callout.info">
+          调研结果显示，<code>sub2</code> 已经把版本检测、在线替换、重启、回滚拆成了完整链路。这里先按能力项把需求列清楚，不替实现阶段先做取舍。
+        </div>
+        <div class="callout.ok" style="margin-top: 14px;">
+          当前实现口径：版本信息入口收进右上角轻量按钮，点击后进入弹窗查看当前版本、最新版本、部署方式、升级提示和发布说明链接，不再占用页面底部悬浮区。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>能力</th>
+              <th>需求描述</th>
+              <th>依赖条件</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>版本检测</td>
+              <td>管理面显示当前版本、GitHub 最新 Release、发布时间、更新说明链接、是否落后</td>
+              <td>需要服务端拿到当前构建版本，并能访问 GitHub Release 元信息</td>
+            </tr>
+            <tr>
+              <td>升级提示</td>
+              <td>按部署方式展示升级路径，例如源码部署、二进制部署、容器部署分别展示不同说明</td>
+              <td>需要实例能识别部署模式，或允许管理员手动配置部署模式</td>
+            </tr>
+            <tr>
+              <td>在线更新</td>
+              <td>管理面触发下载 release、备份当前二进制、替换文件并发起重启</td>
+              <td>需要可写二进制路径、明确的重启托管方式，以及实例对自替换当前进程的运行权限</td>
+            </tr>
+            <tr>
+              <td>回滚</td>
+              <td>管理面可选择最近备份版本并触发回滚</td>
+              <td>需要完整的备份保留、版本元信息记录与重启能力</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout.warn" style="margin-top: 14px;">
+          调研边界：如果实例是源码运行、容器运行、二进制路径不可写，或重启由外部系统托管，那么“在线更新”只能作为条件式能力存在，不能按统一可用能力描述。
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>CredentialCard 改造</h2>
+        <div class="callout.info">
+          现有卡片已经很满，所以新增调度信息要严格分层：头部只放状态标签，内容区只补关键运行态，用户可改的只保留配置项。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>位置</th>
+              <th>改动内容</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>卡片头部 Badge 区</td>
+              <td>新增 <code>dispatchState</code> Badge；如有 <code>lastRateLimitKind</code> 再补一个限频类型 Badge</td>
+              <td>用户先看状态，再看详情</td>
+            </tr>
+            <tr>
+              <td>2 列信息网格</td>
+              <td>新增 <code>当前并发</code>、<code>优先级</code>、<code>冷却剩余</code>、<code>最近 429</code>、<code>最近 suspicious</code>、<code>粘性会话</code>、<code>接入类型</code>、<code>剩余额度</code></td>
+              <td>和现有“优先级/失败次数/最后调用”放在同一层，前端最自然</td>
+            </tr>
+            <tr>
+              <td>冷却场景</td>
+              <td>只在 <code>cooldownRemainingMs</code> 存在时显示倒计时行</td>
+              <td>避免 healthy 卡片塞无意义空字段</td>
+            </tr>
+            <tr>
+              <td>操作按钮区</td>
+              <td>主操作保留 <code>测试接入</code>、<code>更多设置</code>、<code>查看余额</code>、<code>参与调度</code>；刷新与清理阻塞按状态显示</td>
+              <td>把“这个号现在能不能打”抬成一等入口，配置项统一收进弹窗</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout.info" style="margin-top: 14px;">
+          设置弹窗里只保留用户可改的配置项：优先级、并发上限、参与调度。冷却、限频、粘性等都作为只读运行态展示，不要求用户手工维护。
+        </div>
+
+        <pre>// 头部：复用现有 Badge 体系，不重做视觉
+{credential.isCurrent && &lt;Badge variant="success"&gt;当前&lt;/Badge&gt;}
+{credential.disabled && &lt;Badge variant="destructive"&gt;已禁用&lt;/Badge&gt;}
+{credential.dispatchState === 'ready' && &lt;Badge variant="success"&gt;就绪可用&lt;/Badge&gt;}
+{credential.dispatchState === 'saturated' && &lt;Badge variant="warning"&gt;并发已满&lt;/Badge&gt;}
+{credential.dispatchState === 'cooldown' && &lt;Badge variant="outline" className="text-blue-600"&gt;冷却中&lt;/Badge&gt;}
+{credential.dispatchState === 'blocked' && &lt;Badge variant="warning"&gt;刷新阻塞&lt;/Badge&gt;}
+        {credential.lastRateLimitKind === 'suspicious_activity' && (
+  &lt;Badge variant="destructive"&gt;风控限频&lt;/Badge&gt;
+)}</pre>
+      </section>
+
+      <section class="section">
+        <h2>单账号测试</h2>
+        <div class="callout.accent">
+          批量测活只能做巡检，不能回答“这个账号此刻到底能不能打”。真正有用的是单账号测试，而且入口必须直接放在账号卡片上。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>项</th>
+              <th>设计口径</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>主入口</td>
+              <td>每张账号卡片直接提供 <code>测试接入</code> 按钮，不藏到二级页面</td>
+            </tr>
+            <tr>
+              <td>测试目标</td>
+              <td>验证指定账号本身是否还能发起真实请求，并持续观察流式输出；这里必须固定命中该账号，不能自动切到别的账号</td>
+            </tr>
+            <tr>
+              <td>输出结果</td>
+              <td>像控制台一样实时展示开始、连接、输出、完成或报错，而不是等结束后一次性回填</td>
+            </tr>
+            <tr>
+              <td>交互要素</td>
+              <td>必须有模型选择、开始测试、重试、关闭；图像模型场景还要能填写提示词并预留结果预览区</td>
+            </tr>
+            <tr>
+              <td>边界</td>
+              <td>不把它包装成“上游恢复”或“长期稳定性证明”；它只证明当前这一次接入结果，同时允许绕过本地冷却/并发门去直接探测该账号</td>
+            </tr>
+            <tr>
+              <td>批量巡检</td>
+              <td>仍可保留，但只作为运维辅助，不替代单账号判断</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>现有前端 UX 原型</h2>
+        <div class="callout.accent">
+          这不是静态截图，而是一个可交互 demo。你可以切场景、勾选账号、改单账号配置、点每张卡片的“测试接入”，看统计卡和卡片状态如何联动。右上角还应保留轻量版本入口，查看当前版本与更新说明。
+        </div>
+        <div class="ux-scene-switcher" id="ux-scene-switcher">
+          <button class="ux-button active" data-scene="mixed" type="button">混合状态</button>
+          <button class="ux-button" data-scene="all-ready" type="button">全部健康</button>
+          <button class="ux-button" data-scene="under-pressure" type="button">高压限频</button>
+        </div>
+        <div class="ux-live-note">
+          这是 HTML 内部交互原型，不会修改仓库真实数据。批量巡检仍保留，但单账号测试这里按 sub2 的真实形态做成“测试控制台”，不是简单结果卡。
+        </div>
+
+        <div class="ux-frame">
+          <div class="ux-header">
+            <div class="ux-brand">
+              <span class="ux-brand-mark">K</span>
+              <span>Kiro Admin</span>
+            </div>
+            <div class="ux-actions">
+              <button class="ux-button" id="ux-mode-button" type="button">优先级模式</button>
+              <button class="ux-button" id="ux-refresh-button" type="button">刷新</button>
+              <button class="ux-button" type="button">主题</button>
+              <button class="ux-button" type="button">退出</button>
+            </div>
+          </div>
+
+          <div class="ux-shell" id="ux-demo-root"></div>
+          <div class="ux-modal" id="ux-settings-modal">
+            <div class="ux-modal-card">
+              <div class="ux-modal-head">
+                <div>
+                  <div class="ux-modal-title">账号设置</div>
+                  <div class="ux-muted" id="ux-modal-subtitle" style="font-size: 13px; margin-top: 4px;"></div>
+                </div>
+                <button class="ux-button" type="button" id="ux-close-modal">关闭</button>
+              </div>
+                  <div class="ux-modal-body">
+                <div class="ux-form-grid">
+                  <div class="ux-field">
+                    <label for="ux-field-priority">优先级</label>
+                    <input id="ux-field-priority" type="number" min="0" />
+                  </div>
+                  <div class="ux-field">
+                    <label for="ux-field-max">并发上限</label>
+                    <input id="ux-field-max" type="number" min="1" max="20" />
+                  </div>
+                  <div class="ux-field">
+                    <label for="ux-field-enabled-label">参与调度</label>
+                    <div class="ux-switch-row" id="ux-field-enabled-label" style="padding: 7px 0 0; border-bottom: none;">
+                      <div class="ux-muted" style="font-size: 12px;">用户可控制账号是否参与本地调度，不代表上游状态变化</div>
+                      <span class="ux-toggle-track" id="ux-field-enabled"></span>
+                    </div>
+                  </div>
+                  <div class="ux-field">
+                    <label>当前运行状态</label>
+                    <div class="ux-muted" id="ux-runtime-state" style="padding-top: 10px;">-</div>
+                  </div>
+                </div>
+                <div style="margin-top: 18px;">
+                  <div class="ux-switch-row">
+                    <div>
+                      <div style="font-weight: 600;">冷却剩余</div>
+                      <div class="ux-muted" style="font-size: 12px;">由调度器自动计算，这里只展示</div>
+                    </div>
+                    <span id="ux-runtime-cooldown" style="font-weight: 600;">-</span>
+                  </div>
+                  <div class="ux-switch-row">
+                    <div>
+                      <div style="font-weight: 600;">最近限频</div>
+                      <div class="ux-muted" style="font-size: 12px;">普通限频 / 风控限频 / 刷新限频</div>
+                    </div>
+                    <span id="ux-runtime-limit" style="font-weight: 600;">-</span>
+                  </div>
+                  <div class="ux-switch-row">
+                    <div>
+                      <div style="font-weight: 600;">粘性状态</div>
+                      <div class="ux-muted" style="font-size: 12px;">是否已经自动解除会话绑定</div>
+                    </div>
+                    <span id="ux-runtime-sticky" style="font-weight: 600;">-</span>
+                  </div>
+                </div>
+              </div>
+              <div class="ux-modal-foot">
+                <button class="ux-button" type="button" id="ux-modal-cancel">取消</button>
+                <button class="ux-button primary" type="button" id="ux-modal-save">保存设置</button>
+              </div>
+            </div>
+          </div>
+          <div class="ux-modal" id="ux-probe-modal">
+            <div class="ux-modal-card">
+              <div class="ux-modal-head">
+                <div>
+                  <div class="ux-modal-title">测试账号连接</div>
+                  <div class="ux-muted" id="ux-probe-subtitle" style="font-size: 13px; margin-top: 4px;"></div>
+                </div>
+                <button class="ux-button" type="button" id="ux-close-probe">关闭</button>
+              </div>
+              <div class="ux-modal-body">
+                <div class="ux-test-card">
+                  <div class="ux-test-card-main">
+                    <div class="ux-test-icon">▷</div>
+                    <div>
+                      <div class="ux-test-name" id="ux-probe-title">凭据 #12</div>
+                      <div class="ux-test-meta">
+                        <span class="ux-test-chip" id="ux-probe-type">APIKEY</span>
+                        <span id="ux-probe-endpoint-text">us-east-1</span>
+                      </div>
+                    </div>
+                  </div>
+                  <span class="ux-test-status" id="ux-probe-status">可用</span>
+                </div>
+                <div class="ux-test-field">
+                  <label class="ux-test-label" for="ux-probe-model">选择测试模型</label>
+                  <button class="ux-test-select" type="button" id="ux-probe-model">
+                    <span id="ux-probe-model-text">GPT-5.5</span>
+                    <span class="ux-test-select-arrow">⌄</span>
+                  </button>
+                </div>
+                <div class="ux-test-field" id="ux-probe-prompt-wrap" style="display: none;">
+                  <label class="ux-test-label" for="ux-probe-prompt">生图提示词</label>
+                  <textarea class="ux-test-prompt" id="ux-probe-prompt">Generate a clean icon-style test image.</textarea>
+                  <div class="ux-test-prompt-hint">只在图像模型时展示。留空时只验证该模型能否正常响应。</div>
+                </div>
+                <div class="ux-terminal" id="ux-probe-terminal"></div>
+                <div class="ux-test-footnote">
+                  <span>测试模型：<span id="ux-probe-model-note">GPT-5.5</span></span>
+                  <span id="ux-probe-prompt-note">提示词："hi"</span>
+                </div>
+              </div>
+              <div class="ux-modal-foot">
+                <button class="ux-button" type="button" id="ux-probe-cancel">关闭</button>
+                <button class="ux-button primary" type="button" id="ux-probe-run">开始测试</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>前端展示口径</h2>
+        <div class="callout.info">
+          枚举值不要直接把 <code>ready</code>、<code>cooldown</code>、<code>suspicious_activity</code> 这种内部值扔给用户。页面默认显示中文含义，必要时再用 hover 提示补充说明。
+        </div>
+        <div class="callout.ok" style="margin-top: 14px;">
+          当前实现已经按这个口径落地：状态、错误类型、禁用原因都优先显示中文；英文内部值不直接暴露，说明只放在 hover 或说明文案里。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th>展示文案</th>
+              <th>展示方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ready</code></td>
+              <td>就绪可用</td>
+              <td>绿色 Badge，展示 <code>currentConcurrent / maxConcurrent</code></td>
+            </tr>
+            <tr>
+              <td><code>saturated</code></td>
+              <td>并发已满，等待释放</td>
+              <td>黄色 Badge，不额外起子卡片</td>
+            </tr>
+            <tr>
+              <td><code>cooldown</code> + 普通 429</td>
+              <td>冷却中（普通限频）</td>
+              <td>蓝色文字或 outline Badge，显示倒计时</td>
+            </tr>
+            <tr>
+              <td><code>cooldown</code> + suspicious</td>
+              <td>冷却中（风控限频）</td>
+              <td>红色风险 Badge，补充“已解除会话绑定”</td>
+            </tr>
+            <tr>
+              <td><code>blocked</code></td>
+              <td>刷新失败阻塞</td>
+              <td>黄色 Badge，显示 <code>refreshFailureCount</code> 和恢复按钮</td>
+            </tr>
+            <tr>
+              <td><code>disabled</code></td>
+              <td>已禁用</td>
+              <td>沿用当前 destructive / outline 组合</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>类型扩展</h2>
+        <div class="callout.info">
+          不是重写类型，而是在现有 <code>CredentialStatusItem</code> 基础上追加字段。旧字段全部保留。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>字段</th>
+              <th>含义</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>dispatchState</code></td>
+              <td><code>ready / saturated / cooldown / blocked / disabled</code></td>
+            </tr>
+            <tr>
+              <td><code>currentConcurrent</code></td>
+              <td>当前并发数，对应 <code>inflight</code></td>
+            </tr>
+            <tr>
+              <td><code>maxConcurrent</code></td>
+              <td>账号并发上限，可配置</td>
+            </tr>
+            <tr>
+              <td><code>cooldownRemainingMs</code></td>
+              <td>剩余冷却时间</td>
+            </tr>
+            <tr>
+              <td><code>lastRateLimitKind</code></td>
+              <td><code>normal_429 / suspicious_activity / refresh_429</code></td>
+            </tr>
+            <tr>
+              <td><code>recent429Count</code></td>
+              <td>最近普通 429 次数</td>
+            </tr>
+            <tr>
+              <td><code>recentSuspiciousCount</code></td>
+              <td>最近 suspicious 次数</td>
+            </tr>
+            <tr>
+              <td><code>stickySessionCount</code></td>
+              <td>当前绑定到该账号的活跃会话数</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre>// src/admin/types.rs：在现有字段后追加
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatusItem {
+    // ... 现有字段保留 ...
+
+    pub dispatch_state: String,
+    pub current_concurrent: u32,
+    pub max_concurrent: u32,
+    pub cooldown_remaining_ms: Option<u64>,
+    pub last_rate_limit_kind: Option<String>,
+    pub recent_429_count: u32,
+    pub recent_suspicious_count: u32,
+    pub sticky_session_count: u32,
+}</pre>
+        <pre>// admin-ui/src/types/api.ts：前端类型同步追加
+export interface CredentialStatusItem {
+  // ... 现有字段保留 ...
+
+  dispatchState: 'ready' | 'saturated' | 'cooldown' | 'blocked' | 'disabled'
+  currentConcurrent: number
+  maxConcurrent: number
+  cooldownRemainingMs?: number
+  lastRateLimitKind?: 'normal_429' | 'suspicious_activity' | 'refresh_429'
+  recent429Count: number
+  recentSuspiciousCount: number
+  stickySessionCount: number
+}</pre>
+      </section>
+
+      <section class="section">
+        <h2>接口口径</h2>
+        <div class="callout.warn">
+          这里必须跟项目现状对齐。前端 axios 基础路径已经是 <code>/api/admin</code>，现有风格也是对账号动作使用 <code>POST</code>。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>接口</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>GET /api/admin/credentials</code></td>
+              <td>沿用现有接口，只是把扩展运行态字段一起返回</td>
+            </tr>
+            <tr>
+              <td><code>POST /api/admin/credentials/:id/max-concurrent</code></td>
+              <td>调整账号并发上限</td>
+            </tr>
+            <tr>
+              <td><code>POST /api/admin/credentials/:id/test</code></td>
+              <td>对单个账号发起 SSE 流式测试，请求体可带 <code>model_id</code>、<code>prompt</code>，前端持续消费事件</td>
+            </tr>
+            <tr>
+              <td><code>POST /api/admin/credentials/:id/recover</code></td>
+              <td>手动清理本地阻塞标记，不表示上游账号已恢复</td>
+            </tr>
+            <tr>
+              <td><code>POST /api/admin/credentials/:id/reset</code></td>
+              <td>保留现有失败计数清理；是否与 <code>recover</code> 合并要在实现时再定</td>
+            </tr>
+            <tr>
+              <td><code>POST /api/admin/credentials/:id/disabled</code></td>
+              <td>沿用现有启用 / 禁用开关</td>
+            </tr>
+            <tr>
+              <td><code>GET /api/admin/system/version</code></td>
+              <td>返回当前版本、最新 release、发布时间、更新日志链接、部署模式、是否具备在线更新条件</td>
+            </tr>
+            <tr>
+              <td><code>POST /api/admin/system/version/check</code></td>
+              <td>手动触发检查最新版本；只涉及 release 元信息，不涉及账号缓存</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre>POST /api/admin/credentials/:id/max-concurrent
+Content-Type: application/json
+
+{
+  "maxConcurrent": 10
+}
+
+{
+  "success": true,
+  "message": "Max concurrent updated"
+}</pre>
+        <pre>POST /api/admin/credentials/:id/test
+Content-Type: application/json
+
+{
+  "model_id": "gpt-5.5",
+  "prompt": "hi"
+}
+
+data: {"type":"test_start","model":"gpt-5.5"}
+data: {"type":"content","text":"Hello"}
+data: {"type":"test_complete","success":true}</pre>
+        <pre>POST /api/admin/credentials/:id/recover
+Content-Type: application/json
+
+{}
+
+{
+  "success": true,
+  "message": "Credential recovered"
+}</pre>
+        <pre>GET /api/admin/system/version
+
+{
+  "currentVersion": "v0.8.3",
+  "latestVersion": "v0.8.5",
+  "latestPublishedAt": "2026-05-18T09:21:00Z",
+  "releaseNotesUrl": "https://github.com/shusfun/kiro.rs/releases/tag/v0.8.5",
+  "deploymentMode": "binary",
+  "canSelfUpdate": false,
+  "updateHint": "当前实例部署方式不满足在线更新条件。"
+}</pre>
+        <pre>// admin-ui/src/api/credentials.ts 可新增
+export async function setCredentialMaxConcurrent(
+  id: number,
+  maxConcurrent: number
+): Promise&lt;SuccessResponse&gt; {
+  const { data } = await api.post&lt;SuccessResponse&gt;(
+    `/credentials/${id}/max-concurrent`,
+    { maxConcurrent }
+  )
+  return data
+}
+
+export async function recoverCredential(id: number): Promise&lt;SuccessResponse&gt; {
+  const { data } = await api.post&lt;SuccessResponse&gt;(`/credentials/${id}/recover`)
+  return data
+}
+
+export async function testCredential(
+  id: number,
+  modelId: string,
+  prompt = ''
+): Promise&lt;Response&gt; {
+  return fetch(`/api/admin/credentials/${id}/test`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model_id: modelId,
+      prompt
+    })
+  })
+}</pre>
+        <pre>// admin-ui/src/api/system.ts 可新增
+export async function getSystemVersion(): Promise&lt;SystemVersionResponse&gt; {
+  const { data } = await api.get&lt;SystemVersionResponse&gt;('/system/version')
+  return data
+}
+
+export async function checkSystemVersion(): Promise&lt;SystemVersionResponse&gt; {
+  const { data } = await api.post&lt;SystemVersionResponse&gt;('/system/version/check')
+  return data
+}</pre>
+      </section>
+
+      <section class="section">
+        <h2>落地到代码</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>文件</th>
+              <th>职责</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/kiro/token_manager.rs</code></td>
+              <td>维护凭据运行态、pin / 粘性命中支持、并发槽位、冷却状态、可用凭据过滤</td>
+            </tr>
+            <tr>
+              <td><code>src/kiro/provider.rs</code></td>
+              <td>单次请求内维护 <code>triedAccountIds</code>，请求开始占槽，请求结束释放，根据错误类型写冷却，并处理 pin 失败后的回退</td>
+            </tr>
+            <tr>
+              <td>管理接口 / 快照输出</td>
+              <td>把运行态转成兼容参数和前端可见数据</td>
+            </tr>
+            <tr>
+              <td>版本信息服务</td>
+              <td>汇总当前构建版本、GitHub Release 元信息、部署模式判断和更新条件标记，供管理面显示</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>分阶段实施</h2>
+        <pre>Phase 1
+- 账号 inflight / maxConcurrent
+- 普通 429 和 suspicious 冷却
+- 单请求 triedAccountIds
+
+Phase 2
+- session sticky
+- 账号级状态快照
+- sub2 参数兼容输出
+
+Phase 3
+- 等待队列
+- 更细的负载感知
+- 前端可视化完善
+
+Phase 4
+- 版本信息接口
+- 管理面版本展示
+- GitHub Release 检测能力
+
+Phase 5
+- 在线更新
+- 重启
+- 回滚</pre>
+      </section>
+
+      <section class="section">
+        <h2>实施清单</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Phase 1: 后端状态模型</h3>
+            <ul>
+              <li>在 <code>token_manager.rs</code> 维护 <code>inflight</code>、<code>maxConcurrent</code>、<code>cooldownUntil</code></li>
+              <li>实现 <code>ready / saturated / cooldown / blocked / disabled</code></li>
+              <li>实现并发槽位占用和释放</li>
+              <li>实现普通 429、suspicious、refresh 429 的分类处理</li>
+              <li>扩展快照输出字段</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Phase 2: Admin API 扩展</h3>
+            <ul>
+              <li>状态快照新增并发、冷却、错误分类、粘性统计字段</li>
+              <li>新增并发上限调整接口</li>
+              <li>新增单账号测试接口</li>
+              <li>新增手动恢复接口</li>
+              <li>支持管理面直接观察运行态</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Phase 3: 前端 UI 改造</h3>
+            <ul>
+              <li>全局统计新增冷却中、并发饱和、已禁用</li>
+              <li>账号卡片新增运行状态徽标</li>
+              <li>账号卡片把“测试接入”作为主操作</li>
+              <li>新增并发进度条、冷却倒计时、错误类型标签</li>
+              <li>新增粘性会话数展示和管理操作区</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Phase 4: 实时更新</h3>
+            <ul>
+              <li>冷却倒计时前端每秒递减</li>
+              <li>并发和状态沿用轮询或后续事件推送</li>
+              <li>状态变化后自动刷新卡片</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Phase 5: 版本治理</h3>
+            <ul>
+              <li>版本信息接口与管理面展示</li>
+              <li>GitHub Release 检测</li>
+              <li>在线更新、重启、回滚能力</li>
+              <li>按部署条件控制按钮与提示</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>设计说明</h2>
+        <ul>
+          <li>状态优先级：<code>disabled &gt; blocked &gt; cooldown &gt; saturated &gt; ready</code></li>
+          <li>颜色语义：绿色表示健康，黄色表示警告，蓝色表示冷却信息，灰色表示禁用，红色表示高风险</li>
+          <li>并发上限支持在线调整并即时生效</li>
+          <li>冷却倒计时由前端递减，到 0 后自动刷新状态</li>
+          <li>普通 429 和 suspicious 必须在展示上明确区分，不能只写“限频”</li>
+          <li><code>blocked</code> 状态的“手动恢复”只针对刷新失败阻塞，不针对 suspended</li>
+          <li>版本入口放在顶部轻量区域，避免挤占账号调度主视图</li>
+          <li>在线更新相关按钮是否可用，取决于实例是否满足更新条件</li>
+        </ul>
+      </section>
+
+      <section class="section">
+        <h2>验收标准</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>目标</th>
+              <th>验收口径</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>429 摘流有效</td>
+              <td>同账号 suspicious 再次命中间隔不再是亚秒级集中</td>
+            </tr>
+            <tr>
+              <td>并发槽位有效</td>
+              <td>账号不会超过配置并发上限</td>
+            </tr>
+            <tr>
+              <td>粘性可控</td>
+              <td>健康时能稳定复用，出错时能自动脱粘</td>
+            </tr>
+            <tr>
+              <td>请求内不重复撞击</td>
+              <td>一次请求重试不会二次命中同一账号</td>
+            </tr>
+            <tr>
+              <td>展示可解释</td>
+              <td>前端能看到当前状态、并发、冷却，而不是只看到“失败”</td>
+            </tr>
+            <tr>
+              <td>版本信息可核对</td>
+              <td>管理面能展示当前版本、最新版本和更新条件，且与实际部署方式一致</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      (() => {
+        const root = document.getElementById('ux-demo-root');
+        const modeButton = document.getElementById('ux-mode-button');
+        const refreshButton = document.getElementById('ux-refresh-button');
+        const sceneButtons = Array.from(document.querySelectorAll('#ux-scene-switcher [data-scene]'));
+        const settingsModal = document.getElementById('ux-settings-modal');
+        const probeModal = document.getElementById('ux-probe-modal');
+        const modalSubtitle = document.getElementById('ux-modal-subtitle');
+        const closeModalButton = document.getElementById('ux-close-modal');
+        const cancelModalButton = document.getElementById('ux-modal-cancel');
+        const saveModalButton = document.getElementById('ux-modal-save');
+        const probeSubtitle = document.getElementById('ux-probe-subtitle');
+        const closeProbeButton = document.getElementById('ux-close-probe');
+        const cancelProbeButton = document.getElementById('ux-probe-cancel');
+        const runProbeButton = document.getElementById('ux-probe-run');
+        const probeTitle = document.getElementById('ux-probe-title');
+        const probeType = document.getElementById('ux-probe-type');
+        const probeEndpointText = document.getElementById('ux-probe-endpoint-text');
+        const probeStatus = document.getElementById('ux-probe-status');
+        const probeModel = document.getElementById('ux-probe-model');
+        const probeModelText = document.getElementById('ux-probe-model-text');
+        const probePromptWrap = document.getElementById('ux-probe-prompt-wrap');
+        const probePrompt = document.getElementById('ux-probe-prompt');
+        const probeTerminal = document.getElementById('ux-probe-terminal');
+        const probeModelNote = document.getElementById('ux-probe-model-note');
+        const probePromptNote = document.getElementById('ux-probe-prompt-note');
+        const priorityInput = document.getElementById('ux-field-priority');
+        const maxInput = document.getElementById('ux-field-max');
+        const enabledToggle = document.getElementById('ux-field-enabled');
+        const runtimeState = document.getElementById('ux-runtime-state');
+        const runtimeCooldown = document.getElementById('ux-runtime-cooldown');
+        const runtimeLimit = document.getElementById('ux-runtime-limit');
+        const runtimeSticky = document.getElementById('ux-runtime-sticky');
+        let probeTimer = null;
+        const probeModelOptions = ['GPT-5.5', 'Claude Sonnet 4', 'Kiro Default', 'Gemini 2.5 Flash Image'];
+
+        const seeds = {
+          mixed: [
+            { id: 1, email: 'user1@example.com', endpoint: 'us-east-1', authMethod: 'Social', dispatchState: 'ready', current: true, disabled: false, priority: 0, failureCount: 0, refreshFailureCount: 0, currentConcurrent: 2, maxConcurrent: 5, stickySessionCount: 3, subscription: 'KIRO PRO+', successCount: 1234, lastUsed: '2 分钟前', remaining: '450 / 500', lastRateLimitKind: null, recent429Count: 0, recentSuspiciousCount: 0, cooldownRemainingSec: 0, disabledReason: '', stickyDetached: false },
+            { id: 4, email: 'user4@example.com', endpoint: 'us-east-1', authMethod: 'IdC', dispatchState: 'cooldown', current: false, disabled: false, priority: 1, failureCount: 2, refreshFailureCount: 0, currentConcurrent: 0, maxConcurrent: 3, stickySessionCount: 0, subscription: 'KIRO PRO', successCount: 542, lastUsed: '14 秒前', remaining: '210 / 500', lastRateLimitKind: 'suspicious_activity', recent429Count: 2, recentSuspiciousCount: 1, cooldownRemainingSec: 1695, disabledReason: '', stickyDetached: true },
+            { id: 6, email: 'user6@example.com', endpoint: 'us-east-1', authMethod: 'Social', dispatchState: 'blocked', current: false, disabled: true, priority: 2, failureCount: 0, refreshFailureCount: 5, currentConcurrent: 0, maxConcurrent: 3, stickySessionCount: 0, subscription: '未知', successCount: 188, lastUsed: '1 小时前', remaining: '未知', lastRateLimitKind: 'refresh_429', recent429Count: 0, recentSuspiciousCount: 0, cooldownRemainingSec: 0, disabledReason: '403 Suspended', stickyDetached: false },
+          ],
+          'all-ready': [
+            { id: 2, email: 'alpha@example.com', endpoint: 'us-east-1', authMethod: 'Social', dispatchState: 'ready', current: true, disabled: false, priority: 0, failureCount: 0, refreshFailureCount: 0, currentConcurrent: 1, maxConcurrent: 4, stickySessionCount: 2, subscription: 'KIRO PRO+', successCount: 820, lastUsed: '刚刚', remaining: '488 / 500', lastRateLimitKind: null, recent429Count: 0, recentSuspiciousCount: 0, cooldownRemainingSec: 0, disabledReason: '', stickyDetached: false },
+            { id: 3, email: 'beta@example.com', endpoint: 'eu-west-1', authMethod: 'IdC', dispatchState: 'ready', current: false, disabled: false, priority: 1, failureCount: 0, refreshFailureCount: 0, currentConcurrent: 2, maxConcurrent: 5, stickySessionCount: 4, subscription: 'KIRO PRO', successCount: 734, lastUsed: '26 秒前', remaining: '320 / 500', lastRateLimitKind: null, recent429Count: 0, recentSuspiciousCount: 0, cooldownRemainingSec: 0, disabledReason: '', stickyDetached: false },
+            { id: 5, email: 'gamma@example.com', endpoint: 'ap-southeast-1', authMethod: 'API Key', dispatchState: 'ready', current: false, disabled: false, priority: 2, failureCount: 0, refreshFailureCount: 0, currentConcurrent: 0, maxConcurrent: 2, stickySessionCount: 1, subscription: '按量', successCount: 155, lastUsed: '9 分钟前', remaining: '按量', lastRateLimitKind: null, recent429Count: 0, recentSuspiciousCount: 0, cooldownRemainingSec: 0, disabledReason: '', stickyDetached: false },
+          ],
+          'under-pressure': [
+            { id: 7, email: 'burst-a@example.com', endpoint: 'us-east-1', authMethod: 'Social', dispatchState: 'saturated', current: true, disabled: false, priority: 0, failureCount: 1, refreshFailureCount: 0, currentConcurrent: 5, maxConcurrent: 5, stickySessionCount: 5, subscription: 'KIRO PRO+', successCount: 1680, lastUsed: '刚刚', remaining: '160 / 500', lastRateLimitKind: null, recent429Count: 1, recentSuspiciousCount: 0, cooldownRemainingSec: 0, disabledReason: '', stickyDetached: false },
+            { id: 8, email: 'burst-b@example.com', endpoint: 'us-east-1', authMethod: 'IdC', dispatchState: 'cooldown', current: false, disabled: false, priority: 1, failureCount: 3, refreshFailureCount: 0, currentConcurrent: 0, maxConcurrent: 4, stickySessionCount: 0, subscription: 'KIRO PRO', successCount: 904, lastUsed: '8 秒前', remaining: '98 / 500', lastRateLimitKind: 'normal_429', recent429Count: 4, recentSuspiciousCount: 0, cooldownRemainingSec: 276, disabledReason: '', stickyDetached: false },
+            { id: 9, email: 'burst-c@example.com', endpoint: 'us-east-1', authMethod: 'Social', dispatchState: 'cooldown', current: false, disabled: false, priority: 2, failureCount: 4, refreshFailureCount: 1, currentConcurrent: 0, maxConcurrent: 3, stickySessionCount: 0, subscription: 'KIRO PRO', successCount: 610, lastUsed: '5 秒前', remaining: '75 / 500', lastRateLimitKind: 'suspicious_activity', recent429Count: 2, recentSuspiciousCount: 2, cooldownRemainingSec: 1712, disabledReason: '', stickyDetached: true },
+          ],
+        };
+
+        const state = {
+          scene: 'mixed',
+          mode: 'priority',
+          selectedIds: new Set(),
+          credentials: [],
+          editingId: null,
+          modalDraft: null,
+          probingId: null,
+        };
+
+        function cloneScene(name) {
+          return seeds[name].map((item) => ({ ...item }));
+        }
+
+        function formatCooldown(sec) {
+          const safe = Math.max(0, sec);
+          const h = String(Math.floor(safe / 3600)).padStart(2, '0');
+          const m = String(Math.floor((safe % 3600) / 60)).padStart(2, '0');
+          const s = String(safe % 60).padStart(2, '0');
+          return `${h}:${m}:${s}`;
+        }
+
+        function badge(kind, text) {
+          return `<span class="ux-badge ${kind}">${text}</span>`;
+        }
+
+        function stateMeta(cred) {
+          if (cred.disabled) {
+            return { label: '已禁用', tip: '该账号已停止参与调度，需要人工重新启用。' };
+          }
+          if (cred.dispatchState === 'ready') {
+            return { label: '就绪可用', tip: '账号当前可继续接收请求。' };
+          }
+          if (cred.dispatchState === 'saturated') {
+            return { label: '并发已满', tip: '当前并发已达到上限，需等待已有请求释放。' };
+          }
+          if (cred.dispatchState === 'cooldown') {
+            return { label: '冷却中', tip: '账号刚触发限频或风控，调度器会在冷却结束后自动恢复。' };
+          }
+          if (cred.dispatchState === 'blocked') {
+            return { label: '刷新阻塞', tip: '刷新失败达到阈值，暂不继续使用该账号。' };
+          }
+          return { label: cred.dispatchState, tip: '当前运行状态。' };
+        }
+
+        function rateLimitMeta(kind) {
+          if (kind === 'suspicious_activity') {
+            return { label: '风控限频', tip: '上游返回 suspicious activity，需要更长冷却，并解除会话粘性。' };
+          }
+          if (kind === 'normal_429') {
+            return { label: '普通限频', tip: '上游返回 429，说明当前请求过快，需要短时冷却。' };
+          }
+          if (kind === 'refresh_429') {
+            return { label: '刷新限频', tip: '刷新 token 时被限频，和正常请求限频分开统计。' };
+          }
+          return null;
+        }
+
+        function authMethodLabel(value) {
+          if (value === 'Social') return '社交登录';
+          if (value === 'IdC') return '企业登录';
+          if (value === 'API Key') return 'API 密钥';
+          return value;
+        }
+
+        function stateBadge(cred) {
+          if (cred.disabled) return '';
+          const meta = stateMeta(cred);
+          if (cred.dispatchState === 'ready') return `<span class="ux-with-tip ux-hint" data-tip="${meta.tip}">${badge('success', meta.label)}</span>`;
+          if (cred.dispatchState === 'saturated') return `<span class="ux-with-tip ux-hint" data-tip="${meta.tip}">${badge('warning', meta.label)}</span>`;
+          if (cred.dispatchState === 'cooldown') return `<span class="ux-with-tip ux-hint" data-tip="${meta.tip}">${badge('info', meta.label)}</span>`;
+          if (cred.dispatchState === 'blocked') return `<span class="ux-with-tip ux-hint" data-tip="${meta.tip}">${badge('warning', meta.label)}</span>`;
+          return '';
+        }
+
+        function limitBadge(cred) {
+          const meta = rateLimitMeta(cred.lastRateLimitKind);
+          if (!meta) return '';
+          const variant = cred.lastRateLimitKind === 'normal_429' ? 'warning' : 'danger';
+          return `<span class="ux-with-tip ux-hint" data-tip="${meta.tip}">${badge(variant, meta.label)}</span>`;
+        }
+
+        function progressClass(cred) {
+          if (cred.currentConcurrent >= cred.maxConcurrent) return 'danger';
+          if (cred.currentConcurrent / Math.max(cred.maxConcurrent, 1) >= 0.75) return 'warn';
+          return '';
+        }
+
+        function terminalLine(text, kind = 'dim') {
+          return `<div class="ux-terminal-line ${kind}">${text}</div>`;
+        }
+
+        function currentProbeModel() {
+          return probeModelText.textContent || probeModelOptions[0];
+        }
+
+        function supportsImagePrompt() {
+          return currentProbeModel().toLowerCase().includes('image');
+        }
+
+        function syncProbePromptVisibility() {
+          const imageMode = supportsImagePrompt();
+          probePromptWrap.style.display = imageMode ? 'block' : 'none';
+          probePromptNote.textContent = imageMode
+            ? `提示词："${probePrompt.value.trim() || 'Generate a clean icon-style test image.'}"`
+            : '提示词："hi"';
+          probeModelNote.textContent = currentProbeModel();
+        }
+
+        function computeStats() {
+          const total = state.credentials.length;
+          const available = state.credentials.filter((c) => !c.disabled).length;
+          const current = state.credentials.find((c) => c.current);
+          const cooldown = state.credentials.filter((c) => c.dispatchState === 'cooldown').length;
+          const saturated = state.credentials.filter((c) => c.dispatchState === 'saturated').length;
+          const blocked = state.credentials.filter((c) => c.dispatchState === 'blocked' && !c.disabled).length;
+          const disabled = state.credentials.filter((c) => c.disabled).length;
+          return { total, available, currentId: current ? current.id : '-', cooldown, saturated, blocked, disabled };
+        }
+
+        function renderCard(cred) {
+          const selected = state.selectedIds.has(cred.id);
+          const ratio = Math.max(0, Math.min(100, Math.round((cred.currentConcurrent / Math.max(cred.maxConcurrent, 1)) * 100)));
+          const progress = progressClass(cred);
+          const progressCls = progress ? `ux-progress-fill ${progress}` : 'ux-progress-fill';
+          return `
+            <div class="ux-credential-card ${cred.current ? 'current' : ''} ${selected ? 'selected' : ''}">
+              <div class="ux-credential-head">
+                <div>
+                  <div class="ux-selection">
+                    <span class="ux-checkbox ${selected ? 'checked' : ''}" data-action="toggle-select" data-id="${cred.id}"></span>
+                    <div class="ux-credential-title">
+                      ${cred.email}
+                      ${cred.current ? badge('success', '当前') : ''}
+                      ${stateBadge(cred)}
+                      ${cred.disabled ? `<span class="ux-with-tip ux-hint" data-tip="${stateMeta(cred).tip}">${badge('danger', '已禁用')}</span>` : ''}
+                      ${cred.disabled && cred.disabledReason ? badge('outline', cred.disabledReason) : ''}
+                      ${limitBadge(cred)}
+                      ${badge('secondary', authMethodLabel(cred.authMethod))}
+                      ${badge('outline', cred.endpoint)}
+                    </div>
+                  </div>
+                </div>
+                <div class="ux-toggle">
+                  参与调度
+                  <span class="ux-toggle-track ${cred.disabled ? 'off' : ''}" data-action="toggle-enabled" data-id="${cred.id}"></span>
+                </div>
+              </div>
+
+              <div class="ux-info-grid">
+                <div class="ux-info-item">
+                  <div class="ux-info-label">优先级</div>
+                  <div class="ux-info-value">${cred.priority}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">失败次数</div>
+                  <div class="ux-info-value ${cred.failureCount > 0 ? 'danger' : ''}">${cred.failureCount}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">当前并发</div>
+                  <div class="ux-info-value">${cred.currentConcurrent} / ${cred.maxConcurrent}</div>
+                  <div class="ux-progress"><div class="${progressCls}" style="width: ${ratio}%;"></div></div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">并发上限</div>
+                  <div class="ux-info-value">${cred.maxConcurrent}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">刷新失败</div>
+                  <div class="ux-info-value ${cred.refreshFailureCount > 0 ? 'danger' : ''}">${cred.refreshFailureCount}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">粘性会话</div>
+                  <div class="ux-info-value">${cred.stickyDetached ? '已解除绑定' : `${cred.stickySessionCount} 个`}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">${cred.cooldownRemainingSec > 0 ? '冷却剩余' : '最近 429'}</div>
+                  <div class="ux-info-value ${cred.cooldownRemainingSec > 0 ? 'danger' : (cred.recent429Count > 0 ? 'warn' : '')}">
+                    ${cred.cooldownRemainingSec > 0 ? formatCooldown(cred.cooldownRemainingSec) : `${cred.recent429Count} 次`}
+                  </div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">最近风控</div>
+                  <div class="ux-info-value ${cred.recentSuspiciousCount > 0 ? 'danger' : ''}">${cred.recentSuspiciousCount} 次</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">订阅等级</div>
+                  <div class="ux-info-value">${cred.subscription}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">成功次数</div>
+                  <div class="ux-info-value">${cred.successCount}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">最后调用</div>
+                  <div class="ux-info-value">${cred.lastUsed}</div>
+                </div>
+                <div class="ux-info-item">
+                  <div class="ux-info-label">剩余用量</div>
+                  <div class="ux-info-value">${cred.remaining}</div>
+                </div>
+              </div>
+
+              <div class="ux-divider"></div>
+              <div class="ux-button-row">
+                <button class="ux-button primary" type="button" data-action="probe" data-id="${cred.id}">测试接入</button>
+                <button class="ux-button" type="button" data-action="open-settings" data-id="${cred.id}">更多设置</button>
+                ${cred.authMethod === 'API Key' ? '' : `<button class="ux-button" type="button" data-action="refresh-token" data-id="${cred.id}">刷新 Token</button>`}
+                ${cred.dispatchState === 'blocked' ? `<button class="ux-button" type="button" data-action="recover" data-id="${cred.id}">清理本地阻塞</button>` : ''}
+                <button class="ux-button ${cred.disabled ? 'destructive' : ''}" type="button" data-action="toggle-enabled" data-id="${cred.id}">${cred.disabled ? '恢复参与调度' : '停止参与调度'}</button>
+              </div>
+            </div>
+          `;
+        }
+
+        function render() {
+          const stats = computeStats();
+          root.innerHTML = `
+            <div class="ux-stat-grid">
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">凭据总数</div>
+                <div class="ux-stat-value">${stats.total}</div>
+              </div>
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">可用凭据</div>
+                <div class="ux-stat-value" style="color: #16a34a;">${stats.available}</div>
+              </div>
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">当前活跃</div>
+                <div class="ux-stat-value">#${stats.currentId} ${badge('success', '活跃')}</div>
+              </div>
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">冷却中</div>
+                <div class="ux-stat-value" style="color: #2563eb;">${stats.cooldown}</div>
+              </div>
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">并发饱和</div>
+                <div class="ux-stat-value" style="color: #d97706;">${stats.saturated}</div>
+              </div>
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">本地阻塞</div>
+                <div class="ux-stat-value" style="color: #d97706;">${stats.blocked}</div>
+              </div>
+              <div class="ux-stat-card">
+                <div class="ux-stat-title">停止调度</div>
+                <div class="ux-stat-value" style="color: #ef4444;">${stats.disabled}</div>
+              </div>
+            </div>
+
+            <div class="ux-panel">
+              <div class="ux-panel-head">
+                <div>
+                  <div class="ux-panel-title">凭据管理</div>
+                  <div class="ux-muted" style="margin-top: 4px; font-size: 13px;">已选择 ${state.selectedIds.size} 个，当前模式：${state.mode === 'priority' ? '优先级模式' : '均衡负载'}。</div>
+                </div>
+                <div class="ux-toolbar">
+                  <button class="ux-button" type="button">批量巡检</button>
+                  <button class="ux-button" type="button">批量刷新 Token</button>
+                  <button class="ux-button" type="button">恢复异常</button>
+                  <button class="ux-button" type="button">查询信息</button>
+                  <button class="ux-button" type="button">批量导入</button>
+                  <button class="ux-button primary" type="button">添加凭据</button>
+                </div>
+              </div>
+              <div class="ux-credential-grid">
+                ${state.credentials.map(renderCard).join('')}
+              </div>
+            </div>
+          `;
+        }
+
+        function syncModalToggles() {
+          if (!state.modalDraft) return;
+          enabledToggle.classList.toggle('off', !state.modalDraft.enabled);
+          enabledToggle.title = state.modalDraft.enabled ? '当前会参与本地调度。' : '当前不会参与本地调度。';
+        }
+
+        function openSettings(id) {
+          const cred = find(id);
+          if (!cred) return;
+          state.editingId = id;
+          state.modalDraft = {
+            priority: cred.priority,
+            maxConcurrent: cred.maxConcurrent,
+            enabled: !cred.disabled,
+          };
+          modalSubtitle.textContent = `${cred.email} · ${cred.endpoint}`;
+          priorityInput.value = String(state.modalDraft.priority);
+          maxInput.value = String(state.modalDraft.maxConcurrent);
+          runtimeState.textContent = stateMeta(cred).label;
+          runtimeState.title = stateMeta(cred).tip;
+          runtimeCooldown.textContent = cred.cooldownRemainingSec > 0 ? formatCooldown(cred.cooldownRemainingSec) : '无需等待';
+          const limit = rateLimitMeta(cred.lastRateLimitKind);
+          runtimeLimit.textContent = limit ? limit.label : '无';
+          runtimeLimit.title = limit ? limit.tip : '最近没有限频记录。';
+          runtimeSticky.textContent = cred.stickyDetached ? '已解除绑定' : `${cred.stickySessionCount} 个活跃会话`;
+          runtimeSticky.title = cred.stickyDetached ? '风控触发后，会话已自动切走，不再继续粘在该账号。' : '当前仍保留会话绑定，用于提升同会话稳定性。';
+          syncModalToggles();
+          settingsModal.classList.add('open');
+        }
+
+        function closeSettings() {
+          settingsModal.classList.remove('open');
+          state.editingId = null;
+          state.modalDraft = null;
+        }
+
+        function runProbe(id) {
+          const cred = find(id);
+          if (!cred) return;
+          if (probeTimer) {
+            clearTimeout(probeTimer);
+            probeTimer = null;
+          }
+          const model = currentProbeModel();
+          const prompt = supportsImagePrompt()
+            ? (probePrompt.value.trim() || 'Generate a clean icon-style test image.')
+            : 'hi';
+          syncProbePromptVisibility();
+          runProbeButton.disabled = true;
+          runProbeButton.textContent = '测试中...';
+          probeTerminal.innerHTML = [
+            terminalLine('▷ 准备测试。点击"开始测试"按钮开始...', 'dim'),
+            terminalLine(`开始测试账号：${cred.email}`, 'info'),
+            terminalLine(`账号类型：${authMethodLabel(cred.authMethod)}`, 'dim'),
+            terminalLine('', 'dim'),
+            terminalLine('正在连接测试接口...', 'warn'),
+          ].join('');
+          runProbeButton.disabled = true;
+          probeTimer = setTimeout(() => {
+            let lines = [
+              terminalLine('已连接测试接口', 'ok'),
+              terminalLine(`使用模型：${model}`, 'info'),
+              terminalLine(supportsImagePrompt() ? '发送生图测试请求...' : '发送测试消息...', 'dim'),
+              terminalLine('', 'dim'),
+              terminalLine('响应输出：', 'warn'),
+            ];
+
+            if (cred.disabled && cred.disabledReason === '403 Suspended') {
+              lines = lines.concat([
+                terminalLine('Error: HTTP error! status: 403', 'error'),
+              ]);
+            } else if (cred.dispatchState === 'blocked') {
+              lines = lines.concat([
+                terminalLine('本地阻塞仍未解除，当前不承接新请求。', 'error'),
+              ]);
+            } else if (cred.dispatchState === 'cooldown' && cred.lastRateLimitKind === 'suspicious_activity') {
+              lines = lines.concat([
+                terminalLine('suspicious activity detected', 'streaming'),
+                terminalLine(`账号仍在冷却中，请等待 ${formatCooldown(cred.cooldownRemainingSec)} 后再试。`, 'error'),
+              ]);
+            } else if (cred.dispatchState === 'cooldown') {
+              lines = lines.concat([
+                terminalLine('rate limit hit', 'streaming'),
+                terminalLine(`当前命中短时限频，请等待 ${formatCooldown(cred.cooldownRemainingSec)} 后再试。`, 'warn'),
+              ]);
+            } else if (supportsImagePrompt()) {
+              lines = lines.concat([
+                terminalLine(`已接收提示词：${prompt}`, 'streaming'),
+                terminalLine('[image preview] 已返回一张测试图片', 'ok'),
+              ]);
+            } else {
+              lines = lines.concat([
+                terminalLine('Hello, your account connection is working.', 'streaming'),
+              ]);
+            }
+
+            probeTerminal.innerHTML = lines.join('');
+            runProbeButton.disabled = false;
+            runProbeButton.textContent = cred.disabled || cred.dispatchState === 'blocked' || cred.dispatchState === 'cooldown' ? '重新测试' : '再次测试';
+            probeTimer = null;
+          }, 900);
+        }
+
+        function openProbe(id) {
+          const cred = find(id);
+          if (!cred) return;
+          state.probingId = id;
+          probeSubtitle.textContent = `${cred.email} · ${cred.endpoint}`;
+          probeTitle.textContent = cred.email || `凭据 #${cred.id}`;
+          probeType.textContent = cred.authMethod === 'API Key' ? 'APIKEY' : cred.authMethod.toUpperCase();
+          probeEndpointText.textContent = cred.endpoint;
+          probeStatus.textContent = cred.disabled ? '已禁用' : '可用';
+          probeModelText.textContent = cred.authMethod === 'API Key' ? 'GPT-5.5' : 'Claude Sonnet 4';
+          probePrompt.value = 'Generate a clean icon-style test image.';
+          probeTerminal.innerHTML = terminalLine('▷ 准备测试。点击"开始测试"按钮开始...', 'dim');
+          runProbeButton.textContent = '开始测试';
+          syncProbePromptVisibility();
+          probeModal.classList.add('open');
+        }
+
+        function closeProbe() {
+          if (probeTimer) {
+            clearTimeout(probeTimer);
+            probeTimer = null;
+          }
+          probeModal.classList.remove('open');
+          state.probingId = null;
+          runProbeButton.disabled = false;
+          runProbeButton.textContent = '开始测试';
+        }
+
+        function setScene(scene) {
+          state.scene = scene;
+          state.credentials = cloneScene(scene);
+          state.selectedIds = new Set(state.credentials.slice(0, Math.min(2, state.credentials.length)).map((item) => item.id));
+          sceneButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.scene === scene));
+          render();
+        }
+
+        function find(id) {
+          return state.credentials.find((item) => item.id === id);
+        }
+
+        root.addEventListener('click', (event) => {
+          const trigger = event.target.closest('[data-action]');
+          if (!trigger) return;
+          const id = Number(trigger.dataset.id);
+          const action = trigger.dataset.action;
+          const cred = find(id);
+          if (!cred) return;
+
+          if (action === 'toggle-select') {
+            if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+            else state.selectedIds.add(id);
+          } else if (action === 'probe') {
+            openProbe(id);
+            return;
+          } else if (action === 'open-settings') {
+            openSettings(id);
+            return;
+          } else if (action === 'toggle-enabled') {
+            cred.disabled = !cred.disabled;
+            if (cred.disabled) {
+              cred.current = false;
+              cred.dispatchState = 'blocked';
+              cred.disabledReason = cred.disabledReason || '手动禁用';
+            } else {
+              cred.disabledReason = '';
+              cred.dispatchState = cred.cooldownRemainingSec > 0 ? 'cooldown' : (cred.currentConcurrent >= cred.maxConcurrent ? 'saturated' : 'ready');
+            }
+          } else if (action === 'refresh-token') {
+            cred.refreshFailureCount = Math.max(0, cred.refreshFailureCount - 1);
+            if (cred.dispatchState === 'blocked' && cred.refreshFailureCount === 0 && !cred.disabled) {
+              cred.dispatchState = 'ready';
+            }
+          } else if (action === 'recover') {
+            cred.disabled = false;
+            cred.disabledReason = '';
+            cred.dispatchState = cred.cooldownRemainingSec > 0 ? 'cooldown' : 'ready';
+            cred.refreshFailureCount = 0;
+          }
+
+          render();
+        });
+
+        priorityInput.addEventListener('input', () => {
+          if (!state.modalDraft) return;
+          state.modalDraft.priority = Math.max(0, Number(priorityInput.value) || 0);
+        });
+
+        maxInput.addEventListener('input', () => {
+          if (!state.modalDraft) return;
+          state.modalDraft.maxConcurrent = Math.max(1, Number(maxInput.value) || 1);
+        });
+
+        enabledToggle.addEventListener('click', () => {
+          if (!state.modalDraft) return;
+          state.modalDraft.enabled = !state.modalDraft.enabled;
+          syncModalToggles();
+        });
+
+        closeModalButton.addEventListener('click', closeSettings);
+        cancelModalButton.addEventListener('click', closeSettings);
+        closeProbeButton.addEventListener('click', closeProbe);
+        cancelProbeButton.addEventListener('click', closeProbe);
+        probeModel.addEventListener('click', () => {
+          const current = currentProbeModel();
+          const index = probeModelOptions.indexOf(current);
+          const next = probeModelOptions[(index + 1) % probeModelOptions.length];
+          probeModelText.textContent = next;
+          syncProbePromptVisibility();
+        });
+        probePrompt.addEventListener('input', () => {
+          syncProbePromptVisibility();
+        });
+        settingsModal.addEventListener('click', (event) => {
+          if (event.target === settingsModal) closeSettings();
+        });
+        probeModal.addEventListener('click', (event) => {
+          if (event.target === probeModal) closeProbe();
+        });
+        runProbeButton.addEventListener('click', () => {
+          if (state.probingId == null) return;
+          runProbe(state.probingId);
+        });
+
+        saveModalButton.addEventListener('click', () => {
+          if (state.editingId == null || !state.modalDraft) return;
+          const cred = find(state.editingId);
+          if (!cred) return;
+          cred.priority = state.modalDraft.priority;
+          cred.maxConcurrent = state.modalDraft.maxConcurrent;
+          cred.disabled = !state.modalDraft.enabled;
+          cred.dispatchState = cred.disabled ? 'blocked' : (cred.cooldownRemainingSec > 0 ? 'cooldown' : (cred.currentConcurrent >= cred.maxConcurrent ? 'saturated' : 'ready'));
+          cred.disabledReason = cred.disabled ? (cred.disabledReason || '手动禁用') : '';
+          closeSettings();
+          render();
+        });
+
+        modeButton.addEventListener('click', () => {
+          state.mode = state.mode === 'priority' ? 'balanced' : 'priority';
+          modeButton.textContent = state.mode === 'priority' ? '优先级模式' : '均衡负载';
+          render();
+        });
+
+        refreshButton.addEventListener('click', render);
+
+        sceneButtons.forEach((button) => {
+          button.addEventListener('click', () => setScene(button.dataset.scene));
+        });
+
+        setInterval(() => {
+          let changed = false;
+          state.credentials.forEach((cred) => {
+            if (cred.cooldownRemainingSec > 0) {
+              cred.cooldownRemainingSec -= 1;
+              changed = true;
+              if (cred.cooldownRemainingSec === 0 && !cred.disabled) {
+                cred.dispatchState = cred.currentConcurrent >= cred.maxConcurrent ? 'saturated' : 'ready';
+                cred.lastRateLimitKind = null;
+                cred.stickyDetached = false;
+              }
+            }
+          });
+          if (changed) render();
+        }, 1000);
+
+        setScene('mixed');
+      })();
+    </script>
+  </body>
+</html>

@@ -84,6 +84,31 @@ export interface SetPriorityRequest {
   priority: number
 }
 
+export interface SetMaxConcurrentRequest {
+  maxConcurrent: number
+}
+
+export interface CredentialTestRequest {
+  modelId: string
+  prompt?: string
+}
+
+export interface CredentialTestEvent {
+  type: 'test_start' | 'content' | 'tool_use' | 'context_usage' | 'upstream_error' | 'upstream_exception' | 'test_complete'
+  accountId?: number
+  model?: string
+  text?: string
+  name?: string
+  input?: string
+  stop?: boolean
+  percentage?: number
+  code?: string
+  message?: string
+  exceptionType?: string
+  success?: boolean
+  summary?: string
+}
+
 // 添加凭据请求
 export interface AddCredentialRequest {
   refreshToken?: string
