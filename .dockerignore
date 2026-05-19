@@ -1,6 +1,5 @@
 # Rust build artifacts
 target/
-Cargo.lock
 
 # Node.js dependencies and build artifacts
 admin-ui/node_modules/
@@ -38,6 +37,8 @@ src/test.rs
 src/debug.rs
 test.json
 tools/
+docs/
+.tmp/
 
 # OS-specific files
 .DS_Store

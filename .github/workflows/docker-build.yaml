@@ -13,6 +13,10 @@ on:
         required: true
         default: '2026.1.1'
 
+concurrency:
+  group: docker-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
