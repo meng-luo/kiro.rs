@@ -203,6 +203,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const endIndex = Math.min(startIndex + pageSize, credentials.length)
   const currentCredentials = credentials.slice(startIndex, endIndex)
   const disabledCredentialCount = credentials.filter((credential) => credential.disabled).length
+  const enabledCredentialCount = data?.enabledCount ?? credentials.filter((credential) => !credential.disabled).length
+  const schedulableCredentialCount = data?.schedulableCount ?? data?.available ?? credentials.filter((credential) => credential.dispatchState === 'ready').length
   const cooldownCredentialCount = credentials.filter((credential) => credential.dispatchState === 'cooldown').length
   const saturatedCredentialCount = credentials.filter((credential) => credential.dispatchState === 'saturated').length
   const blockedCredentialCount = credentials.filter((credential) => credential.dispatchState === 'blocked' && !credential.disabled).length
@@ -723,12 +725,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <main className="container mx-auto space-y-6 px-4 py-6 md:px-8">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
           <StatCard label="账号总数" value={data?.total || 0} />
-          <StatCard label="可用账号" value={data?.available || 0} valueClassName="text-green-600" />
+          <StatCard label="启用账号" value={enabledCredentialCount} valueClassName="text-green-600" />
+          <StatCard label="可调度" value={schedulableCredentialCount} valueClassName="text-emerald-600" />
           <StatCard label="当前活跃" value={data?.currentId ? `#${data.currentId}` : '-'} />
           <StatCard label="冷却中" value={cooldownCredentialCount} valueClassName="text-blue-600" />
           <StatCard label="并发已满" value={saturatedCredentialCount} valueClassName="text-yellow-600" />
           <StatCard label="本地阻塞" value={blockedCredentialCount} valueClassName="text-orange-600" />
-          <StatCard label="已停用" value={disabledCredentialCount} valueClassName="text-slate-600" />
         </div>
 
         <Card className="rounded-md">

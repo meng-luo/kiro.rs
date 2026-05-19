@@ -600,8 +600,12 @@ pub struct ManagerSnapshot {
     pub current_id: u64,
     /// 总凭据数量
     pub total: usize,
-    /// 可用凭据数量
+    /// 当前可直接调度的凭据数量
     pub available: usize,
+    /// 未禁用的凭据数量
+    pub enabled_count: usize,
+    /// 当前可直接调度的凭据数量
+    pub schedulable_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -858,6 +862,16 @@ impl MultiTokenManager {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
     }
 
+    /// 获取当前可直接调度的凭据数量
+    pub fn schedulable_count(&self) -> usize {
+        let entries = self.entries.lock();
+        let empty_tried = HashSet::new();
+        entries
+            .iter()
+            .filter(|e| self.entry_schedulable(e, false, &empty_tried))
+            .count()
+    }
+
     /// 根据负载均衡模式选择下一个凭据
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
@@ -1052,31 +1066,11 @@ impl MultiTokenManager {
         let now = Utc::now();
         let normal_group: Vec<_> = entries
             .iter()
-            .filter(|entry| {
-                self.soft_fallback_eligible(entry, is_opus, tried_account_ids, false, now)
-            })
+            .filter(|entry| self.soft_fallback_eligible(entry, is_opus, tried_account_ids, now))
             .collect();
 
         if let Some((id, credentials)) = self.pick_round_robin_entry(&normal_group) {
             let entry = normal_group.iter().find(|entry| entry.id == id)?;
-            return Some(SelectionResult {
-                id,
-                credentials,
-                dispatch_path: DispatchPath::SoftFallback,
-                used_soft_fallback: true,
-                account_state_at_start: self.dispatch_state_of(entry, now),
-            });
-        }
-
-        let suspicious_group: Vec<_> = entries
-            .iter()
-            .filter(|entry| {
-                self.soft_fallback_eligible(entry, is_opus, tried_account_ids, true, now)
-            })
-            .collect();
-
-        if let Some((id, credentials)) = self.pick_round_robin_entry(&suspicious_group) {
-            let entry = suspicious_group.iter().find(|entry| entry.id == id)?;
             return Some(SelectionResult {
                 id,
                 credentials,
@@ -1094,7 +1088,6 @@ impl MultiTokenManager {
         entry: &CredentialEntry,
         is_opus: bool,
         tried_account_ids: &HashSet<u64>,
-        allow_suspicious: bool,
         now: DateTime<Utc>,
     ) -> bool {
         if entry.disabled || tried_account_ids.contains(&entry.id) {
@@ -1114,7 +1107,6 @@ impl MultiTokenManager {
         }
         match entry.last_rate_limit_kind {
             Some(RateLimitKind::Normal429) => true,
-            Some(RateLimitKind::SuspiciousActivity) => allow_suspicious,
             _ => false,
         }
     }
@@ -1189,9 +1181,10 @@ impl MultiTokenManager {
         loop {
             if attempt_count >= max_attempts {
                 anyhow::bail!(
-                    "所有凭据均无法获取有效 Token（可用: {}/{}）",
+                    "所有凭据均无法获取有效 Token（启用: {}/{}, 可调度: {}）",
                     self.available_count(),
-                    total
+                    total,
+                    self.schedulable_count()
                 );
             }
 
@@ -1265,11 +1258,17 @@ impl MultiTokenManager {
                         // 注意：必须在 bail! 之前计算 available_count，
                         // 因为 available_count() 会尝试获取 entries 锁，
                         // 而此时我们已经持有该锁，会导致死锁
-                        let available = entries.iter().filter(|e| !e.disabled).count();
+                        let empty_tried = HashSet::new();
+                        let enabled_count = entries.iter().filter(|e| !e.disabled).count();
+                        let schedulable_count = entries
+                            .iter()
+                            .filter(|e| self.entry_schedulable(e, false, &empty_tried))
+                            .count();
                         anyhow::bail!(
-                            "当前没有可直接调度的凭据（启用: {}/{}，可能全部处于冷却、阻塞或并发饱和）",
-                            available,
-                            total
+                            "当前没有可直接调度的凭据（启用: {}/{}, 可调度: {}，可能全部处于冷却、阻塞、并发饱和、模型不兼容或本次请求已试过）",
+                            enabled_count,
+                            total,
+                            schedulable_count
                         );
                     }
                 }
@@ -1979,8 +1978,13 @@ impl MultiTokenManager {
     pub fn snapshot(&self) -> ManagerSnapshot {
         let entries = self.entries.lock();
         let current_id = *self.current_id.lock();
-        let available = entries.iter().filter(|e| !e.disabled).count();
         let now = Utc::now();
+        let empty_tried = HashSet::new();
+        let enabled_count = entries.iter().filter(|e| !e.disabled).count();
+        let schedulable_count = entries
+            .iter()
+            .filter(|e| self.entry_schedulable(e, false, &empty_tried))
+            .count();
 
         ManagerSnapshot {
             entries: entries
@@ -2066,9 +2070,8 @@ impl MultiTokenManager {
                     dispatch_path: e.last_dispatch_path.map(|path| path.to_string()),
                     soft_fallback_eligible: self.soft_fallback_eligible(
                         e,
-                        e.credentials.supports_opus(),
+                        false,
                         &HashSet::new(),
-                        true,
                         now,
                     ),
                     last_soft_fallback_at: e.last_soft_fallback_at.clone(),
@@ -2076,7 +2079,9 @@ impl MultiTokenManager {
                 .collect(),
             current_id,
             total: entries.len(),
-            available,
+            available: schedulable_count,
+            enabled_count,
+            schedulable_count,
         }
     }
 
@@ -3042,7 +3047,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_acquire_context_uses_soft_fallback_when_all_entries_are_in_suspicious_cooldown() {
+    async fn test_acquire_context_skips_suspicious_and_uses_ready_credential() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(manager.report_rate_limited(1, RateLimitKind::SuspiciousActivity));
+
+        let ctx = manager
+            .acquire_context_with_options(AcquireOptions::new(Some("claude-opus-4.7".to_string())))
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 2);
+        assert_eq!(ctx.token, "t2");
+        assert!(!ctx.used_soft_fallback);
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        let second = snapshot.entries.iter().find(|e| e.id == 2).unwrap();
+        assert_eq!(first.dispatch_state, DispatchState::Cooldown.to_string());
+        assert_eq!(
+            first.last_rate_limit_kind.as_deref(),
+            Some("suspicious_activity")
+        );
+        assert_eq!(second.dispatch_state, DispatchState::Ready.to_string());
+        assert_eq!(snapshot.enabled_count, 2);
+        assert_eq!(snapshot.schedulable_count, 1);
+        assert_eq!(snapshot.available, 1);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_uses_soft_fallback_for_normal_429_cooldown() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![cred1], None, None, false).unwrap();
+
+        assert!(manager.report_rate_limited(1, RateLimitKind::Normal429));
+
+        let ctx = manager
+            .acquire_context_with_options(AcquireOptions::new(Some(
+                "claude-sonnet-4.6".to_string(),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 1);
+        assert!(ctx.used_soft_fallback);
+        assert_eq!(ctx.dispatch_path.to_string(), "soft_fallback");
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_never_soft_fallbacks_suspicious_cooldown() {
         let mut config = Config::default();
         config.load_balancing_mode = "balanced".to_string();
 
@@ -3059,13 +3127,65 @@ mod tests {
         assert!(manager.report_rate_limited(1, RateLimitKind::SuspiciousActivity));
         assert!(manager.report_rate_limited(2, RateLimitKind::SuspiciousActivity));
 
-        let ctx = manager
-            .acquire_context_with_options(AcquireOptions::new(Some("claude-opus-4.7".to_string())))
+        let err = manager
+            .acquire_context_with_options(AcquireOptions::new(Some(
+                "claude-sonnet-4.6".to_string(),
+            )))
             .await
-            .unwrap();
-        assert!(ctx.id == 1 || ctx.id == 2);
-        assert!(ctx.used_soft_fallback);
-        assert_eq!(ctx.dispatch_path.to_string(), "soft_fallback");
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("当前没有可直接调度的凭据"),
+            "错误应提示当前没有可调度凭据，实际: {}",
+            err
+        );
+
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.enabled_count, 2);
+        assert_eq!(snapshot.schedulable_count, 0);
+        assert_eq!(snapshot.available, 0);
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| !entry.soft_fallback_eligible)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_strict_preferred_account_does_not_fallback_to_ready_credential() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(manager.report_rate_limited(1, RateLimitKind::SuspiciousActivity));
+
+        let mut options = AcquireOptions::new(Some("claude-sonnet-4.6".to_string()));
+        options.preferred_account_id = Some(1);
+        options.strict_preferred_account = true;
+
+        let err = manager
+            .acquire_context_with_options(options)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("当前没有可直接调度的凭据"),
+            "严格指定账号失败时不应回退到其他账号，实际: {}",
+            err
+        );
+        assert_eq!(manager.snapshot().schedulable_count, 1);
     }
 
     #[test]

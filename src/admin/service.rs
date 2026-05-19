@@ -199,6 +199,8 @@ impl AdminService {
         CredentialsStatusResponse {
             total: snapshot.total,
             available: snapshot.available,
+            enabled_count: snapshot.enabled_count,
+            schedulable_count: snapshot.schedulable_count,
             current_id: snapshot.current_id,
             credentials,
         }
@@ -430,7 +432,9 @@ impl AdminService {
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         let config = self.token_manager.config();
         if !config.update.enabled {
-            return Err(AdminServiceError::InvalidCredential("当前未启用在线更新".to_string()));
+            return Err(AdminServiceError::InvalidCredential(
+                "当前未启用在线更新".to_string(),
+            ));
         }
         if self.is_docker_deployment() {
             if config.update.update_command.trim().is_empty() {
@@ -782,8 +786,7 @@ impl AdminService {
             update_hint: if deployment_mode == "docker" && can_update {
                 "当前实例支持一键更新测试容器，更新后会自动做健康检查。".to_string()
             } else if deployment_mode == "docker" {
-                "当前实例为容器部署，请先配置 update.updateCommand 后再使用一键更新。"
-                    .to_string()
+                "当前实例为容器部署，请先配置 update.updateCommand 后再使用一键更新。".to_string()
             } else if can_update {
                 "当前实例支持在线下载和替换，更新完成后需要手动重启生效。".to_string()
             } else if build_type == "source" {
@@ -858,7 +861,9 @@ impl AdminService {
                 response.update_hint
             };
         } else {
-            response.update_hint = "暂未获取到可用的测试镜像版本，请先确认 GitHub Actions 已成功推送 beta 镜像。".to_string();
+            response.update_hint =
+                "暂未获取到可用的测试镜像版本，请先确认 GitHub Actions 已成功推送 beta 镜像。"
+                    .to_string();
         }
         response
     }
@@ -1134,8 +1139,7 @@ impl AdminService {
                 Ok(()) => {
                     let _ = self.touch_job(
                         &job_id,
-                        "已转交宿主机后台执行更新，等待实例恢复并完成健康检查"
-                            .to_string(),
+                        "已转交宿主机后台执行更新，等待实例恢复并完成健康检查".to_string(),
                     );
                 }
                 Err(error) => {
@@ -1231,8 +1235,7 @@ impl AdminService {
                 Ok(()) => {
                     let _ = self.touch_job(
                         &job_id,
-                        "已转交宿主机后台执行重启，等待实例恢复并完成健康检查"
-                            .to_string(),
+                        "已转交宿主机后台执行重启，等待实例恢复并完成健康检查".to_string(),
                     );
                 }
                 Err(error) => {
@@ -1551,13 +1554,14 @@ impl AdminService {
                     "更新包中未找到 kiro-rs 可执行文件".to_string(),
                 ));
             }
-            std::fs::set_permissions(
-                &output_path,
-                std::os::unix::fs::PermissionsExt::from_mode(0o755),
-            )
-            .map_err(|e| {
-                AdminServiceError::InternalError(format!("设置更新文件权限失败: {}", e))
-            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                std::fs::set_permissions(&output_path, PermissionsExt::from_mode(0o755)).map_err(
+                    |e| AdminServiceError::InternalError(format!("设置更新文件权限失败: {}", e)),
+                )?;
+            }
             Ok(())
         })
         .await
@@ -1633,7 +1637,11 @@ impl AdminService {
         if command_line.is_empty() {
             return Err(AdminServiceError::InvalidCredential(format!(
                 "未配置可执行的{}命令",
-                if operation == "update" { "更新" } else { "重启" }
+                if operation == "update" {
+                    "更新"
+                } else {
+                    "重启"
+                }
             )));
         }
 
@@ -1652,21 +1660,18 @@ impl AdminService {
             self.build_running_job(job_id, operation, target_version, running_message)?;
         let success_job =
             self.build_finished_job(&running_job, "succeeded", success_message, false)?;
-        let health_failed_job = self.build_finished_job(
-            &running_job,
-            "failed",
-            healthcheck_failed_message,
-            true,
-        )?;
+        let health_failed_job =
+            self.build_finished_job(&running_job, "failed", healthcheck_failed_message, true)?;
         let command_failed_job =
             self.build_finished_job(&running_job, "failed", command_failed_message, true)?;
 
         let success_payload = serde_json::to_string_pretty(&success_job).map_err(|e| {
             AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))
         })?;
-        let health_failed_payload = serde_json::to_string_pretty(&health_failed_job).map_err(|e| {
-            AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))
-        })?;
+        let health_failed_payload =
+            serde_json::to_string_pretty(&health_failed_job).map_err(|e| {
+                AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))
+            })?;
         let command_failed_payload =
             serde_json::to_string_pretty(&command_failed_job).map_err(|e| {
                 AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))

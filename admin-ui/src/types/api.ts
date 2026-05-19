@@ -2,6 +2,8 @@
 export interface CredentialsStatusResponse {
   total: number
   available: number
+  enabledCount: number
+  schedulableCount: number
   currentId: number
   credentials: CredentialStatusItem[]
 }
