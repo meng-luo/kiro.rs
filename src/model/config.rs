@@ -32,18 +32,16 @@ pub struct UpdateConfig {
     pub healthcheck_url: String,
     #[serde(default = "default_update_healthcheck_timeout_seconds")]
     pub healthcheck_timeout_seconds: u64,
-    #[serde(default = "default_update_restart_mode")]
-    pub restart_mode: String,
     #[serde(default)]
     pub restart_command: String,
-    #[serde(default)]
-    pub rollback_restart_command: String,
     #[serde(default)]
     pub proxy_url: Option<String>,
     #[serde(default)]
     pub allow_prerelease: bool,
-    #[serde(default = "default_update_current_deployment_mode")]
-    pub current_deployment_mode: String,
+    #[serde(default = "default_update_build_type")]
+    pub build_type: String,
+    #[serde(default = "default_update_deployment_mode")]
+    pub deployment_mode: String,
 }
 
 impl Default for UpdateConfig {
@@ -58,12 +56,11 @@ impl Default for UpdateConfig {
             max_backups: default_update_max_backups(),
             healthcheck_url: default_update_healthcheck_url(),
             healthcheck_timeout_seconds: default_update_healthcheck_timeout_seconds(),
-            restart_mode: default_update_restart_mode(),
             restart_command: String::new(),
-            rollback_restart_command: String::new(),
             proxy_url: None,
             allow_prerelease: false,
-            current_deployment_mode: default_update_current_deployment_mode(),
+            build_type: default_update_build_type(),
+            deployment_mode: default_update_deployment_mode(),
         }
     }
 }
@@ -252,11 +249,11 @@ fn default_update_healthcheck_timeout_seconds() -> u64 {
     30
 }
 
-fn default_update_restart_mode() -> String {
-    "command".to_string()
+fn default_update_build_type() -> String {
+    "release".to_string()
 }
 
-fn default_update_current_deployment_mode() -> String {
+fn default_update_deployment_mode() -> String {
     "binary".to_string()
 }
 
@@ -338,7 +335,8 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存配置"))?;
 
         let content = serde_json::to_string_pretty(self).context("序列化配置失败")?;
-        fs::write(path, content).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        fs::write(path, content)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
     }
 }

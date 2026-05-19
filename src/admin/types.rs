@@ -34,10 +34,16 @@ pub struct SystemVersionResponse {
     /// 发布说明链接
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_notes_url: Option<String>,
+    /// 构建类型
+    pub build_type: String,
     /// 部署模式
     pub deployment_mode: String,
-    /// 当前实例是否具备在线更新条件
-    pub can_self_update: bool,
+    /// 当前实例是否允许在线更新
+    pub can_update: bool,
+    /// 当前实例是否允许回滚
+    pub can_rollback: bool,
+    /// 当前实例是否允许在线重启
+    pub can_restart: bool,
     /// 给前端展示的更新提示
     pub update_hint: String,
     /// 最近一次检查时间（RFC3339）

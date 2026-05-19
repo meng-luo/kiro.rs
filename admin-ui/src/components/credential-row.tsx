@@ -10,7 +10,6 @@ import {
   Trash2,
   Wallet,
 } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
@@ -25,18 +24,12 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
-import {
-  useDeleteCredential,
-  useForceRefreshToken,
-  useRecoverCredential,
-  useSetDisabled,
-  useSetMaxConcurrent,
-  useSetPriority,
-} from '@/hooks/use-credentials'
+import { useDeleteCredential, useForceRefreshToken, useRecoverCredential, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
 import { testCredential } from '@/api/credentials'
+import { cn } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent } from '@/types/api'
 
-interface CredentialCardProps {
+interface CredentialRowProps {
   credential: CredentialStatusItem
   onViewBalance: (id: number) => void
   selected: boolean
@@ -78,70 +71,37 @@ function statusMeta(credential: CredentialStatusItem): {
   title: string
 } {
   if (credential.disabled) {
-    return {
-      text: '已禁用',
-      variant: 'destructive',
-      title: '当前账号已被停用，不参与调度。',
-    }
+    return { text: '已停用', variant: 'destructive', title: '当前账号已停用，不参与调度。' }
   }
 
   switch (credential.dispatchState) {
     case 'ready':
-      return {
-        text: '就绪可用',
-        variant: 'success',
-        title: '当前可以继续承接请求。',
-      }
+      return { text: '可用', variant: 'success', title: '当前可以继续承接请求。' }
     case 'saturated':
-      return {
-        text: '并发已满',
-        variant: 'warning',
-        title: '当前并发已达到上限，需等待已有请求释放。',
-      }
+      return { text: '并发已满', variant: 'warning', title: '当前并发已达到上限。' }
     case 'cooldown':
       return {
-        text: credential.lastRateLimitKind === 'suspicious_activity' ? '冷却中（风控限频）' : '冷却中',
+        text: credential.lastRateLimitKind === 'suspicious_activity' ? '风控冷却' : '冷却中',
         variant: credential.lastRateLimitKind === 'suspicious_activity' ? 'destructive' : 'outline',
-        title:
-          credential.lastRateLimitKind === 'suspicious_activity'
-            ? '上游返回风控限频，已自动解除粘性并进入较长冷却。'
-            : '当前账号刚触发限频，冷却结束后会自动恢复。',
+        title: credential.lastRateLimitKind === 'suspicious_activity'
+          ? '上游返回风控限频，已进入长冷却。'
+          : '当前账号刚触发限频，冷却结束后会自动恢复。'
       }
     case 'blocked':
-      return {
-        text: '刷新阻塞',
-        variant: 'warning',
-        title: '本地刷新失败达到阈值，当前不承接新请求，可手动恢复。',
-      }
+      return { text: '本地阻塞', variant: 'warning', title: '本地刷新失败达到阈值，当前不承接新请求。' }
     case 'disabled':
-      return {
-        text: '已禁用',
-        variant: 'destructive',
-        title: '当前账号已被停用，不参与调度。',
-      }
+      return { text: '已停用', variant: 'destructive', title: '当前账号已停用，不参与调度。' }
   }
 }
 
 function limitMeta(kind?: CredentialStatusItem['lastRateLimitKind']) {
   switch (kind) {
     case 'normal_429':
-      return {
-        text: '普通限频',
-        title: '上游返回 429，请求过快，已进入短冷却。',
-        variant: 'warning' as const,
-      }
+      return { text: '普通限频', title: '上游返回 429，请求过快。', variant: 'warning' as const }
     case 'suspicious_activity':
-      return {
-        text: '风控限频',
-        title: '上游返回 suspicious activity，已解除粘性并进入长冷却。',
-        variant: 'destructive' as const,
-      }
+      return { text: '风控限频', title: '上游返回 suspicious activity。', variant: 'destructive' as const }
     case 'refresh_429':
-      return {
-        text: '刷新限频',
-        title: '刷新 Token 时被限频，和业务请求限频分开统计。',
-        variant: 'outline' as const,
-      }
+      return { text: '刷新限频', title: '刷新 Token 时被限频。', variant: 'outline' as const }
     default:
       return null
   }
@@ -165,55 +125,17 @@ function disabledReasonLabel(reason?: string) {
     case 'Manual':
       return { text: '手动停用', title: '这是手动关闭的账号。' }
     case 'TooManyFailures':
-      return { text: '连续失败过多', title: '该账号连续失败次数过多，已暂停参与调度。' }
+      return { text: '连续失败过多', title: '该账号连续失败次数过多。' }
     case 'TooManyRefreshFailures':
-      return { text: '刷新失败过多', title: '该账号刷新访问状态连续失败，需人工处理。' }
+      return { text: '刷新失败过多', title: '该账号刷新访问状态连续失败。' }
     case 'QuotaExceeded':
       return { text: '额度已用尽', title: '该账号本周期可用额度已耗尽。' }
     case 'InvalidRefreshToken':
-      return { text: '登录已失效', title: '该账号的刷新凭据已失效，需要重新接入。' }
+      return { text: '登录已失效', title: '该账号的刷新凭据已失效。' }
     case 'InvalidConfig':
-      return { text: '配置无效', title: '该账号配置不完整或格式不正确，当前无法启用。' }
+      return { text: '配置无效', title: '该账号配置不完整或格式不正确。' }
     default:
       return reason ? { text: reason, title: reason } : null
-  }
-}
-
-function modelOptionsFor(credential: CredentialStatusItem) {
-  const supportsOpus = balanceLabel(credential).supportsOpus
-  const base = [
-    { value: 'claude-haiku-4.5', label: 'Claude Haiku 4.5' },
-    { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },
-    { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
-  ]
-  if (supportsOpus) {
-    base.unshift(
-      { value: 'claude-opus-4.6', label: 'Claude Opus 4.6' },
-      { value: 'claude-opus-4.7', label: 'Claude Opus 4.7' },
-    )
-  }
-  return base
-}
-
-function balanceLabel(credential: CredentialStatusItem) {
-  const text = credential.maskedApiKey ? '按量调用' : '账号订阅'
-  const supportsOpus = credential.authMethod !== 'api_key'
-  return { text, supportsOpus }
-}
-
-function probeStatusText(credential: CredentialStatusItem) {
-  if (credential.disabled) return '已停用'
-  switch (credential.dispatchState) {
-    case 'ready':
-      return '可直接测试'
-    case 'saturated':
-      return '当前繁忙'
-    case 'cooldown':
-      return '限频观察中'
-    case 'blocked':
-      return '待处理'
-    case 'disabled':
-      return '已停用'
   }
 }
 
@@ -288,14 +210,58 @@ function terminalText(event: CredentialTestEvent) {
   }
 }
 
-export function CredentialCard({
+function modelOptionsFor(credential: CredentialStatusItem) {
+  const supportsOpus = credential.authMethod !== 'api_key'
+  const base = [
+    { value: 'claude-haiku-4.5', label: 'Claude Haiku 4.5' },
+    { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },
+    { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+  ]
+  if (supportsOpus) {
+    base.unshift(
+      { value: 'claude-opus-4.6', label: 'Claude Opus 4.6' },
+      { value: 'claude-opus-4.7', label: 'Claude Opus 4.7' },
+    )
+  }
+  return base
+}
+
+function balanceLabel(credential: CredentialStatusItem) {
+  return credential.maskedApiKey ? '按量调用' : '账号订阅'
+}
+
+function probeStatusText(credential: CredentialStatusItem) {
+  if (credential.disabled) return '已停用'
+  switch (credential.dispatchState) {
+    case 'ready':
+      return '可直接测试'
+    case 'saturated':
+      return '当前繁忙'
+    case 'cooldown':
+      return '限频观察中'
+    case 'blocked':
+      return '待处理'
+    case 'disabled':
+      return '已停用'
+  }
+}
+
+function CellText({ title, children, className }: { title?: string; children: string; className?: string }) {
+  return (
+    <div title={title ?? children} className={cn('max-w-full truncate whitespace-nowrap', className)}>
+      {children}
+    </div>
+  )
+}
+
+export function CredentialRow({
   credential,
   onViewBalance,
   selected,
   onToggleSelect,
   balance,
   loadingBalance,
-}: CredentialCardProps) {
+}: CredentialRowProps) {
   const [showSettingsDialog, setShowSettingsDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [showTestDialog, setShowTestDialog] = useState(false)
@@ -317,14 +283,12 @@ export function CredentialCard({
   const rateLimit = limitMeta(credential.lastRateLimitKind)
   const authMethod = authMethodLabel(credential.authMethod)
   const disabledReason = disabledReasonLabel(credential.disabledReason)
-  const balanceMeta = balanceLabel(credential)
   const dispatchPathMeta = dispatchPathLabel(credential.dispatchPath)
-  const loadPercentage = credential.maxConcurrent > 0
-    ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
-    : 0
   const canRecover = credential.dispatchState === 'blocked'
   const canRefresh = !credential.disabled && credential.authMethod !== 'api_key'
-  const canDelete = credential.disabled
+  const progressValue = credential.maxConcurrent > 0
+    ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
+    : 0
 
   useEffect(() => {
     setPriorityValue(String(credential.priority))
@@ -334,21 +298,24 @@ export function CredentialCard({
   const infoItems = useMemo(() => {
     const items = [
       {
-        label: '当前并发',
-        value: `${credential.currentConcurrent} / ${credential.maxConcurrent}`,
-        title: '当前已占用的请求数 / 账号允许的并发上限。',
+        label: '当前状态',
+        value: status.text,
+        title: status.title,
       },
       {
-        label: '优先级',
-        value: String(credential.priority),
-        title: '数字越小越优先。',
+        label: '冷却剩余',
+        value: credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : '无需等待',
+        title: '冷却结束后会自动恢复参与调度。',
       },
       {
-        label: '粘性会话',
-        value: credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个`,
-        title: credential.stickyDetached
-          ? '风控触发后，会话已自动切走。'
-          : '当前仍保留会话绑定，用于同会话稳定命中。',
+        label: '最近限频',
+        value: rateLimit?.text ?? '无',
+        title: rateLimit?.title ?? '当前没有最近限频记录。',
+      },
+      {
+        label: '粘性状态',
+        value: credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个活跃会话`,
+        title: credential.stickyDetached ? '风控触发后，会话已自动切走。' : '当前仍保留会话绑定。'
       },
       {
         label: '最近调度',
@@ -356,20 +323,8 @@ export function CredentialCard({
         title: dispatchPathMeta.title,
       },
       {
-        label: credential.cooldownRemainingMs ? '冷却剩余' : '最近 429',
-        value: credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : `${credential.recent429Count} 次`,
-        title: credential.cooldownRemainingMs
-          ? '冷却结束后会自动恢复参与调度。'
-          : '最近命中的普通限频次数。',
-      },
-      {
-        label: '最近风控',
-        value: `${credential.recentSuspiciousCount} 次`,
-        title: '最近命中的 suspicious activity 次数。',
-      },
-      {
         label: '接入类型',
-        value: balanceMeta.text,
+        value: balanceLabel(credential),
         title: '仅用于辅助理解账号类型，不决定调度。',
       },
       {
@@ -378,28 +333,13 @@ export function CredentialCard({
         title: '最后一次承接请求的时间。',
       },
       {
-        label: '软回退资格',
-        value: credential.softFallbackEligible ? '当前允许' : '当前不参与',
-        title: credential.softFallbackEligible
-          ? '当常规可用账号不足时，这个账号允许进入软回退候选。'
-          : '当前状态下，这个账号不会进入软回退候选。',
+        label: '剩余额度',
+        value: loadingBalance ? '查询中...' : balance ? `${balance.remaining.toFixed(2)} / ${balance.usageLimit.toFixed(2)}` : '未查询',
+        title: '仅用于辅助观察，不决定调度。',
       },
     ]
-
-    if (balance || loadingBalance) {
-      items.push({
-        label: '剩余额度',
-        value: loadingBalance
-          ? '查询中...'
-          : balance
-            ? `${balance.remaining.toFixed(2)} / ${balance.usageLimit.toFixed(2)}`
-            : '未知',
-        title: '仅用于辅助观察，不决定调度。',
-      })
-    }
-
     return items
-  }, [balance, balanceMeta.text, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance])
+  }, [balance, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title])
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -487,14 +427,11 @@ export function CredentialCard({
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
-
         const chunks = buffer.split('\n\n')
         buffer = chunks.pop() ?? ''
 
         for (const chunk of chunks) {
-          const line = chunk
-            .split('\n')
-            .find((item) => item.startsWith('data:'))
+          const line = chunk.split('\n').find((item) => item.startsWith('data:'))
           if (!line) continue
           const payload = line.slice(5).trim()
           if (!payload) continue
@@ -517,210 +454,148 @@ export function CredentialCard({
 
   return (
     <>
-      <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
-        <CardHeader className="space-y-3 pb-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex min-w-0 items-start gap-3">
-              <Checkbox checked={selected} onCheckedChange={onToggleSelect} className="mt-1" />
-              <div className="min-w-0 space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <CardTitle className="text-base md:text-lg">
-                    {credential.email || `凭据 #${credential.id}`}
-                  </CardTitle>
-                  {credential.isCurrent && <Badge variant="success">当前</Badge>}
-                  <Badge variant={status.variant} title={status.title}>
-                    {status.text}
-                  </Badge>
-                  {rateLimit && (
-                    <Badge variant={rateLimit.variant} title={rateLimit.title}>
-                      {rateLimit.text}
-                    </Badge>
-                  )}
-                  {disabledReason && (
-                    <Badge variant="outline" title={disabledReason.title}>
-                      {disabledReason.text}
-                    </Badge>
-                  )}
-                  {authMethod && (
-                    <Badge variant="secondary" title={authMethod.title}>
-                      {authMethod.text}
-                    </Badge>
-                  )}
-                  <Badge
-                    variant={credential.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'}
-                    title={dispatchPathMeta.title}
-                  >
-                    {dispatchPathMeta.text}
-                  </Badge>
-                  <Badge variant="outline" title="该账号当前使用的接入端点。">
-                    {credential.endpoint}
-                  </Badge>
-                </div>
-                <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                  <span title="当前已占用的请求数 / 并发上限。">
-                    并发 {credential.currentConcurrent}/{credential.maxConcurrent}
-                  </span>
-                  <span title="当前账号最近一次被使用的时间。">
-                    最近调用 {formatLastUsed(credential.lastUsedAt)}
-                  </span>
-                  <span title={credential.stickyDetached ? '风控触发后，会话已自动切走。' : '当前仍保留会话绑定。'}>
-                    {credential.stickyDetached ? '已解除粘性' : `${credential.stickySessionCount} 个活跃会话`}
-                  </span>
-                  {credential.lastSoftFallbackAt && (
-                    <span title="最近一次通过软回退再次接单的时间。">
-                      最近软回退 {formatLastUsed(credential.lastSoftFallbackAt)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">参与调度</span>
-              <Switch
-                checked={!credential.disabled}
-                onCheckedChange={handleToggleDisabled}
-                disabled={setDisabled.isPending}
-              />
+      <tr className={cn(
+        'border-b align-middle text-sm',
+        credential.isCurrent ? 'bg-primary/5' : 'bg-background',
+        selected ? 'bg-muted/20' : ''
+      )}>
+        <td className="w-12 px-3 py-3">
+          <Checkbox checked={selected} onCheckedChange={onToggleSelect} />
+        </td>
+        <td className="max-w-[220px] px-3 py-3">
+          <div className="min-w-0 space-y-1">
+            <CellText className="font-medium" title={credential.email || `凭据 #${credential.id}`}>
+              {credential.email || `凭据 #${credential.id}`}
+            </CellText>
+            <div className="flex items-center gap-2 overflow-hidden">
+              {credential.isCurrent && <Badge variant="success" className="whitespace-nowrap">当前</Badge>}
+              <Badge variant="outline" className="max-w-[120px] truncate whitespace-nowrap" title={credential.endpoint}>
+                {credential.endpoint}
+              </Badge>
             </div>
           </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
+        </td>
+        <td className="max-w-[180px] px-3 py-3">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <Badge variant={status.variant} className="whitespace-nowrap" title={status.title}>{status.text}</Badge>
+            {disabledReason && <Badge variant="outline" className="max-w-[100px] truncate whitespace-nowrap" title={disabledReason.title}>{disabledReason.text}</Badge>}
+          </div>
+        </td>
+        <td className="max-w-[140px] px-3 py-3">
+          <Badge variant={credential.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'} className="max-w-full truncate whitespace-nowrap" title={dispatchPathMeta.title}>
+            {dispatchPathMeta.text}
+          </Badge>
+        </td>
+        <td className="w-[170px] px-3 py-3">
           <div className="space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">并发占用</span>
-              <span className="font-medium">{loadPercentage.toFixed(0)}%</span>
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="truncate text-muted-foreground">并发</span>
+              <span className="whitespace-nowrap font-medium">{credential.currentConcurrent}/{credential.maxConcurrent}</span>
             </div>
-            <Progress value={loadPercentage} />
+            <Progress value={progressValue} />
           </div>
-
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            {infoItems.map((item) => (
-              <div key={item.label} className="rounded-md border bg-muted/30 px-3 py-2">
-                <div className="text-xs text-muted-foreground" title={item.title}>
-                  {item.label}
-                </div>
-                <div className="mt-1 font-medium">{item.value}</div>
-              </div>
-            ))}
+        </td>
+        <td className="max-w-[140px] px-3 py-3">
+          <CellText title={credential.lastUsedAt ?? '从未使用'}>{formatLastUsed(credential.lastUsedAt)}</CellText>
+        </td>
+        <td className="max-w-[140px] px-3 py-3">
+          <div className="space-y-1">
+            {rateLimit ? (
+              <Badge variant={rateLimit.variant} className="max-w-full truncate whitespace-nowrap" title={rateLimit.title}>
+                {rateLimit.text}
+              </Badge>
+            ) : (
+              <CellText>无</CellText>
+            )}
+            {credential.cooldownRemainingMs ? (
+              <CellText className="text-xs text-muted-foreground" title="冷却结束后会自动恢复">
+                {formatCooldown(credential.cooldownRemainingMs)}
+              </CellText>
+            ) : null}
           </div>
-
-          <div className="flex flex-wrap gap-2 border-t pt-3">
-            <Button size="sm" onClick={() => setShowTestDialog(true)}>
+        </td>
+        <td className="max-w-[160px] px-3 py-3">
+          <CellText title={credential.stickyDetached ? '风控触发后，会话已自动切走。' : '当前仍保留会话绑定。'}>
+            {credential.stickyDetached ? '已解除粘性' : `${credential.stickySessionCount} 个活跃会话`}
+          </CellText>
+        </td>
+        <td className="w-[90px] px-3 py-3">
+          <CellText>{String(credential.priority)}</CellText>
+        </td>
+        <td className="max-w-[120px] px-3 py-3">
+          <CellText title={authMethod?.title ?? balanceLabel(credential)}>
+            {authMethod?.text ?? balanceLabel(credential)}
+          </CellText>
+        </td>
+        <td className="max-w-[120px] px-3 py-3">
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-xs text-muted-foreground">参与调度</span>
+            <Switch
+              checked={!credential.disabled}
+              onCheckedChange={handleToggleDisabled}
+              disabled={setDisabled.isPending}
+            />
+          </div>
+        </td>
+        <td className="w-[260px] px-3 py-3">
+          <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+            <Button size="sm" variant="outline" onClick={() => setShowTestDialog(true)} title="测试这个账号此刻是否真的还能调用">
               <PlugZap className="h-4 w-4" />
-              测试接入
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setShowSettingsDialog(true)}>
-              <Settings2 className="h-4 w-4" />
-              更多设置
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => onViewBalance(credential.id)}>
+            <Button size="sm" variant="outline" onClick={() => onViewBalance(credential.id)} title="查看余额">
               <Wallet className="h-4 w-4" />
-              查看余额
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setShowSettingsDialog(true)} title="修改优先级和并发上限">
+              <Settings2 className="h-4 w-4" />
             </Button>
             {canRecover && (
-              <Button size="sm" variant="outline" onClick={handleRecover} disabled={recoverCredential.isPending}>
+              <Button size="sm" variant="outline" onClick={handleRecover} disabled={recoverCredential.isPending} title="清理本地阻塞">
                 <ShieldAlert className="h-4 w-4" />
-                手动恢复
               </Button>
             )}
             {canRefresh && (
-              <Button size="sm" variant="outline" onClick={handleRefreshToken} disabled={forceRefresh.isPending}>
-                <RefreshCw className={`h-4 w-4 ${forceRefresh.isPending ? 'animate-spin' : ''}`} />
-                刷新 Token
+              <Button size="sm" variant="outline" onClick={handleRefreshToken} disabled={forceRefresh.isPending} title="强制刷新 Token">
+                <RefreshCw className={cn('h-4 w-4', forceRefresh.isPending && 'animate-spin')} />
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="destructive"
-              onClick={() => setShowDeleteDialog(true)}
-              disabled={!canDelete}
-              title={canDelete ? '删除该账号' : '需要先停用账号后才能删除'}
-            >
+            <Button size="sm" variant="destructive" onClick={() => setShowDeleteDialog(true)} title="删除这个账号">
               <Trash2 className="h-4 w-4" />
-              删除
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </td>
+      </tr>
 
       <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>账号设置</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `凭据 #${credential.id}`} · ${credential.endpoint}`}>
               {credential.email || `凭据 #${credential.id}`} · {credential.endpoint}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <label className="text-sm font-medium">优先级</label>
-              <Input
-                type="number"
-                min="0"
-                value={priorityValue}
-                onChange={(e) => setPriorityValue(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">数字越小越优先。</p>
+              <Input type="number" min="0" value={priorityValue} onChange={(e) => setPriorityValue(e.target.value)} />
+              <p className="truncate text-xs text-muted-foreground">数字越小越优先。</p>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">并发上限</label>
-              <Input
-                type="number"
-                min="1"
-                value={maxConcurrentValue}
-                onChange={(e) => setMaxConcurrentValue(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">账号同时承接请求的最大数量。</p>
+              <Input type="number" min="1" value={maxConcurrentValue} onChange={(e) => setMaxConcurrentValue(e.target.value)} />
+              <p className="truncate text-xs text-muted-foreground">账号同时承接请求的最大数量。</p>
             </div>
           </div>
-          <div className="space-y-3 rounded-lg border bg-muted/20 px-4 py-4">
-            <div className="text-sm font-medium">当前运行状态</div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="rounded-md border bg-background px-3 py-3">
-                <div className="text-xs text-muted-foreground">当前状态</div>
-                <div className="mt-1 text-sm font-medium" title={status.title}>{status.text}</div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {infoItems.map((item) => (
+              <div key={item.label} className="rounded-md border bg-muted/20 px-3 py-3">
+                <div className="truncate text-xs text-muted-foreground" title={item.title}>{item.label}</div>
+                <div className="mt-1 truncate text-sm font-medium" title={item.value}>{item.value}</div>
               </div>
-              <div className="rounded-md border bg-background px-3 py-3">
-                <div className="text-xs text-muted-foreground">冷却剩余</div>
-                <div className="mt-1 text-sm font-medium">
-                  {credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : '无需等待'}
-                </div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-3">
-                <div className="text-xs text-muted-foreground">最近限频</div>
-                <div className="mt-1 text-sm font-medium" title={rateLimit?.title}>
-                  {rateLimit?.text ?? '无'}
-                </div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-3">
-                <div className="text-xs text-muted-foreground">粘性状态</div>
-                <div className="mt-1 text-sm font-medium">
-                  {credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个活跃会话`}
-                </div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-3">
-                <div className="text-xs text-muted-foreground" title={dispatchPathMeta.title}>最近调度路径</div>
-                <div className="mt-1 text-sm font-medium">{dispatchPathMeta.text}</div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-3">
-                <div className="text-xs text-muted-foreground">软回退资格</div>
-                <div className="mt-1 text-sm font-medium">
-                  {credential.softFallbackEligible ? '当前允许' : '当前不参与'}
-                  {credential.lastSoftFallbackAt ? ` · 最近 ${formatLastUsed(credential.lastSoftFallbackAt)}` : ''}
-                </div>
-              </div>
-            </div>
+            ))}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowSettingsDialog(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={handleSaveSettings}
-              disabled={setPriority.isPending || setMaxConcurrent.isPending}
-            >
-              保存设置
-            </Button>
+            <Button variant="outline" onClick={() => setShowSettingsDialog(false)}>取消</Button>
+            <Button onClick={handleSaveSettings} disabled={setPriority.isPending || setMaxConcurrent.isPending}>保存设置</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -729,7 +604,7 @@ export function CredentialCard({
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>测试接入</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `凭据 #${credential.id}`} · ${credential.endpoint}`}>
               {credential.email || `凭据 #${credential.id}`} · {credential.endpoint}
             </DialogDescription>
           </DialogHeader>
@@ -741,16 +616,16 @@ export function CredentialCard({
                     <Activity className="h-5 w-5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="font-medium">{credential.email || `凭据 #${credential.id}`}</div>
-                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span>{authMethod?.text ?? '账号接入'}</span>
-                      <span>{credential.endpoint}</span>
-                      <span>并发 {credential.currentConcurrent}/{credential.maxConcurrent}</span>
-                      {rateLimit && <span>{rateLimit.text}</span>}
+                    <div className="truncate font-medium">{credential.email || `凭据 #${credential.id}`}</div>
+                    <div className="mt-1 flex gap-2 overflow-hidden text-xs text-muted-foreground">
+                      <CellText>{authMethod?.text ?? '账号接入'}</CellText>
+                      <CellText>{credential.endpoint}</CellText>
+                      <CellText>{`并发 ${credential.currentConcurrent}/${credential.maxConcurrent}`}</CellText>
+                      {rateLimit && <CellText>{rateLimit.text}</CellText>}
                     </div>
                   </div>
                 </div>
-                <Badge variant={status.variant} title={status.title}>
+                <Badge variant={status.variant} title={status.title} className="whitespace-nowrap">
                   {probeStatusText(credential)}
                 </Badge>
               </div>
@@ -786,11 +661,11 @@ export function CredentialCard({
             </div>
 
             <div className="rounded-md border bg-slate-50 p-4 font-mono text-xs dark:bg-slate-950">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-[11px] text-muted-foreground">实时输出</div>
-                <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                  <span>测试模型：{modelOptionsFor(credential).find((item) => item.value === testModel)?.label ?? testModel}</span>
-                  <span>{testPrompt.trim() ? `提示词：${testPrompt.trim()}` : '提示词：默认检查语句'}</span>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="truncate text-[11px] text-muted-foreground">实时输出</div>
+                <div className="flex max-w-[70%] gap-2 overflow-hidden text-[11px] text-muted-foreground">
+                  <CellText>{`测试模型：${modelOptionsFor(credential).find((item) => item.value === testModel)?.label ?? testModel}`}</CellText>
+                  <CellText>{testPrompt.trim() ? `提示词：${testPrompt.trim()}` : '提示词：默认检查语句'}</CellText>
                 </div>
               </div>
               <div className="max-h-72 space-y-2 overflow-y-auto">
@@ -807,9 +682,7 @@ export function CredentialCard({
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowTestDialog(false)} disabled={testing}>
-              关闭
-            </Button>
+            <Button variant="outline" onClick={() => setShowTestDialog(false)} disabled={testing}>关闭</Button>
             <Button onClick={handleRunTest} disabled={testing}>
               {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
               {testing ? '测试中...' : '开始测试'}
@@ -823,16 +696,12 @@ export function CredentialCard({
           <DialogHeader>
             <DialogTitle>确认删除账号</DialogTitle>
             <DialogDescription>
-              仅允许删除已停用的账号。删除后无法恢复。
+              删除后无法恢复。如果这是当前正在使用的账号，系统会自动切换到其他可用账号。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowDeleteDialog(false)} disabled={deleteCredential.isPending}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={deleteCredential.isPending || !canDelete}>
-              确认删除
-            </Button>
+            <Button variant="outline" onClick={() => setShowDeleteDialog(false)} disabled={deleteCredential.isPending}>取消</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleteCredential.isPending}>确认删除</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

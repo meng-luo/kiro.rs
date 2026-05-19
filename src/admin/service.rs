@@ -1,35 +1,41 @@
 //! Admin API 业务逻辑服务
 
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use flate2::read::GzDecoder;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use tar::Archive;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use crate::http_client::{ProxyConfig, build_client};
-use crate::kiro::model::events::Event;
-use crate::kiro::model::requests::conversation::{ConversationState, CurrentMessage, UserInputMessage};
-use crate::kiro::model::requests::kiro::KiroRequest;
-use crate::kiro::provider::KiroProvider;
-use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model::events::Event;
+use crate::kiro::model::requests::conversation::{
+    ConversationState, CurrentMessage, UserInputMessage,
+};
+use crate::kiro::model::requests::kiro::KiroRequest;
+use crate::kiro::parser::decoder::EventStreamDecoder;
+use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::{AcquireOptions, MultiTokenManager};
 use crate::model::config::Config;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem, CredentialTestRequest,
-    CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
-    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest,
-    SystemVersionResponse,
+    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
+    CredentialTestRequest, CredentialsStatusResponse, LoadBalancingModeResponse,
+    SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SystemOperationJobResponse,
+    SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -52,6 +58,13 @@ struct GitHubRelease {
     published_at: Option<String>,
     prerelease: bool,
     body: Option<String>,
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 /// 缓存的余额条目（含时间戳）
@@ -101,12 +114,11 @@ impl AdminService {
                 None,
             ),
         };
-        let http_client = Self::build_admin_http_client(token_manager.config()).unwrap_or_else(|e| {
-            tracing::warn!("构建版本治理 HTTP 客户端失败，回退到默认客户端: {}", e);
-            Client::builder()
-                .build()
-                .expect("创建默认 HTTP 客户端失败")
-        });
+        let http_client =
+            Self::build_admin_http_client(token_manager.config()).unwrap_or_else(|e| {
+                tracing::warn!("构建版本治理 HTTP 客户端失败，回退到默认客户端: {}", e);
+                Client::builder().build().expect("创建默认 HTTP 客户端失败")
+            });
 
         Self {
             token_manager,
@@ -393,16 +405,21 @@ impl AdminService {
         payload: SystemUpdateRequest,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         let config = self.token_manager.config();
-        if !config.update.enabled {
+        if !config.update.enabled || config.update.build_type != "release" {
             return Err(AdminServiceError::InvalidCredential(
-                "当前实例未启用在线更新，请先在配置中开启 update.enabled".to_string(),
+                "当前实例不支持在线更新，请确认已启用 update.enabled 且 buildType 为 release"
+                    .to_string(),
             ));
         }
         let version_info = self.check_system_version().await?;
         let target_version = payload
             .version
             .clone()
-            .or_else(|| version_info.update_available.then_some(version_info.latest_version.clone()))
+            .or_else(|| {
+                version_info
+                    .update_available
+                    .then_some(version_info.latest_version.clone())
+            })
             .or_else(|| Some(version_info.current_version.clone()));
         let target_version = target_version.filter(|value| !value.trim().is_empty());
         let job = self.create_job(
@@ -410,7 +427,9 @@ impl AdminService {
             target_version.clone(),
             format!(
                 "准备更新到 {}",
-                target_version.clone().unwrap_or_else(|| "当前版本".to_string())
+                target_version
+                    .clone()
+                    .unwrap_or_else(|| "当前版本".to_string())
             ),
         );
         let job_id = job.job_id.clone();
@@ -425,6 +444,12 @@ impl AdminService {
         self: &Arc<Self>,
         payload: SystemRollbackRequest,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        let config = self.token_manager.config();
+        if !config.update.enabled || config.update.build_type != "release" {
+            return Err(AdminServiceError::InvalidCredential(
+                "当前实例不支持在线回滚，请确认 buildType 为 release".to_string(),
+            ));
+        }
         let backup_name = payload.backup_name.filter(|value| !value.trim().is_empty());
         let job = self.create_job(
             "rollback",
@@ -446,6 +471,12 @@ impl AdminService {
     pub async fn start_system_restart(
         self: &Arc<Self>,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        let config = self.token_manager.config();
+        if config.update.restart_command.trim().is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "当前未配置在线重启命令".to_string(),
+            ));
+        }
         let job = self.create_job("restart", None, "准备重启当前实例".to_string());
         let job_id = job.job_id.clone();
         let service = self.clone();
@@ -455,7 +486,10 @@ impl AdminService {
         Ok(job)
     }
 
-    pub fn get_system_job(&self, id: &str) -> Result<SystemOperationJobResponse, AdminServiceError> {
+    pub fn get_system_job(
+        &self,
+        id: &str,
+    ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         self.system_jobs
             .lock()
             .get(id)
@@ -625,7 +659,11 @@ impl AdminService {
     }
 
     fn build_admin_http_client(config: &Config) -> anyhow::Result<Client> {
-        let proxy = config.update.proxy_url.as_ref().map(|url| ProxyConfig::new(url.clone()));
+        let proxy = config
+            .update
+            .proxy_url
+            .as_ref()
+            .map(|url| ProxyConfig::new(url.clone()));
         build_client(proxy.as_ref(), 60, config.tls_backend)
     }
 
@@ -648,29 +686,36 @@ impl AdminService {
         current_commit: Option<String>,
         latest_job: Option<SystemOperationJobResponse>,
     ) -> SystemVersionResponse {
-        let deployment_mode = if !config.update.current_deployment_mode.trim().is_empty() {
-            config.update.current_deployment_mode.clone()
+        let deployment_mode = if !config.update.deployment_mode.trim().is_empty() {
+            config.update.deployment_mode.clone()
         } else if std::path::Path::new("/.dockerenv").exists() {
             "docker".to_string()
         } else {
             "binary".to_string()
         };
-        let can_self_update = config.update.enabled
-            && config.update.restart_mode == "command"
-            && !config.update.restart_command.trim().is_empty()
-            && deployment_mode == "binary";
+        let build_type = if !config.update.build_type.trim().is_empty() {
+            config.update.build_type.clone()
+        } else {
+            "release".to_string()
+        };
+        let can_update = config.update.enabled && build_type == "release";
+        let can_rollback = can_update;
+        let can_restart = !config.update.restart_command.trim().is_empty();
         SystemVersionResponse {
             current_version: current_version.clone(),
             latest_version: current_version,
             update_available: false,
             latest_published_at: None,
             release_notes_url: None,
+            build_type: build_type.clone(),
             deployment_mode,
-            can_self_update,
-            update_hint: if can_self_update {
-                "当前实例允许从管理台发起下载、替换和重启。".to_string()
-            } else if std::path::Path::new("/.dockerenv").exists() {
-                "当前实例运行在容器内，请通过镜像或容器编排更新。".to_string()
+            can_update,
+            can_rollback,
+            can_restart,
+            update_hint: if can_update {
+                "当前实例支持在线下载和替换，更新完成后需要手动重启生效。".to_string()
+            } else if build_type == "source" {
+                "当前实例为源码构建，请通过新的构建产物升级。".to_string()
             } else {
                 "当前实例未满足在线更新条件，请检查 update 配置。".to_string()
             },
@@ -701,10 +746,10 @@ impl AdminService {
             response.release_notes_url = Some(release.html_url);
             response.update_hint = if response.update_available {
                 format!(
-                    "发现新版本 {}，可在这里发起更新并查看最近任务状态。",
+                    "发现新版本 {}，可以先更新，再按需手动重启。",
                     latest_version
                 )
-            } else if response.can_self_update {
+            } else if response.can_restart || response.can_rollback {
                 "当前已经是最新版本，可继续在这里执行重启或回滚。".to_string()
             } else {
                 response.update_hint
@@ -726,7 +771,9 @@ impl AdminService {
             .header(reqwest::header::USER_AGENT, "kiro-rs-admin")
             .send()
             .await
-            .map_err(|e| AdminServiceError::UpstreamError(format!("检查 GitHub Release 失败: {}", e)))?;
+            .map_err(|e| {
+                AdminServiceError::UpstreamError(format!("检查 GitHub Release 失败: {}", e))
+            })?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -735,10 +782,9 @@ impl AdminService {
                 status, body
             )));
         }
-        let releases: Vec<GitHubRelease> = response
-            .json()
-            .await
-            .map_err(|e| AdminServiceError::UpstreamError(format!("解析 GitHub Release 失败: {}", e)))?;
+        let releases: Vec<GitHubRelease> = response.json().await.map_err(|e| {
+            AdminServiceError::UpstreamError(format!("解析 GitHub Release 失败: {}", e))
+        })?;
         let selected = releases.into_iter().find(|release| {
             if release.prerelease && !config.update.allow_prerelease {
                 return false;
@@ -809,10 +855,9 @@ impl AdminService {
 
     async fn run_update_job(self: Arc<Self>, job_id: String, target_version: Option<String>) {
         let result = async {
-            let release = self
-                .fetch_latest_release()
-                .await?
-                .ok_or_else(|| AdminServiceError::UpstreamError("未获取到可用发布版本".to_string()))?;
+            let release = self.fetch_latest_release().await?.ok_or_else(|| {
+                AdminServiceError::UpstreamError("未获取到可用发布版本".to_string())
+            })?;
             let expected_version = target_version
                 .clone()
                 .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string());
@@ -828,15 +873,19 @@ impl AdminService {
                 "body": release.body,
                 "checkedAt": Utc::now().to_rfc3339(),
             }))
-            .map_err(|e| AdminServiceError::InternalError(format!("序列化 release 元信息失败: {}", e)))?;
+            .map_err(|e| {
+                AdminServiceError::InternalError(format!("序列化 release 元信息失败: {}", e))
+            })?;
             tokio::fs::write(&release_file, release_payload)
                 .await
-                .map_err(|e| AdminServiceError::InternalError(format!("写入 release 元信息失败: {}", e)))?;
+                .map_err(|e| {
+                    AdminServiceError::InternalError(format!("写入 release 元信息失败: {}", e))
+                })?;
             let backup_dir = self.create_backup().await?;
-            self.run_command_from_config("update").await?;
-            self.run_healthcheck().await?;
+            self.apply_release_binary(&release, &expected_version, &staging_dir)
+                .await?;
             Ok::<String, AdminServiceError>(format!(
-                "更新流程已执行，目标版本 {}，备份目录 {}",
+                "已完成更新准备，目标版本 {}，备份目录 {}，请执行重启使新版本生效",
                 expected_version,
                 backup_dir.display()
             ))
@@ -856,9 +905,11 @@ impl AdminService {
     async fn run_rollback_job(self: Arc<Self>, job_id: String, backup_name: Option<String>) {
         let result = async {
             let backup_dir = self.restore_backup(backup_name.as_deref()).await?;
-            self.run_command_from_config("rollback").await?;
-            self.run_healthcheck().await?;
-            Ok::<String, AdminServiceError>(format!("已回滚到备份 {}", backup_dir.display()))
+            self.apply_backup_binary(&backup_dir).await?;
+            Ok::<String, AdminServiceError>(format!(
+                "已回滚到备份 {}，请执行重启使回滚生效",
+                backup_dir.display()
+            ))
         }
         .await;
         match result {
@@ -873,7 +924,7 @@ impl AdminService {
 
     async fn run_restart_job(self: Arc<Self>, job_id: String) {
         let result = async {
-            self.run_command_from_config("restart").await?;
+            self.run_restart_command().await?;
             self.run_healthcheck().await?;
             Ok::<String, AdminServiceError>("重启命令已执行，健康检查通过".to_string())
         }
@@ -913,15 +964,19 @@ impl AdminService {
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("kiro-rs")),
             );
-            tokio::fs::copy(&current_exe, &target)
-                .await
-                .map_err(|e| AdminServiceError::InternalError(format!("备份当前二进制失败: {}", e)))?;
+            tokio::fs::copy(&current_exe, &target).await.map_err(|e| {
+                AdminServiceError::InternalError(format!("备份当前二进制失败: {}", e))
+            })?;
         }
-        self.cleanup_old_backups(&backup_root, config.update.max_backups).await?;
+        self.cleanup_old_backups(&backup_root, config.update.max_backups)
+            .await?;
         Ok(backup_dir)
     }
 
-    async fn restore_backup(&self, backup_name: Option<&str>) -> Result<PathBuf, AdminServiceError> {
+    async fn restore_backup(
+        &self,
+        backup_name: Option<&str>,
+    ) -> Result<PathBuf, AdminServiceError> {
         let config = self.token_manager.config();
         let backup_root = self.resolve_workspace_path(&config.update.backup_dir)?;
         let mut entries = tokio::fs::read_dir(&backup_root)
@@ -950,9 +1005,9 @@ impl AdminService {
                 )));
             }
         } else {
-            candidates
-                .pop()
-                .ok_or_else(|| AdminServiceError::InvalidCredential("当前没有可回滚的备份".to_string()))?
+            candidates.pop().ok_or_else(|| {
+                AdminServiceError::InvalidCredential("当前没有可回滚的备份".to_string())
+            })?
         };
         Ok(selected)
     }
@@ -989,20 +1044,9 @@ impl AdminService {
         Ok(())
     }
 
-    async fn run_command_from_config(&self, operation: &str) -> Result<(), AdminServiceError> {
+    async fn run_restart_command(&self) -> Result<(), AdminServiceError> {
         let config = self.token_manager.config();
-        if config.update.restart_mode != "command" {
-            return Err(AdminServiceError::InvalidCredential(format!(
-                "当前仅支持 command 重启模式，实际为 {}",
-                config.update.restart_mode
-            )));
-        }
-        let command_line = match operation {
-            "rollback" if !config.update.rollback_restart_command.trim().is_empty() => {
-                config.update.rollback_restart_command.trim()
-            }
-            _ => config.update.restart_command.trim(),
-        };
+        let command_line = config.update.restart_command.trim();
         if command_line.is_empty() {
             return Err(AdminServiceError::InvalidCredential(
                 "未配置可执行的重启命令".to_string(),
@@ -1021,6 +1065,215 @@ impl AdminService {
             )));
         }
         Ok(())
+    }
+
+    async fn apply_release_binary(
+        &self,
+        release: &GitHubRelease,
+        version: &str,
+        staging_dir: &Path,
+    ) -> Result<(), AdminServiceError> {
+        let archive_asset = self
+            .select_release_archive(release, version)
+            .ok_or_else(|| {
+                AdminServiceError::UpstreamError("未找到当前平台对应的发布包".to_string())
+            })?;
+        let checksum_asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == "checksums.txt");
+
+        let archive_path = staging_dir.join(&archive_asset.name);
+        let archive_bytes = self
+            .download_release_asset(&archive_asset.browser_download_url)
+            .await?;
+        tokio::fs::write(&archive_path, &archive_bytes)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("写入更新包失败: {}", e)))?;
+
+        if let Some(asset) = checksum_asset {
+            let checksum_bytes = self
+                .download_release_asset(&asset.browser_download_url)
+                .await?;
+            self.verify_archive_checksum(&archive_asset.name, &archive_bytes, &checksum_bytes)?;
+        }
+
+        let extracted_path = staging_dir.join("kiro-rs.new");
+        self.extract_binary_from_archive(&archive_bytes, &extracted_path)
+            .await?;
+        self.replace_current_binary(&extracted_path).await
+    }
+
+    async fn apply_backup_binary(&self, backup_dir: &Path) -> Result<(), AdminServiceError> {
+        let current_exe = self.current_executable_path()?;
+        let backup_binary = backup_dir.join(
+            current_exe
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("kiro-rs")),
+        );
+        if !backup_binary.exists() {
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "备份中未找到可恢复的二进制文件: {}",
+                backup_binary.display()
+            )));
+        }
+
+        let temp_restore = backup_dir.join("kiro-rs.rollback");
+        tokio::fs::copy(&backup_binary, &temp_restore)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("复制回滚文件失败: {}", e)))?;
+        self.replace_current_binary(&temp_restore).await
+    }
+
+    fn select_release_archive<'a>(
+        &self,
+        release: &'a GitHubRelease,
+        version: &str,
+    ) -> Option<&'a GitHubReleaseAsset> {
+        let config = self.token_manager.config();
+        let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let expected_name = config
+            .update
+            .artifact_name_template
+            .replace("{version}", version)
+            .replace("{target}", &target);
+        release
+            .assets
+            .iter()
+            .find(|asset| asset.name == expected_name)
+    }
+
+    async fn download_release_asset(&self, url: &str) -> Result<Vec<u8>, AdminServiceError> {
+        let response = self
+            .http_client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "kiro-rs-admin")
+            .send()
+            .await
+            .map_err(|e| AdminServiceError::UpstreamError(format!("下载更新文件失败: {}", e)))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AdminServiceError::UpstreamError(format!(
+                "下载更新文件失败: {} {}",
+                status, body
+            )));
+        }
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| AdminServiceError::UpstreamError(format!("读取更新文件失败: {}", e)))
+    }
+
+    fn verify_archive_checksum(
+        &self,
+        archive_name: &str,
+        archive_bytes: &[u8],
+        checksum_bytes: &[u8],
+    ) -> Result<(), AdminServiceError> {
+        let checksum_text = String::from_utf8(checksum_bytes.to_vec())
+            .map_err(|e| AdminServiceError::InternalError(format!("解析校验文件失败: {}", e)))?;
+        let expected = checksum_text
+            .lines()
+            .find_map(|line| {
+                let mut parts = line.split_whitespace();
+                let checksum = parts.next()?;
+                let name = parts.next()?.trim_start_matches('*');
+                (name == archive_name).then_some(checksum.to_string())
+            })
+            .ok_or_else(|| {
+                AdminServiceError::UpstreamError("校验文件中未找到对应更新包".to_string())
+            })?;
+        let actual = hex::encode(Sha256::digest(archive_bytes));
+        if actual != expected {
+            return Err(AdminServiceError::InternalError(format!(
+                "更新包校验失败: 期望 {}, 实际 {}",
+                expected, actual
+            )));
+        }
+        Ok(())
+    }
+
+    async fn extract_binary_from_archive(
+        &self,
+        archive_bytes: &[u8],
+        output_path: &Path,
+    ) -> Result<(), AdminServiceError> {
+        let output_path = output_path.to_path_buf();
+        let archive_bytes = archive_bytes.to_vec();
+        tokio::task::spawn_blocking(move || -> Result<(), AdminServiceError> {
+            let cursor = Cursor::new(archive_bytes);
+            let decoder = GzDecoder::new(cursor);
+            let mut archive = Archive::new(decoder);
+            let mut extracted = false;
+
+            for entry in archive
+                .entries()
+                .map_err(|e| AdminServiceError::InternalError(format!("读取更新包失败: {}", e)))?
+            {
+                let mut entry = entry.map_err(|e| {
+                    AdminServiceError::InternalError(format!("读取更新条目失败: {}", e))
+                })?;
+                let path = entry.path().map_err(|e| {
+                    AdminServiceError::InternalError(format!("解析更新条目路径失败: {}", e))
+                })?;
+                if path.file_name() == Some(std::ffi::OsStr::new("kiro-rs")) {
+                    entry.unpack(&output_path).map_err(|e| {
+                        AdminServiceError::InternalError(format!("解包更新二进制失败: {}", e))
+                    })?;
+                    extracted = true;
+                    break;
+                }
+            }
+
+            if !extracted {
+                return Err(AdminServiceError::InternalError(
+                    "更新包中未找到 kiro-rs 可执行文件".to_string(),
+                ));
+            }
+            std::fs::set_permissions(
+                &output_path,
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            )
+            .map_err(|e| {
+                AdminServiceError::InternalError(format!("设置更新文件权限失败: {}", e))
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AdminServiceError::InternalError(format!("解包任务失败: {}", e)))?
+    }
+
+    async fn replace_current_binary(&self, candidate_path: &Path) -> Result<(), AdminServiceError> {
+        let current_exe = self.current_executable_path()?;
+        let previous_path = current_exe.with_extension("previous");
+        if previous_path.exists() {
+            let _ = tokio::fs::remove_file(&previous_path).await;
+        }
+
+        tokio::fs::rename(&current_exe, &previous_path)
+            .await
+            .map_err(|e| {
+                AdminServiceError::InternalError(format!("备份当前可执行文件失败: {}", e))
+            })?;
+        if let Err(err) = tokio::fs::rename(candidate_path, &current_exe).await {
+            let _ = tokio::fs::rename(&previous_path, &current_exe).await;
+            return Err(AdminServiceError::InternalError(format!(
+                "替换当前可执行文件失败: {}",
+                err
+            )));
+        }
+        Ok(())
+    }
+
+    fn current_executable_path(&self) -> Result<PathBuf, AdminServiceError> {
+        let current_exe = std::env::current_exe().map_err(|e| {
+            AdminServiceError::InternalError(format!("获取当前可执行文件失败: {}", e))
+        })?;
+        current_exe.canonicalize().map_err(|e| {
+            AdminServiceError::InternalError(format!("解析当前可执行文件路径失败: {}", e))
+        })
     }
 
     async fn run_healthcheck(&self) -> Result<(), AdminServiceError> {
@@ -1057,16 +1310,18 @@ impl AdminService {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let candidate = workspace_root.join(relative);
-        let normalized = candidate.components().fold(PathBuf::new(), |mut acc, component| {
-            match component {
-                std::path::Component::ParentDir => {
-                    acc.pop();
+        let normalized = candidate
+            .components()
+            .fold(PathBuf::new(), |mut acc, component| {
+                match component {
+                    std::path::Component::ParentDir => {
+                        acc.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    other => acc.push(other.as_os_str()),
                 }
-                std::path::Component::CurDir => {}
-                other => acc.push(other.as_os_str()),
-            }
-            acc
-        });
+                acc
+            });
         if !normalized.starts_with(&workspace_root) {
             return Err(AdminServiceError::InvalidCredential(format!(
                 "路径越界，禁止写入工作区外: {}",
@@ -1195,8 +1450,7 @@ impl AdminService {
             return AdminServiceError::NotFound { id };
         }
 
-        if msg.contains("当前没有可直接调度的凭据")
-            || msg.contains("当前没有可继续切换的凭据")
+        if msg.contains("当前没有可直接调度的凭据") || msg.contains("当前没有可继续切换的凭据")
         {
             return AdminServiceError::InternalError(format!(
                 "账号 #{} 当前不能直接测试，请检查该账号是否支持模型 {}，或是否处于本地阻塞/刷新异常状态",
@@ -1266,10 +1520,50 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
-            AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_build_default_version_response_uses_new_capabilities() {
+        let mut config = Config::default();
+        config.update.enabled = true;
+        config.update.build_type = "release".to_string();
+        config.update.deployment_mode = "docker".to_string();
+        config.update.restart_command = "docker restart kiro-rs".to_string();
+
+        let response = AdminService::build_default_version_response(
+            &config,
+            "1.0.0".to_string(),
+            Some("abc123".to_string()),
+            None,
+        );
+
+        assert_eq!(response.build_type, "release");
+        assert_eq!(response.deployment_mode, "docker");
+        assert!(response.can_update);
+        assert!(response.can_rollback);
+        assert!(response.can_restart);
+        assert!(response.update_hint.contains("手动重启"));
+    }
+
+    #[test]
+    fn test_build_default_version_response_for_source_build() {
+        let mut config = Config::default();
+        config.update.enabled = true;
+        config.update.build_type = "source".to_string();
+
+        let response =
+            AdminService::build_default_version_response(&config, "1.0.0".to_string(), None, None);
+
+        assert_eq!(response.build_type, "source");
+        assert!(!response.can_update);
+        assert!(!response.can_rollback);
+        assert!(!response.can_restart);
     }
 }

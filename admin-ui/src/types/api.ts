@@ -12,8 +12,11 @@ export interface SystemVersionResponse {
   updateAvailable: boolean
   latestPublishedAt: string | null
   releaseNotesUrl: string | null
+  buildType: string
   deploymentMode: string
-  canSelfUpdate: boolean
+  canUpdate: boolean
+  canRollback: boolean
+  canRestart: boolean
   updateHint: string
   checkedAt: string
   currentCommit?: string | null
