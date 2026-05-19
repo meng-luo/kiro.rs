@@ -15,7 +15,7 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{AcquireOptions, DispatchLease, MultiTokenManager, RateLimitKind};
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
 
@@ -45,7 +45,16 @@ pub struct KiroProvider {
     default_endpoint: String,
 }
 
+pub struct ProviderResponse {
+    pub response: reqwest::Response,
+    pub lease: DispatchLease,
+}
+
 impl KiroProvider {
+    pub fn token_manager(&self) -> &Arc<MultiTokenManager> {
+        &self.token_manager
+    }
+
     /// 创建带代理配置和端点注册表的 KiroProvider 实例
     ///
     /// # Arguments
@@ -111,12 +120,12 @@ impl KiroProvider {
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
-    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<ProviderResponse> {
         self.call_api_with_retry(request_body, false).await
     }
 
     /// 发送流式 API 请求
-    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<ProviderResponse> {
         self.call_api_with_retry(request_body, true).await
     }
 
@@ -280,7 +289,7 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_stream: bool,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<ProviderResponse> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
@@ -289,10 +298,19 @@ impl KiroProvider {
 
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
+        let session_key = Self::extract_session_key(request_body);
+        let mut tried_account_ids: HashSet<u64> = HashSet::new();
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
-            let ctx = match self.token_manager.acquire_context(model.as_deref()).await {
+            let mut acquire_options = AcquireOptions::new(model.clone());
+            acquire_options.session_key = session_key.clone();
+            acquire_options.tried_account_ids = tried_account_ids.clone();
+            let mut ctx = match self
+                .token_manager
+                .acquire_context_with_options(acquire_options)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
@@ -306,8 +324,12 @@ impl KiroProvider {
             let endpoint = match self.endpoint_for(&ctx.credentials) {
                 Ok(e) => e,
                 Err(e) => {
+                    if let Some(mut lease) = ctx.lease.take() {
+                        self.token_manager.release_slot(&mut lease);
+                    }
                     last_error = Some(e);
                     self.token_manager.report_failure(ctx.id);
+                    tried_account_ids.insert(ctx.id);
                     continue;
                 }
             };
@@ -333,6 +355,9 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    if let Some(mut lease) = ctx.lease.take() {
+                        self.token_manager.release_slot(&mut lease);
+                    }
                     tracing::warn!(
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -354,11 +379,21 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
-                return Ok(response);
+                let lease = ctx
+                    .lease
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("缺少调度租约"))?;
+                return Ok(ProviderResponse {
+                    response,
+                    lease,
+                });
             }
 
             // 失败响应：读取 body 用于日志/错误信息
             let body = response.text().await.unwrap_or_default();
+            if let Some(mut lease) = ctx.lease.take() {
+                self.token_manager.release_slot(&mut lease);
+            }
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -386,6 +421,7 @@ impl KiroProvider {
                     status,
                     body
                 ));
+                tried_account_ids.insert(ctx.id);
                 continue;
             }
 
@@ -431,12 +467,29 @@ impl KiroProvider {
                     status,
                     body
                 ));
+                tried_account_ids.insert(ctx.id);
                 continue;
             }
 
-            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
-            // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+            if status.as_u16() == 429 {
+                let kind = if Self::is_suspicious_activity(&body) {
+                    RateLimitKind::SuspiciousActivity
+                } else {
+                    RateLimitKind::Normal429
+                };
+                self.token_manager.report_rate_limited(ctx.id, kind);
+                tried_account_ids.insert(ctx.id);
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
+                continue;
+            }
+
+            // 408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
+            if status.as_u16() == 408 || status.is_server_error() {
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -504,6 +557,23 @@ impl KiroProvider {
             .get("modelId")?
             .as_str()
             .map(|s| s.to_string())
+    }
+
+    fn extract_session_key(request_body: &str) -> Option<String> {
+        use serde_json::Value;
+
+        let json: Value = serde_json::from_str(request_body).ok()?;
+        json.get("conversationState")?
+            .get("conversationId")?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
+    fn is_suspicious_activity(body: &str) -> bool {
+        let lower = body.to_lowercase();
+        lower.contains("suspicious activity")
+            || lower.contains("due to suspicious activity")
+            || lower.contains("suspicious_activity")
     }
 
     fn retry_delay(attempt: usize) -> Duration {

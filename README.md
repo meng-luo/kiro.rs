@@ -165,6 +165,15 @@ docker-compose up
 
 需要将 `config.json` 和 `credentials.json` 挂载到容器中，具体参见 `docker-compose.yml`。
 
+测试实例可使用单独的 Compose 文件：
+
+```bash
+KIRO_SHARED_CONFIG_DIR=/root/kiro-rs docker compose -f docker-compose.cache-test.yml up -d
+```
+
+该测试实例默认监听 `127.0.0.1:8991`，并复用共享配置目录中的 `config.json`、`credentials.json`、`kiro_stats.json` 与 `kiro_balance_cache.json`。
+如果直接指向生产目录，主实例与测试实例会共同读写这些文件，适合做同数据集调度验证，不适合作为完全隔离环境。
+
 ## 配置详解
 
 ### config.json

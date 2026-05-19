@@ -1,0 +1,11 @@
+services:
+  kiro-rs-cache-test:
+    image: ghcr.io/${IMAGE_OWNER:-shusfun}/kiro-rs:${IMAGE_TAG:-latest}
+    container_name: kiro-rs-cache-test
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8991:8990"
+    volumes:
+      - ${KIRO_SHARED_CONFIG_DIR:-/root/kiro-rs}:/app/config
+    restart: unless-stopped

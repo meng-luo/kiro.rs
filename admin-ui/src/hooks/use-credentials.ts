@@ -10,6 +10,8 @@ import {
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  getSystemVersion,
+  checkSystemVersion,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -115,6 +117,24 @@ export function useSetLoadBalancingMode() {
     mutationFn: setLoadBalancingMode,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
+    },
+  })
+}
+
+export function useSystemVersion() {
+  return useQuery({
+    queryKey: ['systemVersion'],
+    queryFn: getSystemVersion,
+    refetchInterval: 60000,
+  })
+}
+
+export function useCheckSystemVersion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: checkSystemVersion,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['systemVersion'] })
     },
   })
 }

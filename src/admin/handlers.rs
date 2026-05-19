@@ -140,3 +140,15 @@ pub async fn set_load_balancing_mode(
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
+
+/// GET /api/admin/system/version
+/// 获取系统版本信息
+pub async fn get_system_version(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_system_version())
+}
+
+/// POST /api/admin/system/version/check
+/// 检查系统版本信息
+pub async fn check_system_version(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_system_version())
+}

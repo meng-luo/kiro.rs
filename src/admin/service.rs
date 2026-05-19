@@ -10,15 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
+use crate::model::config::Config;
 
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    SystemVersionResponse,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
+/// 当前 fork 的发布页仓库地址
+const RELEASES_BASE_URL: &str = "https://github.com/shusfun/kiro.rs/releases/tag";
 
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +42,7 @@ pub struct AdminService {
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
+    current_version: String,
 }
 
 impl AdminService {
@@ -56,6 +61,7 @@ impl AdminService {
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
@@ -87,6 +93,15 @@ impl AdminService {
                 refresh_failure_count: entry.refresh_failure_count,
                 disabled_reason: entry.disabled_reason,
                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
+                dispatch_state: entry.dispatch_state,
+                current_concurrent: entry.current_concurrent,
+                max_concurrent: entry.max_concurrent,
+                cooldown_remaining_ms: entry.cooldown_remaining_ms,
+                last_rate_limit_kind: entry.last_rate_limit_kind,
+                recent_429_count: entry.recent_429_count,
+                recent_suspicious_count: entry.recent_suspicious_count,
+                sticky_session_count: entry.sticky_session_count,
+                sticky_detached: entry.sticky_detached,
             })
             .collect();
 
@@ -223,6 +238,7 @@ impl AdminService {
             client_id: req.client_id,
             client_secret: req.client_secret,
             priority: req.priority,
+            max_concurrent: req.max_concurrent,
             region: req.region,
             auth_region: req.auth_region,
             api_region: req.api_region,
@@ -278,6 +294,63 @@ impl AdminService {
         LoadBalancingModeResponse {
             mode: self.token_manager.get_load_balancing_mode(),
         }
+    }
+
+    /// 获取系统版本信息
+    pub fn get_system_version(&self) -> SystemVersionResponse {
+        let config = self.token_manager.config();
+        let deployment_mode = self.detect_deployment_mode(config);
+        let can_self_update = self.can_self_update(config, &deployment_mode);
+        let checked_at = Utc::now().to_rfc3339();
+
+        SystemVersionResponse {
+            current_version: self.current_version.clone(),
+            latest_version: self.current_version.clone(),
+            update_available: false,
+            latest_published_at: None,
+            release_notes_url: Some(format!(
+                "{}/v{}",
+                RELEASES_BASE_URL, self.current_version
+            )),
+            deployment_mode,
+            can_self_update,
+            update_hint: if can_self_update {
+                "当前实例满足在线更新条件。".to_string()
+            } else if std::path::Path::new("/.dockerenv").exists() {
+                "当前实例运行在容器内，请通过镜像或容器编排方式更新。".to_string()
+            } else {
+                "当前实例未满足在线更新条件。".to_string()
+            },
+            checked_at,
+        }
+    }
+
+    fn detect_deployment_mode(&self, _config: &Config) -> String {
+        if let Ok(mode) = std::env::var("KIRO_DEPLOYMENT_MODE") {
+            if !mode.trim().is_empty() {
+                return mode;
+            }
+        }
+
+        if std::path::Path::new("/.dockerenv").exists() {
+            "docker".to_string()
+        } else {
+            "file".to_string()
+        }
+    }
+
+    fn can_self_update(&self, config: &Config, deployment_mode: &str) -> bool {
+        let writable_config = config
+            .config_path()
+            .and_then(|p| p.parent())
+            .map(|dir| {
+                std::fs::metadata(dir)
+                    .map(|m| !m.permissions().readonly())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        deployment_mode == "binary" && writable_config
     }
 
     /// 设置负载均衡模式

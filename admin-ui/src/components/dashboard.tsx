@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, BadgeInfo, ArrowUpRight } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -12,7 +12,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useSystemVersion, useCheckSystemVersion } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
@@ -54,6 +54,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: resetFailure } = useResetFailure()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+  const { data: systemVersion, isLoading: isLoadingVersion } = useSystemVersion()
+  const { mutate: checkSystemVersion, isPending: isCheckingVersion } = useCheckSystemVersion()
 
   // 计算分页
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
@@ -61,6 +63,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const endIndex = startIndex + itemsPerPage
   const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
+  const cooldownCredentialCount = data?.credentials.filter(credential => credential.dispatchState === 'cooldown').length || 0
+  const saturatedCredentialCount = data?.credentials.filter(credential => credential.dispatchState === 'saturated').length || 0
+  const blockedCredentialCount = data?.credentials.filter(credential => credential.dispatchState === 'blocked' && !credential.disabled).length || 0
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
     return Boolean(credential?.disabled)
@@ -507,6 +512,17 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
+  const handleCheckVersion = () => {
+    checkSystemVersion(undefined, {
+      onSuccess: () => {
+        toast.success('已刷新版本信息')
+      },
+      onError: (error) => {
+        toast.error(`版本检查失败: ${extractErrorMessage(error)}`)
+      }
+    })
+  }
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -548,6 +564,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <Button
               variant="outline"
               size="sm"
+              onClick={handleCheckVersion}
+              disabled={isLoadingVersion || isCheckingVersion}
+              title="检查版本信息"
+            >
+              <BadgeInfo className="h-4 w-4 mr-2" />
+              {isLoadingVersion ? '版本...' : (systemVersion ? `${systemVersion.currentVersion}` : '版本')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={handleToggleLoadBalancing}
               disabled={isLoadingMode || isSettingMode}
               title="切换负载均衡模式"
@@ -570,7 +596,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       {/* 主内容 */}
       <main className="container mx-auto px-4 md:px-8 py-6">
         {/* 统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-3 mb-6">
+        <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6 mb-6">
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -602,6 +628,36 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 #{data?.currentId || '-'}
                 <Badge variant="success">活跃</Badge>
               </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                冷却中
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-blue-600">{cooldownCredentialCount}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                并发饱和
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-yellow-600">{saturatedCredentialCount}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                本地阻塞
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-orange-600">{blockedCredentialCount}</div>
             </CardContent>
           </Card>
         </div>
@@ -781,6 +837,50 @@ export function Dashboard({ onLogout }: DashboardProps) {
         results={verifyResults}
         onCancel={handleCancelVerify}
       />
+
+      {/* 版本信息提示 */}
+      {systemVersion && (
+        <div className="fixed bottom-4 right-4 z-40 max-w-md">
+          <Card className="shadow-lg border-muted/40">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                <BadgeInfo className="h-4 w-4" />
+                版本信息
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-muted-foreground">当前版本</span>
+                <span className="font-medium">{systemVersion.currentVersion}</span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-muted-foreground">部署方式</span>
+                <span className="font-medium">{systemVersion.deploymentMode}</span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-muted-foreground">在线更新</span>
+                <Badge variant={systemVersion.canSelfUpdate ? 'success' : 'outline'}>
+                  {systemVersion.canSelfUpdate ? '可用' : '不可用'}
+                </Badge>
+              </div>
+              <div className="rounded-md bg-muted p-3 text-muted-foreground">
+                {systemVersion.updateHint}
+              </div>
+              {systemVersion.releaseNotesUrl && (
+                <a
+                  href={systemVersion.releaseNotesUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-primary hover:underline"
+                >
+                  查看发布说明
+                  <ArrowUpRight className="h-3.5 w-3.5" />
+                </a>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   )
 }

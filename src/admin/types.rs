@@ -4,6 +4,32 @@ use serde::{Deserialize, Serialize};
 
 // ============ 凭据状态 ============
 
+/// 系统版本信息响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemVersionResponse {
+    /// 当前构建版本
+    pub current_version: String,
+    /// GitHub 最新发布版本
+    pub latest_version: String,
+    /// 是否检测到新版本
+    pub update_available: bool,
+    /// 最新版本发布时间（RFC3339）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_published_at: Option<String>,
+    /// 发布说明链接
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_notes_url: Option<String>,
+    /// 部署模式
+    pub deployment_mode: String,
+    /// 当前实例是否具备在线更新条件
+    pub can_self_update: bool,
+    /// 给前端展示的更新提示
+    pub update_hint: String,
+    /// 最近一次检查时间（RFC3339）
+    pub checked_at: String,
+}
+
 /// 所有凭据状态响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +88,26 @@ pub struct CredentialStatusItem {
     pub disabled_reason: Option<String>,
     /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
     pub endpoint: String,
+    /// 调度状态
+    pub dispatch_state: String,
+    /// 当前并发
+    pub current_concurrent: u32,
+    /// 并发上限
+    pub max_concurrent: u32,
+    /// 冷却剩余时间（毫秒）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_remaining_ms: Option<u64>,
+    /// 最近一次限频类型
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_rate_limit_kind: Option<String>,
+    /// 最近普通 429 次数
+    pub recent_429_count: u32,
+    /// 最近 suspicious 次数
+    pub recent_suspicious_count: u32,
+    /// 当前粘性会话数
+    pub sticky_session_count: u32,
+    /// 是否已解除粘性
+    pub sticky_detached: bool,
 }
 
 // ============ 操作请求 ============
@@ -102,6 +148,9 @@ pub struct AddCredentialRequest {
     /// 优先级（可选，默认 0）
     #[serde(default)]
     pub priority: u32,
+
+    /// 并发上限（可选）
+    pub max_concurrent: Option<u32>,
 
     /// 凭据级 Region 配置（用于 OIDC token 刷新）
     /// 未配置时回退到 config.json 的全局 region

@@ -8,6 +8,7 @@ import type {
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  SystemVersionResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -102,5 +103,15 @@ export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'bala
 // 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+export async function getSystemVersion(): Promise<SystemVersionResponse> {
+  const { data } = await api.get<SystemVersionResponse>('/system/version')
+  return data
+}
+
+export async function checkSystemVersion(): Promise<SystemVersionResponse> {
+  const { data } = await api.post<SystemVersionResponse>('/system/version/check')
   return data
 }

@@ -23,6 +23,7 @@ import {
   useDeleteCredential,
   useForceRefreshToken,
 } from '@/hooks/use-credentials'
+import { Progress } from '@/components/ui/progress'
 
 interface CredentialCardProps {
   credential: CredentialStatusItem
@@ -49,6 +50,56 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${days} 天前`
 }
 
+function formatCooldown(ms?: number): string {
+  if (!ms || ms <= 0) return '无需等待'
+  const totalSeconds = Math.ceil(ms / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours} 小时 ${minutes} 分`
+  if (minutes > 0) return `${minutes} 分 ${seconds} 秒`
+  return `${seconds} 秒`
+}
+
+function getDispatchBadge(
+  credential: CredentialStatusItem
+): { text: string; variant: 'success' | 'warning' | 'outline' | 'destructive'; title: string } | null {
+  if (credential.disabled) {
+    return null
+  }
+  switch (credential.dispatchState) {
+    case 'ready':
+      return { text: '就绪可用', variant: 'success', title: '当前可以继续接收请求。' }
+    case 'saturated':
+      return { text: '并发已满', variant: 'warning', title: '当前并发已达到上限，需等待已有请求结束。' }
+    case 'cooldown':
+      return {
+        text: credential.lastRateLimitKind === 'suspicious_activity' ? '冷却中（风控限频）' : '冷却中',
+        variant: credential.lastRateLimitKind === 'suspicious_activity' ? 'destructive' : 'outline',
+        title: credential.lastRateLimitKind === 'suspicious_activity'
+          ? '上游返回 suspicious activity，当前账号已进入较长冷却。'
+          : '当前账号刚触发限频，冷却结束后会自动恢复。'
+      }
+    case 'blocked':
+      return { text: '刷新阻塞', variant: 'warning', title: '刷新失败达到阈值，当前暂不继续使用。' }
+    case 'disabled':
+      return null
+  }
+}
+
+function getRateLimitLabel(kind?: CredentialStatusItem['lastRateLimitKind']) {
+  switch (kind) {
+    case 'normal_429':
+      return { text: '普通限频', title: '上游返回 429，请求过快。' }
+    case 'suspicious_activity':
+      return { text: '风控限频', title: '上游返回 suspicious activity，建议观察一段时间。' }
+    case 'refresh_429':
+      return { text: '刷新限频', title: '刷新 Token 时被限频。' }
+    default:
+      return null
+  }
+}
+
 export function CredentialCard({
   credential,
   onViewBalance,
@@ -66,6 +117,11 @@ export function CredentialCard({
   const resetFailure = useResetFailure()
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
+  const dispatchBadge = getDispatchBadge(credential)
+  const rateLimitBadge = getRateLimitLabel(credential.lastRateLimitKind)
+  const concurrentPercentage = credential.maxConcurrent > 0
+    ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
+    : 0
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -159,8 +215,18 @@ export function CredentialCard({
                 {credential.disabled && (
                   <Badge variant="destructive">已禁用</Badge>
                 )}
+                {dispatchBadge && (
+                  <Badge variant={dispatchBadge.variant} title={dispatchBadge.title}>
+                    {dispatchBadge.text}
+                  </Badge>
+                )}
                 {credential.disabled && credential.disabledReason && (
                   <Badge variant="outline">{credential.disabledReason}</Badge>
+                )}
+                {rateLimitBadge && (
+                  <Badge variant={credential.lastRateLimitKind === 'suspicious_activity' ? 'destructive' : 'warning'} title={rateLimitBadge.title}>
+                    {rateLimitBadge.text}
+                  </Badge>
                 )}
                 {credential.authMethod && (
                   <Badge variant="secondary">
@@ -243,6 +309,16 @@ export function CredentialCard({
               </span>
             </div>
             <div>
+              <span className="text-muted-foreground">当前并发：</span>
+              <span className="font-medium">
+                {credential.currentConcurrent} / {credential.maxConcurrent}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">并发上限：</span>
+              <span className="font-medium">{credential.maxConcurrent}</span>
+            </div>
+            <div>
               <span className="text-muted-foreground">订阅等级：</span>
               <span className="font-medium">
                 {loadingBalance ? (
@@ -254,9 +330,40 @@ export function CredentialCard({
               <span className="text-muted-foreground">成功次数：</span>
               <span className="font-medium">{credential.successCount}</span>
             </div>
+            <div>
+              <span className="text-muted-foreground">最近 429：</span>
+              <span className={credential.recent429Count > 0 ? 'text-yellow-600 font-medium' : 'font-medium'}>
+                {credential.recent429Count}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">最近风控：</span>
+              <span className={credential.recentSuspiciousCount > 0 ? 'text-red-500 font-medium' : 'font-medium'}>
+                {credential.recentSuspiciousCount}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">粘性会话：</span>
+              <span className="font-medium">
+                {credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个`}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">冷却剩余：</span>
+              <span className={credential.cooldownRemainingMs ? 'text-blue-600 font-medium' : 'font-medium'}>
+                {formatCooldown(credential.cooldownRemainingMs)}
+              </span>
+            </div>
             <div className="col-span-2">
               <span className="text-muted-foreground">最后调用：</span>
               <span className="font-medium">{formatLastUsed(credential.lastUsedAt)}</span>
+            </div>
+            <div className="col-span-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">并发占用</span>
+                <span className="text-sm font-medium">{concurrentPercentage.toFixed(0)}%</span>
+              </div>
+              <Progress value={concurrentPercentage} />
             </div>
             {credential.maskedApiKey && (
               <div className="col-span-2">

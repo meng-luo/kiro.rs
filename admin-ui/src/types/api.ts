@@ -6,6 +6,18 @@ export interface CredentialsStatusResponse {
   credentials: CredentialStatusItem[]
 }
 
+export interface SystemVersionResponse {
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  latestPublishedAt: string | null
+  releaseNotesUrl: string | null
+  deploymentMode: string
+  canSelfUpdate: boolean
+  updateHint: string
+  checkedAt: string
+}
+
 // 单个凭据状态
 export interface CredentialStatusItem {
   id: number
@@ -27,6 +39,15 @@ export interface CredentialStatusItem {
   refreshFailureCount: number
   disabledReason?: string
   endpoint: string
+  dispatchState: 'ready' | 'saturated' | 'cooldown' | 'blocked' | 'disabled'
+  currentConcurrent: number
+  maxConcurrent: number
+  cooldownRemainingMs?: number
+  lastRateLimitKind?: 'normal_429' | 'suspicious_activity' | 'refresh_429'
+  recent429Count: number
+  recentSuspiciousCount: number
+  stickySessionCount: number
+  stickyDetached: boolean
 }
 
 // 余额响应
@@ -70,6 +91,7 @@ export interface AddCredentialRequest {
   clientId?: string
   clientSecret?: string
   priority?: number
+  maxConcurrent?: number
   authRegion?: string
   apiRegion?: string
   machineId?: string
