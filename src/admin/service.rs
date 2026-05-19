@@ -404,7 +404,10 @@ impl AdminService {
 
     /// 获取系统版本信息
     pub fn get_system_version(&self) -> SystemVersionResponse {
-        self.version_state.lock().response.clone()
+        let latest_job = self.latest_job();
+        let mut state = self.version_state.lock();
+        state.response.latest_job = latest_job;
+        state.response.clone()
     }
 
     /// 重新检查系统版本信息
