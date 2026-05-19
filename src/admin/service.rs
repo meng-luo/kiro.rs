@@ -530,6 +530,17 @@ impl AdminService {
         id: &str,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         if let Some(job) = self.system_jobs.lock().get(id).cloned() {
+            if let Some(persisted) = self
+                .load_persisted_job()
+                .filter(|persisted| persisted.job_id == id)
+                .filter(|persisted| Self::should_prefer_persisted_job(&job, persisted))
+            {
+                self.system_jobs
+                    .lock()
+                    .insert(persisted.job_id.clone(), persisted.clone());
+                self.sync_latest_job(Some(persisted.clone()));
+                return Ok(persisted);
+            }
             return Ok(job);
         }
         let job = self
@@ -972,10 +983,20 @@ impl AdminService {
             .values()
             .cloned()
             .max_by(|left, right| left.started_at.cmp(&right.started_at));
-        if latest.is_some() {
-            return latest;
+        let persisted = self.load_persisted_job();
+        match (latest, persisted) {
+            (Some(current), Some(persisted))
+                if Self::should_prefer_persisted_job(&current, &persisted) =>
+            {
+                self.system_jobs
+                    .lock()
+                    .insert(persisted.job_id.clone(), persisted.clone());
+                self.sync_latest_job(Some(persisted.clone()));
+                Some(persisted)
+            }
+            (Some(current), _) => Some(current),
+            (None, persisted) => persisted,
         }
-        self.load_persisted_job()
     }
 
     fn sync_latest_job(&self, latest_job: Option<SystemOperationJobResponse>) {
@@ -1023,6 +1044,22 @@ impl AdminService {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+
+    fn should_prefer_persisted_job(
+        current: &SystemOperationJobResponse,
+        persisted: &SystemOperationJobResponse,
+    ) -> bool {
+        if persisted.job_id != current.job_id {
+            return persisted.started_at > current.started_at;
+        }
+        if current.status == "running" && persisted.status != "running" {
+            return true;
+        }
+        if current.finished_at.is_none() && persisted.finished_at.is_some() {
+            return true;
+        }
+        persisted.started_at > current.started_at
     }
 
     fn build_running_job(
