@@ -47,7 +47,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates docker-cli docker-cli-compose
 
 WORKDIR /app
 COPY --from=builder /app/kiro-rs /app/kiro-rs
