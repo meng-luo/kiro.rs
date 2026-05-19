@@ -192,7 +192,7 @@ function terminalClass(event: CredentialTestEvent) {
 function terminalText(event: CredentialTestEvent) {
   switch (event.type) {
     case 'test_start':
-      return `开始测试，模型：${event.model ?? '-'}，命中方式：${dispatchPathLabel(event.dispatchPath).text}，起始状态：${accountStateLabel(event.accountStateAtStart).text}${event.usedSoftFallback ? '，已走软回退' : ''}`
+      return `开始测试，模型：${event.model ?? '-'}，本次${dispatchPathLabel(event.dispatchPath).text}，当前状态：${accountStateLabel(event.accountStateAtStart).text}${event.usedSoftFallback ? '，已临时使用备用账号' : ''}`
     case 'content':
       return event.text ?? ''
     case 'tool_use':
@@ -200,9 +200,9 @@ function terminalText(event: CredentialTestEvent) {
     case 'context_usage':
       return `上下文使用率：${Number(event.percentage ?? 0).toFixed(2)}%`
     case 'upstream_error':
-      return `上游错误：${event.code ?? 'Unknown'} ${event.message ?? ''}`.trim()
+      return `服务返回错误：${event.code ?? 'Unknown'} ${event.message ?? ''}`.trim()
     case 'upstream_exception':
-      return `上游异常：${event.exceptionType ?? 'Unknown'} ${event.message ?? ''}`.trim()
+      return `服务调用异常：${event.exceptionType ?? 'Unknown'} ${event.message ?? ''}`.trim()
     case 'test_complete':
       return event.success ? '测试完成' : (event.message ?? '测试失败')
     default:
@@ -409,6 +409,23 @@ export function CredentialRow({
   const handleRunTest = async () => {
     setTesting(true)
     setTestEvents([])
+
+    const appendTestEvent = (event: CredentialTestEvent) => {
+      setTestEvents((prev) => {
+        const last = prev[prev.length - 1]
+        if (event.type === 'content' && last?.type === 'content') {
+          return [
+            ...prev.slice(0, -1),
+            {
+              ...last,
+              text: `${last.text ?? ''}${event.text ?? ''}`,
+            },
+          ]
+        }
+        return [...prev, event]
+      })
+    }
+
     try {
       const response = await testCredential(credential.id, {
         modelId: testModel,
@@ -437,15 +454,15 @@ export function CredentialRow({
           if (!payload) continue
           try {
             const event = JSON.parse(payload) as CredentialTestEvent
-            setTestEvents((prev) => [...prev, event])
+            appendTestEvent(event)
           } catch {
-            setTestEvents((prev) => [...prev, { type: 'upstream_error', message: payload }])
+            appendTestEvent({ type: 'upstream_error', message: payload })
           }
         }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '测试失败'
-      setTestEvents((prev) => [...prev, { type: 'test_complete', success: false, message }])
+      appendTestEvent({ type: 'test_complete', success: false, message })
       toast.error(message)
     } finally {
       setTesting(false)
@@ -662,8 +679,8 @@ export function CredentialRow({
 
             <div className="rounded-md border bg-slate-50 p-4 font-mono text-xs dark:bg-slate-950">
               <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="truncate text-[11px] text-muted-foreground">实时输出</div>
-                <div className="flex max-w-[70%] gap-2 overflow-hidden text-[11px] text-muted-foreground">
+                <div className="shrink-0 text-[11px] text-muted-foreground">实时输出</div>
+                <div className="flex min-w-0 max-w-[70%] gap-2 overflow-hidden text-[11px] text-muted-foreground">
                   <CellText>{`测试模型：${modelOptionsFor(credential).find((item) => item.value === testModel)?.label ?? testModel}`}</CellText>
                   <CellText>{testPrompt.trim() ? `提示词：${testPrompt.trim()}` : '提示词：默认检查语句'}</CellText>
                 </div>
@@ -673,7 +690,7 @@ export function CredentialRow({
                   <div className="text-muted-foreground">点击“开始测试”后，这里会持续显示真实流式输出。</div>
                 ) : (
                   testEvents.map((event, index) => (
-                    <div key={`${event.type}-${index}`} className={terminalClass(event)}>
+                    <div key={`${event.type}-${index}`} className={cn('whitespace-pre-wrap break-words leading-6', terminalClass(event))}>
                       {terminalText(event)}
                     </div>
                   ))
