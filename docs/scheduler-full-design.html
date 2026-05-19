@@ -1967,7 +1967,7 @@ Layer 5: 失败回退
             <tr>
               <td>更新命令</td>
               <td><code>cd /opt/kiro-rs-cache-test &amp;&amp; IMAGE_TAG=beta-amd64 docker compose pull &amp;&amp; IMAGE_TAG=beta-amd64 docker compose up -d</code></td>
-              <td>后台按钮触发的就是这条宿主机编排命令</td>
+              <td>后台按钮在 helper 容器内执行这条命令；手动登录宿主机时使用 <code>/root/kiro-rs-cache-test</code></td>
             </tr>
             <tr>
               <td>重启命令</td>
@@ -1988,6 +1988,43 @@ Layer 5: 失败回退
         </table>
         <div class="callout.info" style="margin-top: 14px;">
           远端登录信息不写进仓库文档正文，也不提交到 Git。当前约定是只保存在本地 <code>.env.local</code>，字段名固定，开新窗口时只需要按字段读取，不需要再翻聊天记录。
+        </div>
+        <h3>手动更新 Docker 容器</h3>
+        <div class="callout.info">
+          手动更新 Docker 容器的核心步骤就是在对应 Compose 目录执行 <code>docker compose pull</code> 和 <code>docker compose up -d</code>。
+        </div>
+        <table style="margin-top: 14px;">
+          <thead>
+            <tr>
+              <th>实例</th>
+              <th>目录</th>
+              <th>镜像标签</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>正式容器</td>
+              <td><code>/root/kiro-rs</code></td>
+              <td><code>latest</code>，或明确指定一个发布版本号</td>
+            </tr>
+            <tr>
+              <td>测试容器</td>
+              <td><code>/root/kiro-rs-cache-test</code></td>
+              <td><code>beta-amd64</code>，必须在命令前显式带上 <code>IMAGE_TAG=beta-amd64</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <pre># 手动更新正式容器
+cd /root/kiro-rs
+IMAGE_OWNER=shusfun IMAGE_TAG=latest docker compose pull
+IMAGE_OWNER=shusfun IMAGE_TAG=latest docker compose up -d
+
+# 手动更新测试容器
+cd /root/kiro-rs-cache-test
+IMAGE_TAG=beta-amd64 docker compose pull
+IMAGE_TAG=beta-amd64 docker compose up -d</pre>
+        <div class="callout.info" style="margin-top: 14px;">
+          测试实例的 Compose 文件已经写死镜像仓库为 <code>ghcr.io/shusfun/kiro-rs</code>，手动更新时只需要指定 <code>IMAGE_TAG=beta-amd64</code>。如果漏掉这个变量，可能会拉起默认标签，导致 <code>8991</code> 跑的不是测试链最新镜像。更新后可按需看一眼 <code>docker ps</code>、<code>/health</code> 或容器日志。
         </div>
         <pre># 本地 .env.local
 REMOTE_LOG_SSH_HOST=...

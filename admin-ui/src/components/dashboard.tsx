@@ -176,6 +176,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [pageSize, setPageSize] = useState(20)
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
+      const savedTheme = storage.getTheme()
+      if (savedTheme) return savedTheme === 'dark'
       return document.documentElement.classList.contains('dark')
     }
     return false
@@ -276,8 +278,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
   }, [credentials])
 
   const toggleDarkMode = () => {
-    setDarkMode(!darkMode)
-    document.documentElement.classList.toggle('dark')
+    setDarkMode((current) => {
+      const next = !current
+      document.documentElement.classList.toggle('dark', next)
+      storage.setTheme(next ? 'dark' : 'light')
+      return next
+    })
   }
 
   const handleViewBalance = (id: number) => {

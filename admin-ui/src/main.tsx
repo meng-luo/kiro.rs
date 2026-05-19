@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import { storage } from './lib/storage'
 import './index.css'
 
 const queryClient = new QueryClient({
@@ -12,6 +13,9 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+const savedTheme = storage.getTheme()
+document.documentElement.classList.toggle('dark', savedTheme === 'dark')
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
