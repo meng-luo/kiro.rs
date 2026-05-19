@@ -1213,7 +1213,7 @@
             <tr>
               <td>sub2 更新链路</td>
               <td>版本徽标、GitHub Release 检测、更新日志入口、Linux 单机场景下的重启/回滚思路</td>
-              <td>需要结合本项目部署方式评估是否能复用整套自更新流程</td>
+              <td>不能直接照搬到测试链；本项目已经确认测试环境要拆成 <code>docker</code> 专用更新路径</td>
             </tr>
             <tr>
               <td>superman2003/sub2api</td>
@@ -1761,45 +1761,81 @@ Layer 5: 失败回退
       <section class="section">
         <h2>版本检测与更新能力</h2>
         <div class="callout.info">
-          调研结果显示，<code>sub2</code> 已经把版本检测、在线替换、重启、回滚拆成了完整链路。这里先按能力项把需求列清楚，不替实现阶段先做取舍。
+          当前版本治理已经按部署方式落地拆开，容器部署和二进制部署不再共用一条更新链。最近几次提交已经把测试链更新、容器依赖和 CI 构建节奏收口成可用现状。
         </div>
         <div class="callout.ok" style="margin-top: 14px;">
-          当前实现口径：版本信息入口收进右上角轻量按钮，点击后进入弹窗查看当前版本、最新版本、部署方式、升级提示和发布说明链接，不再占用页面底部悬浮区。
+          当前已支持：版本入口收进右上角轻量按钮，弹窗内统一展示当前版本、部署方式、更新提示、任务状态和发布说明入口。<code>docker</code> 模式已经支持“更新测试实例”和“重启服务”；<code>binary</code> 模式继续保留 Release 检测、在线更新、回滚和重启。
         </div>
         <table>
           <thead>
             <tr>
-              <th>能力</th>
-              <th>需求描述</th>
-              <th>依赖条件</th>
+              <th>部署方式</th>
+              <th>当前支持现状</th>
+              <th>说明</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td>版本检测</td>
-              <td>管理面显示当前版本、GitHub 最新 Release、发布时间、更新说明链接、是否落后</td>
-              <td>需要服务端拿到当前构建版本，并能访问 GitHub Release 元信息</td>
+              <td>binary</td>
+              <td>显示当前版本、GitHub Release 最新版本、发布时间、发布说明链接，并支持在线更新 / 回滚 / 重启</td>
+              <td>适用于本地可写二进制、可备份、可重启的单机部署</td>
             </tr>
             <tr>
-              <td>升级提示</td>
-              <td>按部署方式展示升级路径，例如源码部署、二进制部署、容器部署分别展示不同说明</td>
-              <td>需要实例能识别部署模式，或允许管理员手动配置部署模式</td>
+              <td>docker</td>
+              <td>显示当前版本、部署方式、更新提示和最近任务；当前支持“更新测试实例”与“重启服务”，不支持回滚</td>
+              <td>测试链默认使用宿主机 <code>docker compose pull/up -d</code>，已经移除对 GitHub Release 自替换的依赖</td>
             </tr>
             <tr>
-              <td>在线更新</td>
-              <td>管理面触发下载 release、备份当前二进制、替换文件并发起重启</td>
-              <td>需要可写二进制路径、明确的重启托管方式，以及实例对自替换当前进程的运行权限</td>
+              <td>源码运行</td>
+              <td>只展示当前版本和升级提示，不承诺在线更新</td>
+              <td>源码运行没有稳定的自更新边界，不把“重新构建并替换”包装成一键能力</td>
             </tr>
             <tr>
-              <td>回滚</td>
-              <td>管理面可选择最近备份版本并触发回滚</td>
-              <td>需要完整的备份保留、版本元信息记录与重启能力</td>
+              <td>测试环境特殊口径</td>
+              <td>测试实例固定走 <code>beta-amd64</code>，不依赖多架构 <code>beta</code> manifest</td>
+              <td>这是为了避开当前双架构 manifest 不稳定导致的更新卡顿和失败</td>
             </tr>
           </tbody>
         </table>
         <div class="callout.warn" style="margin-top: 14px;">
-          调研边界：如果实例是源码运行、容器运行、二进制路径不可写，或重启由外部系统托管，那么“在线更新”只能作为条件式能力存在，不能按统一可用能力描述。
+          当前未支持或明确不做的内容：<code>docker</code> 测试链暂不做回滚；不读取镜像历史；不记录 digest 历史；不展示真实 GHCR 发布时间；不把宿主机编排复杂度继续塞进管理台第一版。
         </div>
+        <table style="margin-top: 14px;">
+          <thead>
+            <tr>
+              <th>提交</th>
+              <th>已落地变化</th>
+              <th>对现状的影响</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>3ba9e40</code></td>
+              <td>重构管理台列表视图并修复在线更新能力</td>
+              <td>版本入口、列表页和更新弹窗已经形成当前 UI 基线</td>
+            </tr>
+            <tr>
+              <td><code>636825b</code> / <code>a33f8ff</code></td>
+              <td>优化 CI 构建链路并提升 Docker 缓存命中，加速测试镜像构建</td>
+              <td>测试链改成优先服务日常验证，<code>master push</code> 不再等待多架构慢链</td>
+            </tr>
+            <tr>
+              <td><code>76d73ef</code></td>
+              <td>支持测试实例一键更新链路</td>
+              <td>管理台已经可以直接触发测试容器更新并执行健康检查</td>
+            </tr>
+            <tr>
+              <td><code>fbe91e8</code></td>
+              <td>为容器部署补充 docker 更新依赖</td>
+              <td>容器内部已具备执行更新所需的 <code>docker</code> / <code>docker compose</code> 能力</td>
+            </tr>
+            <tr>
+              <td><code>4200932</code> / <code>77904e1</code></td>
+              <td>补充稳定 <code>beta-amd64</code> 标签，并移除容器更新对 Release 检测的依赖</td>
+              <td>测试实例更新已经固定走镜像标签，不再因为 Release 404 阻塞按钮</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="section">
@@ -1857,13 +1893,13 @@ Layer 5: 失败回退
       <section class="section">
         <h2>单账号测试</h2>
         <div class="callout.accent">
-          批量测活只能做巡检，不能回答“这个账号此刻到底能不能打”。真正有用的是单账号测试，而且入口必须直接放在账号卡片上。
+          当前已经确认：批量测活只能做巡检，不能回答“这个账号此刻到底能不能打”。真正有用的是单账号测试，而且必须直连指定账号，不能再偷偷回退到全池调度。
         </div>
         <table>
           <thead>
             <tr>
               <th>项</th>
-              <th>设计口径</th>
+              <th>当前支持现状</th>
             </tr>
           </thead>
           <tbody>
@@ -1873,7 +1909,7 @@ Layer 5: 失败回退
             </tr>
             <tr>
               <td>测试目标</td>
-              <td>验证指定账号本身是否还能发起真实请求，并持续观察流式输出；这里必须固定命中该账号，不能自动切到别的账号</td>
+              <td>验证指定账号本身是否还能发起真实请求，并持续观察流式输出；当前已经修复固定命中该账号，不会再自动切到别的账号</td>
             </tr>
             <tr>
               <td>输出结果</td>
@@ -1885,7 +1921,7 @@ Layer 5: 失败回退
             </tr>
             <tr>
               <td>边界</td>
-              <td>不把它包装成“上游恢复”或“长期稳定性证明”；它只证明当前这一次接入结果，同时允许绕过本地冷却/并发门去直接探测该账号</td>
+              <td>不把它包装成“上游恢复”或“长期稳定性证明”；它只证明当前这一次接入结果。当前实现已经修复模型标识与软回退问题，但单账号测试本身仍只代表该次真实探测结果</td>
             </tr>
             <tr>
               <td>批量巡检</td>
@@ -1893,6 +1929,92 @@ Layer 5: 失败回退
             </tr>
           </tbody>
         </table>
+        <div class="callout.info" style="margin-top: 14px;">
+          最近三条修复已经直接影响这块现状：<code>95f5ffd</code> 修正单账号测试使用的模型标识，<code>30fbadc</code> 修复软回退与单账号测试调度问题，<code>5ebfa85</code> 继续修复单账号测试误回退到全池调度。现在文档口径必须按“固定命中单账号”来写，而不是继续保留设计态描述。
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>测试环境更新与日志</h2>
+        <div class="callout.ok">
+          当前测试链已经明确：<code>8991</code> 端口对应测试实例，部署方式为 <code>docker</code>，更新目标固定走 <code>beta-amd64</code>。后台点击“更新测试实例”本质上就是在宿主机执行 <code>docker compose pull</code> 和 <code>docker compose up -d</code>，然后再做健康检查。
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>项</th>
+              <th>当前口径</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>测试实例端口</td>
+              <td><code>127.0.0.1:8991</code></td>
+              <td>该实例只用于验证新调度链和管理台更新链，不替代正式 <code>8990</code></td>
+            </tr>
+            <tr>
+              <td>测试目录</td>
+              <td><code>/root/kiro-rs-cache-test</code></td>
+              <td>测试实例使用自己的 <code>config.json</code> 和 <code>docker-compose.yml</code>，不再复用生产目录</td>
+            </tr>
+            <tr>
+              <td>测试镜像标签</td>
+              <td><code>beta-amd64</code></td>
+              <td>用于避开当前多架构 <code>beta</code> manifest 不稳定的问题</td>
+            </tr>
+            <tr>
+              <td>更新命令</td>
+              <td><code>cd /opt/kiro-rs-cache-test &amp;&amp; IMAGE_TAG=beta-amd64 docker compose pull &amp;&amp; IMAGE_TAG=beta-amd64 docker compose up -d</code></td>
+              <td>后台按钮触发的就是这条宿主机编排命令</td>
+            </tr>
+            <tr>
+              <td>重启命令</td>
+              <td><code>docker restart kiro-rs-cache-test</code></td>
+              <td>当前管理台已经支持对测试实例执行重启</td>
+            </tr>
+            <tr>
+              <td>健康检查</td>
+              <td><code>http://127.0.0.1:8991/health</code></td>
+              <td>更新后必须先看健康检查，再看日志和管理台版本接口</td>
+            </tr>
+            <tr>
+              <td>当前限制</td>
+              <td>宿主机必须可用 <code>docker compose</code>，容器必须挂载测试目录与 <code>/var/run/docker.sock</code></td>
+              <td>否则管理台虽然能显示按钮，但无法真正执行测试实例更新和重启</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout.info" style="margin-top: 14px;">
+          远端登录信息不写进仓库文档正文，也不提交到 Git。当前约定是只保存在本地 <code>.env.local</code>，字段名固定，开新窗口时只需要按字段读取，不需要再翻聊天记录。
+        </div>
+        <pre># 本地 .env.local
+REMOTE_LOG_SSH_HOST=...
+REMOTE_LOG_SSH_PORT=...
+REMOTE_LOG_SSH_USER=...
+REMOTE_LOG_SSH_PASSWORD=...</pre>
+        <pre># 常用排查命令
+sshpass -p "$REMOTE_LOG_SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -p "$REMOTE_LOG_SSH_PORT" "$REMOTE_LOG_SSH_USER@$REMOTE_LOG_SSH_HOST"
+
+# 看测试实例状态
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" | sed -n '1,20p'
+
+# 看测试实例日志
+docker logs --tail 200 kiro-rs-cache-test
+
+# 看测试实例健康
+curl -sS http://127.0.0.1:8991/health
+
+# 看管理台版本接口
+curl -sS -H "x-api-key: &lt;adminApiKey&gt;" http://127.0.0.1:8991/api/admin/system/version
+
+# 手动重建测试实例
+cd /root/kiro-rs-cache-test
+IMAGE_TAG=beta-amd64 docker compose pull
+IMAGE_TAG=beta-amd64 docker compose up -d</pre>
+        <div class="callout.warn" style="margin-top: 14px;">
+          当前日志排查和测试环境更新都以 <code>8991</code> 这套独立测试实例为准，不再默认去看旧的 test 容器，也不再复用生产目录下的配置和编排文件。
+        </div>
       </section>
 
       <section class="section">
@@ -2244,13 +2366,14 @@ Content-Type: application/json
         <pre>GET /api/admin/system/version
 
 {
-  "currentVersion": "v0.8.3",
-  "latestVersion": "v0.8.5",
-  "latestPublishedAt": "2026-05-18T09:21:00Z",
-  "releaseNotesUrl": "https://github.com/shusfun/kiro.rs/releases/tag/v0.8.5",
-  "deploymentMode": "binary",
-  "canSelfUpdate": false,
-  "updateHint": "当前实例部署方式不满足在线更新条件。"
+  "currentVersion": "2026.3.1",
+  "latestVersion": "beta-amd64",
+  "deploymentMode": "docker",
+  "canUpdate": true,
+  "canRollback": false,
+  "canRestart": true,
+  "updateHint": "当前实例支持一键更新测试容器，更新后会自动做健康检查。",
+  "channel": "beta-amd64"
 }</pre>
         <pre>// admin-ui/src/api/credentials.ts 可新增
 export async function setCredentialMaxConcurrent(
@@ -2321,7 +2444,7 @@ export async function checkSystemVersion(): Promise&lt;SystemVersionResponse&gt;
             </tr>
             <tr>
               <td>版本信息服务</td>
-              <td>汇总当前构建版本、GitHub Release 元信息、部署模式判断和更新条件标记，供管理面显示</td>
+              <td>汇总当前构建版本、部署模式判断、更新条件标记和最近任务；binary 模式走 GitHub Release，docker 模式走测试实例更新链</td>
             </tr>
           </tbody>
         </table>
@@ -2329,30 +2452,27 @@ export async function checkSystemVersion(): Promise&lt;SystemVersionResponse&gt;
 
       <section class="section">
         <h2>分阶段实施</h2>
-        <pre>Phase 1
+        <pre>已完成
 - 账号 inflight / maxConcurrent
 - 普通 429 和 suspicious 冷却
 - 单请求 triedAccountIds
-
-Phase 2
 - session sticky
 - 账号级状态快照
 - sub2 参数兼容输出
-
-Phase 3
-- 等待队列
-- 更细的负载感知
-- 前端可视化完善
-
-Phase 4
+- 前端列表化展示与版本入口
 - 版本信息接口
 - 管理面版本展示
-- GitHub Release 检测能力
+- 部署方式识别
+- GitHub Release 检测能力（仅 binary）
+- docker 测试实例一键更新
+- docker / binary 分链处理
+- docker 重启
+- binary 回滚
 
-Phase 5
-- 在线更新
-- 重启
-- 回滚</pre>
+仍需继续完善
+- 等待队列策略继续压测
+- 更细的负载感知与异常恢复策略继续验证
+- 前端展示细节继续打磨，但主流程已经可用</pre>
       </section>
 
       <section class="section">
@@ -2399,10 +2519,11 @@ Phase 5
           <div class="card">
             <h3>Phase 5: 版本治理</h3>
             <ul>
-              <li>版本信息接口与管理面展示</li>
-              <li>GitHub Release 检测</li>
-              <li>在线更新、重启、回滚能力</li>
-              <li>按部署条件控制按钮与提示</li>
+              <li>已支持版本信息接口与管理面展示</li>
+              <li>已支持 <code>binary</code> 模式 GitHub Release 检测</li>
+              <li>已支持 <code>docker</code> 模式测试实例一键更新</li>
+              <li>已支持重启能力</li>
+              <li>当前按部署条件控制按钮与提示，<code>docker</code> 模式默认不展示回滚</li>
             </ul>
           </div>
         </div>
@@ -2419,6 +2540,8 @@ Phase 5
           <li><code>blocked</code> 状态的“手动恢复”只针对刷新失败阻塞，不针对 suspended</li>
           <li>版本入口放在顶部轻量区域，避免挤占账号调度主视图</li>
           <li>在线更新相关按钮是否可用，取决于实例是否满足更新条件</li>
+          <li>测试环境默认锁定 <code>beta-amd64</code>，避免双架构 manifest 失败拖慢或打断测试更新链</li>
+          <li>当前文档口径以已实现现状为准；未写“已支持”的能力，不视为已经交付</li>
         </ul>
       </section>
 
