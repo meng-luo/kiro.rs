@@ -122,8 +122,8 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=kiro-rs-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=kiro-rs-${{ matrix.arch }}
           push: true
           provenance: false
           tags: ${{ steps.tags.outputs.tags }}
