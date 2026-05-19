@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
@@ -114,12 +114,16 @@ impl AdminService {
         let balance_cache = Self::load_balance_cache_from(&cache_path);
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         let current_commit = Self::detect_current_commit();
+        let system_job_path = cache_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|dir| dir.join("kiro_system_job.json")));
+        let persisted_latest_job = Self::load_system_job_from(&system_job_path);
         let initial_version_state = CachedVersionState {
             response: Self::build_default_version_response(
                 &token_manager.config(),
                 current_version.clone(),
                 current_commit.clone(),
-                None,
+                persisted_latest_job.clone(),
             ),
         };
         let http_client =
@@ -127,6 +131,10 @@ impl AdminService {
                 tracing::warn!("构建版本治理 HTTP 客户端失败，回退到默认客户端: {}", e);
                 Client::builder().build().expect("创建默认 HTTP 客户端失败")
             });
+        let mut system_jobs = HashMap::new();
+        if let Some(job) = persisted_latest_job {
+            system_jobs.insert(job.job_id.clone(), job);
+        }
 
         Self {
             token_manager,
@@ -137,7 +145,7 @@ impl AdminService {
             current_version,
             current_commit,
             version_state: Mutex::new(initial_version_state),
-            system_jobs: Mutex::new(HashMap::new()),
+            system_jobs: Mutex::new(system_jobs),
             http_client,
         }
     }
@@ -521,11 +529,17 @@ impl AdminService {
         &self,
         id: &str,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        if let Some(job) = self.system_jobs.lock().get(id).cloned() {
+            return Ok(job);
+        }
+        let job = self
+            .load_persisted_job()
+            .filter(|job| job.job_id == id)
+            .ok_or_else(|| AdminServiceError::InvalidCredential(format!("任务不存在: {}", id)))?;
         self.system_jobs
             .lock()
-            .get(id)
-            .cloned()
-            .ok_or_else(|| AdminServiceError::InvalidCredential(format!("任务不存在: {}", id)))
+            .insert(job.job_id.clone(), job.clone());
+        Ok(job)
     }
 
     /// 设置负载均衡模式
@@ -916,6 +930,7 @@ impl AdminService {
             .lock()
             .insert(job.job_id.clone(), job.clone());
         self.sync_latest_job(Some(job.clone()));
+        self.persist_system_job(Some(&job));
         job
     }
 
@@ -935,34 +950,162 @@ impl AdminService {
         let cloned = job.clone();
         drop(jobs);
         self.sync_latest_job(Some(cloned.clone()));
+        self.persist_system_job(Some(&cloned));
+        Some(cloned)
+    }
+
+    fn touch_job(&self, job_id: &str, message: String) -> Option<SystemOperationJobResponse> {
+        let mut jobs = self.system_jobs.lock();
+        let job = jobs.get_mut(job_id)?;
+        job.message = message;
+        let cloned = job.clone();
+        drop(jobs);
+        self.sync_latest_job(Some(cloned.clone()));
+        self.persist_system_job(Some(&cloned));
         Some(cloned)
     }
 
     fn latest_job(&self) -> Option<SystemOperationJobResponse> {
-        self.system_jobs
+        let latest = self
+            .system_jobs
             .lock()
             .values()
             .cloned()
-            .max_by(|left, right| left.started_at.cmp(&right.started_at))
+            .max_by(|left, right| left.started_at.cmp(&right.started_at));
+        if latest.is_some() {
+            return latest;
+        }
+        self.load_persisted_job()
     }
 
     fn sync_latest_job(&self, latest_job: Option<SystemOperationJobResponse>) {
         self.version_state.lock().response.latest_job = latest_job;
     }
 
-    async fn run_update_job(self: Arc<Self>, job_id: String, target_version: Option<String>) {
-        let result = async {
-            if self.is_docker_deployment() {
-                let target_label = target_version
-                    .clone()
-                    .unwrap_or_else(|| self.token_manager.config().update.channel.clone());
-                self.run_update_command().await?;
-                self.run_healthcheck().await?;
-                return Ok::<String, AdminServiceError>(format!(
-                    "测试实例已更新到 {}，健康检查通过",
-                    target_label
-                ));
+    fn system_job_path(&self) -> Option<PathBuf> {
+        self.token_manager
+            .cache_dir()
+            .map(|dir| dir.join("kiro_system_job.json"))
+    }
+
+    fn load_persisted_job(&self) -> Option<SystemOperationJobResponse> {
+        Self::load_system_job_from(&self.system_job_path())
+    }
+
+    fn load_system_job_from(job_path: &Option<PathBuf>) -> Option<SystemOperationJobResponse> {
+        let path = job_path.as_ref()?;
+        let content = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    fn persist_system_job(&self, job: Option<&SystemOperationJobResponse>) {
+        let Some(path) = self.system_job_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                tracing::warn!("创建系统任务状态目录失败: {}", error);
+                return;
             }
+        }
+        match job {
+            Some(job) => match serde_json::to_vec_pretty(job) {
+                Ok(payload) => {
+                    if let Err(error) = std::fs::write(&path, payload) {
+                        tracing::warn!("写入系统任务状态文件失败: {}", error);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("序列化系统任务状态失败: {}", error);
+                }
+            },
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    fn build_running_job(
+        &self,
+        job_id: &str,
+        operation: &str,
+        target_version: Option<String>,
+        message: String,
+    ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        let existing = self.get_system_job(job_id)?;
+        Ok(SystemOperationJobResponse {
+            job_id: existing.job_id,
+            operation: operation.to_string(),
+            status: "running".to_string(),
+            target_version,
+            current_version: Some(self.current_version.clone()),
+            started_at: existing.started_at,
+            finished_at: None,
+            message,
+            can_retry: false,
+        })
+    }
+
+    fn build_finished_job(
+        &self,
+        base: &SystemOperationJobResponse,
+        status: &str,
+        message: String,
+        can_retry: bool,
+    ) -> Result<SystemOperationJobResponse, AdminServiceError> {
+        let finished_at = Utc::now().to_rfc3339();
+        let started_at = base
+            .started_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let parsed_start = DateTime::parse_from_rfc3339(&started_at)
+            .map_err(|e| AdminServiceError::InternalError(format!("任务开始时间格式无效: {}", e)))?
+            .with_timezone(&Utc);
+        let parsed_finish = DateTime::parse_from_rfc3339(&finished_at)
+            .map_err(|e| AdminServiceError::InternalError(format!("任务结束时间格式无效: {}", e)))?
+            .with_timezone(&Utc);
+        let mut finished = base.clone();
+        finished.status = status.to_string();
+        finished.message = message;
+        finished.can_retry = can_retry;
+        finished.started_at = Some(parsed_start.to_rfc3339());
+        finished.finished_at = Some(parsed_finish.to_rfc3339());
+        Ok(finished)
+    }
+
+    async fn run_update_job(self: Arc<Self>, job_id: String, target_version: Option<String>) {
+        if self.is_docker_deployment() {
+            let target_label = target_version
+                .clone()
+                .unwrap_or_else(|| self.token_manager.config().update.channel.clone());
+            match self
+                .dispatch_detached_docker_job(
+                    &job_id,
+                    "update",
+                    Some(target_label.clone()),
+                    self.token_manager.config().update.update_command.clone(),
+                    "已转交宿主机后台执行更新，等待实例恢复并完成健康检查".to_string(),
+                    format!("测试实例已更新到 {}，健康检查通过", target_label),
+                    format!("测试实例已更新到 {}，但健康检查未通过", target_label),
+                    "更新命令未能在宿主机后台完成".to_string(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    let _ = self.touch_job(
+                        &job_id,
+                        "已转交宿主机后台执行更新，等待实例恢复并完成健康检查"
+                            .to_string(),
+                    );
+                }
+                Err(error) => {
+                    let _ = self.update_job(&job_id, "failed", error.to_string(), true);
+                }
+            }
+            return;
+        }
+
+        let result = async {
             let release = self.fetch_latest_release().await?.ok_or_else(|| {
                 AdminServiceError::UpstreamError("未获取到可用发布版本".to_string())
             })?;
@@ -1031,6 +1174,34 @@ impl AdminService {
     }
 
     async fn run_restart_job(self: Arc<Self>, job_id: String) {
+        if self.is_docker_deployment() {
+            match self
+                .dispatch_detached_docker_job(
+                    &job_id,
+                    "restart",
+                    None,
+                    self.token_manager.config().update.restart_command.clone(),
+                    "已转交宿主机后台执行重启，等待实例恢复并完成健康检查".to_string(),
+                    "重启命令已执行，健康检查通过".to_string(),
+                    "重启命令已执行，但健康检查未通过".to_string(),
+                    "重启命令未能在宿主机后台完成".to_string(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    let _ = self.touch_job(
+                        &job_id,
+                        "已转交宿主机后台执行重启，等待实例恢复并完成健康检查"
+                            .to_string(),
+                    );
+                }
+                Err(error) => {
+                    let _ = self.update_job(&job_id, "failed", error.to_string(), true);
+                }
+            }
+            return;
+        }
+
         let result = async {
             self.run_restart_command().await?;
             self.run_healthcheck().await?;
@@ -1169,29 +1340,6 @@ impl AdminService {
         if !status.success() {
             return Err(AdminServiceError::InternalError(format!(
                 "命令执行失败，退出码: {:?}",
-                status.code()
-            )));
-        }
-        Ok(())
-    }
-
-    async fn run_update_command(&self) -> Result<(), AdminServiceError> {
-        let config = self.token_manager.config();
-        let command_line = config.update.update_command.trim();
-        if command_line.is_empty() {
-            return Err(AdminServiceError::InvalidCredential(
-                "未配置可执行的更新命令".to_string(),
-            ));
-        }
-        let status = Command::new("sh")
-            .arg("-lc")
-            .arg(command_line)
-            .status()
-            .await
-            .map_err(|e| AdminServiceError::InternalError(format!("执行更新命令失败: {}", e)))?;
-        if !status.success() {
-            return Err(AdminServiceError::InternalError(format!(
-                "更新命令执行失败，退出码: {:?}",
                 status.code()
             )));
         }
@@ -1425,6 +1573,126 @@ impl AdminService {
             return Err(AdminServiceError::UpstreamError(format!(
                 "健康检查未通过: {} {}",
                 status, body
+            )));
+        }
+        Ok(())
+    }
+
+    async fn dispatch_detached_docker_job(
+        &self,
+        job_id: &str,
+        operation: &str,
+        target_version: Option<String>,
+        command_line: String,
+        running_message: String,
+        success_message: String,
+        healthcheck_failed_message: String,
+        command_failed_message: String,
+    ) -> Result<(), AdminServiceError> {
+        let command_line = command_line.trim();
+        if command_line.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "未配置可执行的{}命令",
+                if operation == "update" { "更新" } else { "重启" }
+            )));
+        }
+
+        let job_file = self.system_job_path().ok_or_else(|| {
+            AdminServiceError::InternalError("系统任务状态文件路径未知".to_string())
+        })?;
+        let helper_name = format!("kiro-rs-admin-job-{}", &job_id[..job_id.len().min(12)]);
+        let healthcheck_url = self.token_manager.config().update.healthcheck_url.clone();
+        let healthcheck_timeout = self
+            .token_manager
+            .config()
+            .update
+            .healthcheck_timeout_seconds
+            .max(5);
+        let running_job =
+            self.build_running_job(job_id, operation, target_version, running_message)?;
+        let success_job =
+            self.build_finished_job(&running_job, "succeeded", success_message, false)?;
+        let health_failed_job = self.build_finished_job(
+            &running_job,
+            "failed",
+            healthcheck_failed_message,
+            true,
+        )?;
+        let command_failed_job =
+            self.build_finished_job(&running_job, "failed", command_failed_message, true)?;
+
+        let success_payload = serde_json::to_string_pretty(&success_job).map_err(|e| {
+            AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))
+        })?;
+        let health_failed_payload = serde_json::to_string_pretty(&health_failed_job).map_err(|e| {
+            AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))
+        })?;
+        let command_failed_payload =
+            serde_json::to_string_pretty(&command_failed_job).map_err(|e| {
+                AdminServiceError::InternalError(format!("序列化系统任务状态失败: {}", e))
+            })?;
+
+        self.persist_system_job(Some(&running_job));
+        self.system_jobs
+            .lock()
+            .insert(running_job.job_id.clone(), running_job);
+
+        let helper_script = format!(
+            r#"set -eu
+CURRENT_CONTAINER="$(hostname)"
+HELPER_IMAGE="$(docker inspect "$CURRENT_CONTAINER" --format '{{{{.Config.Image}}}}')"
+docker rm -f "{helper_name}" >/dev/null 2>&1 || true
+docker run -d --rm --name "{helper_name}" --volumes-from "$CURRENT_CONTAINER" --network host "$HELPER_IMAGE" sh -lc '
+set -eu
+JOB_FILE="{job_file}"
+SUCCESS_FILE="$(mktemp)"
+HEALTH_FAILED_FILE="$(mktemp)"
+COMMAND_FAILED_FILE="$(mktemp)"
+cat <<'"'"'EOF_SUCCESS'"'"' > "$SUCCESS_FILE"
+{success_payload}
+EOF_SUCCESS
+cat <<'"'"'EOF_HEALTH_FAILED'"'"' > "$HEALTH_FAILED_FILE"
+{health_failed_payload}
+EOF_HEALTH_FAILED
+cat <<'"'"'EOF_COMMAND_FAILED'"'"' > "$COMMAND_FAILED_FILE"
+{command_failed_payload}
+EOF_COMMAND_FAILED
+if {command_line}; then
+  i=0
+  while [ "$i" -lt {healthcheck_timeout} ]; do
+    if (command -v curl >/dev/null 2>&1 && curl -fsS "{healthcheck_url}" >/dev/null 2>&1) || (command -v wget >/dev/null 2>&1 && wget -qO- "{healthcheck_url}" >/dev/null 2>&1); then
+      cp "$SUCCESS_FILE" "$JOB_FILE"
+      exit 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  cp "$HEALTH_FAILED_FILE" "$JOB_FILE"
+  exit 1
+fi
+cp "$COMMAND_FAILED_FILE" "$JOB_FILE"
+exit 1
+'"#,
+            helper_name = helper_name,
+            job_file = job_file.display(),
+            success_payload = success_payload,
+            health_failed_payload = health_failed_payload,
+            command_failed_payload = command_failed_payload,
+            command_line = command_line,
+            healthcheck_timeout = healthcheck_timeout,
+            healthcheck_url = healthcheck_url,
+        );
+
+        let status = Command::new("sh")
+            .arg("-lc")
+            .arg(helper_script)
+            .status()
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("提交后台任务失败: {}", e)))?;
+        if !status.success() {
+            return Err(AdminServiceError::InternalError(format!(
+                "提交后台任务失败，退出码: {:?}",
+                status.code()
             )));
         }
         Ok(())
