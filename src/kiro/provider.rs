@@ -329,6 +329,7 @@ impl KiroProvider {
         if base_options.session_key.is_none() {
             base_options.session_key = session_key.clone();
         }
+        let strict_preferred_account = base_options.strict_preferred_account;
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
@@ -437,6 +438,15 @@ impl KiroProvider {
                 );
 
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                let err = anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                );
+                if strict_preferred_account {
+                    return Err(err);
+                }
                 if !has_available {
                     anyhow::bail!(
                         "{} API 请求失败（所有凭据已用尽）: {} {}",
@@ -445,13 +455,7 @@ impl KiroProvider {
                         body
                     );
                 }
-
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
+                last_error = Some(err);
                 tried_account_ids.insert(ctx.id);
                 continue;
             }
@@ -483,6 +487,15 @@ impl KiroProvider {
                 }
 
                 let has_available = self.token_manager.report_failure(ctx.id);
+                let err = anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                );
+                if strict_preferred_account {
+                    return Err(err);
+                }
                 if !has_available {
                     anyhow::bail!(
                         "{} API 请求失败（所有凭据已用尽）: {} {}",
@@ -492,12 +505,7 @@ impl KiroProvider {
                     );
                 }
 
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
+                last_error = Some(err);
                 tried_account_ids.insert(ctx.id);
                 continue;
             }
@@ -509,13 +517,17 @@ impl KiroProvider {
                     RateLimitKind::Normal429
                 };
                 self.token_manager.report_rate_limited(ctx.id, kind);
-                tried_account_ids.insert(ctx.id);
-                last_error = Some(anyhow::anyhow!(
+                let err = anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
                     status,
                     body
-                ));
+                );
+                if strict_preferred_account {
+                    return Err(err);
+                }
+                tried_account_ids.insert(ctx.id);
+                last_error = Some(err);
                 continue;
             }
 

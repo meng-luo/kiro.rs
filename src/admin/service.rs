@@ -1204,6 +1204,31 @@ impl AdminService {
             ));
         }
 
+        if msg.contains("API 请求失败: 429") || msg.contains("流式 API 请求失败: 429") {
+            return AdminServiceError::UpstreamError(format!(
+                "账号 #{} 测试失败：上游已限频，模型 {} 当前不可立即调用",
+                id, model_id
+            ));
+        }
+
+        if msg.contains("API 请求失败: 401")
+            || msg.contains("流式 API 请求失败: 401")
+            || msg.contains("API 请求失败: 403")
+            || msg.contains("流式 API 请求失败: 403")
+        {
+            return AdminServiceError::UpstreamError(format!(
+                "账号 #{} 测试失败：该账号当前无权限调用模型 {}，或登录状态已失效",
+                id, model_id
+            ));
+        }
+
+        if msg.contains("API 请求失败: 402") || msg.contains("流式 API 请求失败: 402") {
+            return AdminServiceError::UpstreamError(format!(
+                "账号 #{} 测试失败：该账号当前额度不足，无法调用模型 {}",
+                id, model_id
+            ));
+        }
+
         self.classify_balance_error(e, id)
     }
 
