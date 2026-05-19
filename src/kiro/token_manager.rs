@@ -910,10 +910,6 @@ impl MultiTokenManager {
             })
             .collect();
 
-        if available.is_empty() {
-            return None;
-        }
-
         if let Some(preferred_account_id) = options.preferred_account_id {
             if let Some(entry) = available.iter().find(|e| e.id == preferred_account_id) {
                 return Some(SelectionResult {
@@ -947,20 +943,22 @@ impl MultiTokenManager {
         let mode = self.load_balancing_mode.lock().clone();
         let mode = mode.as_str();
 
-        let selected = match mode {
-            "balanced" => self.pick_round_robin_entry(&available),
-            _ => self.pick_priority_entry(&available),
-        };
+        if !available.is_empty() {
+            let selected = match mode {
+                "balanced" => self.pick_round_robin_entry(&available),
+                _ => self.pick_priority_entry(&available),
+            };
 
-        if let Some((id, credentials)) = selected {
-            let entry = available.iter().find(|entry| entry.id == id)?;
-            return Some(SelectionResult {
-                id,
-                credentials,
-                dispatch_path: DispatchPath::Balanced,
-                used_soft_fallback: false,
-                account_state_at_start: self.dispatch_state_of(entry, Utc::now()),
-            });
+            if let Some((id, credentials)) = selected {
+                let entry = available.iter().find(|entry| entry.id == id)?;
+                return Some(SelectionResult {
+                    id,
+                    credentials,
+                    dispatch_path: DispatchPath::Balanced,
+                    used_soft_fallback: false,
+                    account_state_at_start: self.dispatch_state_of(entry, Utc::now()),
+                });
+            }
         }
 
         self.pick_soft_fallback_entry(&entries, is_opus, &options.tried_account_ids)
@@ -1283,7 +1281,7 @@ impl MultiTokenManager {
                     if let Some(session_key) = options.session_key.as_deref() {
                         self.bind_session(session_key, id);
                     }
-                    self.acquire_slot(id, options.runtime_probe)?;
+                    self.acquire_slot(id, options.runtime_probe || selection.used_soft_fallback)?;
                     ctx.lease = Some(DispatchLease::new(id));
                     ctx.dispatch_path = selection.dispatch_path;
                     ctx.used_soft_fallback = selection.used_soft_fallback;
@@ -3034,6 +3032,33 @@ mod tests {
         let ctx = manager.acquire_context(None).await.unwrap();
         assert_eq!(ctx.id, 2);
         assert_eq!(ctx.token, "good-token");
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_uses_soft_fallback_when_all_entries_are_in_suspicious_cooldown() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(manager.report_rate_limited(1, RateLimitKind::SuspiciousActivity));
+        assert!(manager.report_rate_limited(2, RateLimitKind::SuspiciousActivity));
+
+        let ctx = manager
+            .acquire_context_with_options(AcquireOptions::new(Some("claude-opus-4.7".to_string())))
+            .await
+            .unwrap();
+        assert!(ctx.id == 1 || ctx.id == 2);
+        assert!(ctx.used_soft_fallback);
+        assert_eq!(ctx.dispatch_path.to_string(), "soft_fallback");
     }
 
     #[test]

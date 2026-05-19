@@ -525,7 +525,7 @@ impl AdminService {
             .provider
             .call_api_stream_for_account(&request_body, options)
             .await
-            .map_err(|e| self.classify_balance_error(e, id))?;
+            .map_err(|e| self.classify_test_credential_error(e, id, &model_id))?;
 
         let token_manager = self.provider.token_manager().clone();
         let dispatch_path = provider_response.dispatch_path.clone();
@@ -1181,6 +1181,30 @@ impl AdminService {
             // 包括：缺少 refreshToken、refreshToken 已被截断、无法生成 machineId 等
             AdminServiceError::InternalError(msg)
         }
+    }
+
+    fn classify_test_credential_error(
+        &self,
+        e: anyhow::Error,
+        id: u64,
+        model_id: &str,
+    ) -> AdminServiceError {
+        let msg = e.to_string();
+
+        if msg.contains("不存在") {
+            return AdminServiceError::NotFound { id };
+        }
+
+        if msg.contains("当前没有可直接调度的凭据")
+            || msg.contains("当前没有可继续切换的凭据")
+        {
+            return AdminServiceError::InternalError(format!(
+                "账号 #{} 当前不能直接测试，请检查该账号是否支持模型 {}，或是否处于本地阻塞/刷新异常状态",
+                id, model_id
+            ));
+        }
+
+        self.classify_balance_error(e, id)
     }
 
     /// 分类添加凭据错误
