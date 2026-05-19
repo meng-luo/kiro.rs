@@ -67,6 +67,13 @@ struct GitHubReleaseAsset {
     browser_download_url: String,
 }
 
+#[derive(Debug, Clone)]
+struct DockerVersionInfo {
+    version: String,
+    published_at: Option<String>,
+    release_notes_url: Option<String>,
+}
+
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedBalance {
@@ -394,8 +401,13 @@ impl AdminService {
     /// 重新检查系统版本信息
     pub async fn check_system_version(&self) -> Result<SystemVersionResponse, AdminServiceError> {
         let latest_job = self.latest_job();
-        let latest_release = self.fetch_latest_release().await?;
-        let response = self.build_version_response(latest_release, latest_job);
+        let response = if self.is_docker_deployment() {
+            let latest_docker = self.fetch_latest_docker_version().await?;
+            self.build_docker_version_response(latest_docker, latest_job)
+        } else {
+            let latest_release = self.fetch_latest_release().await?;
+            self.build_version_response(latest_release, latest_job)
+        };
         self.version_state.lock().response = response.clone();
         Ok(response)
     }
@@ -405,7 +417,16 @@ impl AdminService {
         payload: SystemUpdateRequest,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         let config = self.token_manager.config();
-        if !config.update.enabled || config.update.build_type != "release" {
+        if !config.update.enabled {
+            return Err(AdminServiceError::InvalidCredential("当前未启用在线更新".to_string()));
+        }
+        if self.is_docker_deployment() {
+            if config.update.update_command.trim().is_empty() {
+                return Err(AdminServiceError::InvalidCredential(
+                    "当前实例为容器部署，请先配置 update.updateCommand".to_string(),
+                ));
+            }
+        } else if config.update.build_type != "release" {
             return Err(AdminServiceError::InvalidCredential(
                 "当前实例不支持在线更新，请确认已启用 update.enabled 且 buildType 为 release"
                     .to_string(),
@@ -445,6 +466,11 @@ impl AdminService {
         payload: SystemRollbackRequest,
     ) -> Result<SystemOperationJobResponse, AdminServiceError> {
         let config = self.token_manager.config();
+        if self.is_docker_deployment() {
+            return Err(AdminServiceError::InvalidCredential(
+                "当前容器部署暂不支持在线回滚".to_string(),
+            ));
+        }
         if !config.update.enabled || config.update.build_type != "release" {
             return Err(AdminServiceError::InvalidCredential(
                 "当前实例不支持在线回滚，请确认 buildType 为 release".to_string(),
@@ -698,8 +724,16 @@ impl AdminService {
         } else {
             "release".to_string()
         };
-        let can_update = config.update.enabled && build_type == "release";
-        let can_rollback = can_update;
+        let can_update = if deployment_mode == "docker" {
+            config.update.enabled && !config.update.update_command.trim().is_empty()
+        } else {
+            config.update.enabled && build_type == "release"
+        };
+        let can_rollback = if deployment_mode == "docker" {
+            false
+        } else {
+            can_update
+        };
         let can_restart = !config.update.restart_command.trim().is_empty();
         SystemVersionResponse {
             current_version: current_version.clone(),
@@ -708,11 +742,16 @@ impl AdminService {
             latest_published_at: None,
             release_notes_url: None,
             build_type: build_type.clone(),
-            deployment_mode,
+            deployment_mode: deployment_mode.clone(),
             can_update,
             can_rollback,
             can_restart,
-            update_hint: if can_update {
+            update_hint: if deployment_mode == "docker" && can_update {
+                "当前实例支持一键更新测试容器，更新后会自动做健康检查。".to_string()
+            } else if deployment_mode == "docker" {
+                "当前实例为容器部署，请先配置 update.updateCommand 后再使用一键更新。"
+                    .to_string()
+            } else if can_update {
                 "当前实例支持在线下载和替换，更新完成后需要手动重启生效。".to_string()
             } else if build_type == "source" {
                 "当前实例为源码构建，请通过新的构建产物升级。".to_string()
@@ -758,6 +797,39 @@ impl AdminService {
         response
     }
 
+    fn build_docker_version_response(
+        &self,
+        latest_docker: Option<DockerVersionInfo>,
+        latest_job: Option<SystemOperationJobResponse>,
+    ) -> SystemVersionResponse {
+        let config = self.token_manager.config();
+        let mut response = Self::build_default_version_response(
+            config,
+            self.current_version.clone(),
+            self.current_commit.clone(),
+            latest_job,
+        );
+        if let Some(docker_version) = latest_docker {
+            response.latest_version = docker_version.version.clone();
+            response.update_available = docker_version.version != self.current_version;
+            response.latest_published_at = docker_version.published_at;
+            response.release_notes_url = docker_version.release_notes_url;
+            response.update_hint = if response.update_available {
+                format!(
+                    "发现新的测试镜像版本 {}，可以直接更新测试实例并自动检查可用性。",
+                    docker_version.version
+                )
+            } else if response.can_restart {
+                "当前测试实例已经是最新镜像，可继续在这里重启并复查。".to_string()
+            } else {
+                response.update_hint
+            };
+        } else {
+            response.update_hint = "暂未获取到可用的测试镜像版本，请先确认 GitHub Actions 已成功推送 beta 镜像。".to_string();
+        }
+        response
+    }
+
     async fn fetch_latest_release(&self) -> Result<Option<GitHubRelease>, AdminServiceError> {
         let config = self.token_manager.config();
         let repo = config.update.github_repo.trim();
@@ -796,6 +868,21 @@ impl AdminService {
             }
         });
         Ok(selected)
+    }
+
+    async fn fetch_latest_docker_version(
+        &self,
+    ) -> Result<Option<DockerVersionInfo>, AdminServiceError> {
+        let latest_release = self.fetch_latest_release().await?;
+        Ok(latest_release.map(|release| DockerVersionInfo {
+            version: if self.token_manager.config().update.channel == "beta" {
+                format!("beta ({})", release.tag_name.trim_start_matches('v'))
+            } else {
+                release.tag_name.trim_start_matches('v').to_string()
+            },
+            published_at: release.published_at,
+            release_notes_url: Some(release.html_url),
+        }))
     }
 
     fn create_job(
@@ -855,6 +942,17 @@ impl AdminService {
 
     async fn run_update_job(self: Arc<Self>, job_id: String, target_version: Option<String>) {
         let result = async {
+            if self.is_docker_deployment() {
+                let target_label = target_version
+                    .clone()
+                    .unwrap_or_else(|| self.token_manager.config().update.channel.clone());
+                self.run_update_command().await?;
+                self.run_healthcheck().await?;
+                return Ok::<String, AdminServiceError>(format!(
+                    "测试实例已更新到 {}，健康检查通过",
+                    target_label
+                ));
+            }
             let release = self.fetch_latest_release().await?.ok_or_else(|| {
                 AdminServiceError::UpstreamError("未获取到可用发布版本".to_string())
             })?;
@@ -1061,6 +1159,29 @@ impl AdminService {
         if !status.success() {
             return Err(AdminServiceError::InternalError(format!(
                 "命令执行失败，退出码: {:?}",
+                status.code()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn run_update_command(&self) -> Result<(), AdminServiceError> {
+        let config = self.token_manager.config();
+        let command_line = config.update.update_command.trim();
+        if command_line.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "未配置可执行的更新命令".to_string(),
+            ));
+        }
+        let status = Command::new("sh")
+            .arg("-lc")
+            .arg(command_line)
+            .status()
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("执行更新命令失败: {}", e)))?;
+        if !status.success() {
+            return Err(AdminServiceError::InternalError(format!(
+                "更新命令执行失败，退出码: {:?}",
                 status.code()
             )));
         }
@@ -1331,6 +1452,10 @@ impl AdminService {
         Ok(normalized)
     }
 
+    fn is_docker_deployment(&self) -> bool {
+        self.token_manager.config().update.deployment_mode.trim() == "docker"
+    }
+
     // ============ 余额缓存持久化 ============
 
     fn load_balance_cache_from(cache_path: &Option<PathBuf>) -> HashMap<u64, CachedBalance> {
@@ -1535,6 +1660,7 @@ mod tests {
         config.update.enabled = true;
         config.update.build_type = "release".to_string();
         config.update.deployment_mode = "docker".to_string();
+        config.update.update_command = "docker compose pull && docker compose up -d".to_string();
         config.update.restart_command = "docker restart kiro-rs".to_string();
 
         let response = AdminService::build_default_version_response(
@@ -1547,9 +1673,9 @@ mod tests {
         assert_eq!(response.build_type, "release");
         assert_eq!(response.deployment_mode, "docker");
         assert!(response.can_update);
-        assert!(response.can_rollback);
+        assert!(!response.can_rollback);
         assert!(response.can_restart);
-        assert!(response.update_hint.contains("手动重启"));
+        assert!(response.update_hint.contains("测试容器"));
     }
 
     #[test]

@@ -5,5 +5,14 @@
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
-  "defaultEndpoint": "ide"
+  "defaultEndpoint": "ide",
+  "update": {
+    "enabled": false,
+    "channel": "beta",
+    "deploymentMode": "docker",
+    "updateCommand": "cd /root/kiro-rs && IMAGE_TAG=beta docker compose -f docker-compose.cache-test.yml pull && IMAGE_TAG=beta docker compose -f docker-compose.cache-test.yml up -d",
+    "restartCommand": "cd /root/kiro-rs && docker restart kiro-rs-cache-test",
+    "healthcheckUrl": "http://127.0.0.1:8991/health",
+    "healthcheckTimeoutSeconds": 30
+  }
 }

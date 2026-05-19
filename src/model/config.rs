@@ -35,6 +35,8 @@ pub struct UpdateConfig {
     #[serde(default)]
     pub restart_command: String,
     #[serde(default)]
+    pub update_command: String,
+    #[serde(default)]
     pub proxy_url: Option<String>,
     #[serde(default)]
     pub allow_prerelease: bool,
@@ -57,6 +59,7 @@ impl Default for UpdateConfig {
             healthcheck_url: default_update_healthcheck_url(),
             healthcheck_timeout_seconds: default_update_healthcheck_timeout_seconds(),
             restart_command: String::new(),
+            update_command: String::new(),
             proxy_url: None,
             allow_prerelease: false,
             build_type: default_update_build_type(),

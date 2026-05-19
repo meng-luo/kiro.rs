@@ -102,6 +102,17 @@ function operationLabel(job?: SystemOperationJob | null) {
   }
 }
 
+function updateActionLabel(mode?: string) {
+  return mode === 'docker' ? '更新测试实例' : '更新到最新'
+}
+
+function updateActionTitle(mode?: string, canUpdate?: boolean) {
+  if (!canUpdate) {
+    return mode === 'docker' ? '当前未配置测试实例一键更新' : '当前构建不支持在线更新'
+  }
+  return mode === 'docker' ? '拉取最新测试镜像并重建测试实例' : '下载并准备更新'
+}
+
 function TableHead({
   children,
   className,
@@ -606,7 +617,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     updateSystemVersion(systemVersion?.updateAvailable ? { version: systemVersion.latestVersion } : {}, {
       onSuccess: (job) => {
         setActiveJobId(job.jobId)
-        toast.success('已发起更新任务')
+        toast.success(systemVersion?.deploymentMode === 'docker' ? '已发起测试实例更新' : '已发起更新任务')
       },
       onError: (error) => {
         toast.error(`发起更新失败: ${extractErrorMessage(error)}`)
@@ -942,9 +953,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     </div>
                   </div>
 
-                  <div className="rounded-md border bg-muted/20 px-3 py-3">
-                    <div className="truncate text-xs text-muted-foreground">维护说明</div>
-                    <div className="mt-1 truncate text-foreground" title={systemVersion.updateHint}>{systemVersion.updateHint}</div>
+                      <div className="rounded-md border bg-muted/20 px-3 py-3">
+                        <div className="truncate text-xs text-muted-foreground">维护说明</div>
+                        <div className="mt-1 truncate text-foreground" title={systemVersion.updateHint}>{systemVersion.updateHint}</div>
                   </div>
 
                   <div className="flex items-center gap-3 overflow-hidden text-xs text-muted-foreground">
@@ -1025,20 +1036,22 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   variant="outline"
                   onClick={handleStartUpdate}
                   disabled={versionActionsBusy || !systemVersion.canUpdate}
-                  title={systemVersion.canUpdate ? '下载并准备更新' : '当前构建不支持在线更新'}
+                  title={updateActionTitle(systemVersion.deploymentMode, systemVersion.canUpdate)}
                 >
                   <Download className="h-4 w-4" />
-                  更新到最新
+                  {updateActionLabel(systemVersion.deploymentMode)}
                 </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleStartRollback}
-                  disabled={versionActionsBusy || !systemVersion.canRollback}
-                  title={systemVersion.canRollback ? '回滚到最近一次备份' : '当前构建不支持在线回滚'}
-                >
-                  <History className="h-4 w-4" />
-                  回滚
-                </Button>
+                {systemVersion.deploymentMode !== 'docker' ? (
+                  <Button
+                    variant="outline"
+                    onClick={handleStartRollback}
+                    disabled={versionActionsBusy || !systemVersion.canRollback}
+                    title={systemVersion.canRollback ? '回滚到最近一次备份' : '当前构建不支持在线回滚'}
+                  >
+                    <History className="h-4 w-4" />
+                    回滚
+                  </Button>
+                ) : null}
                 <Button
                   variant="outline"
                   onClick={handleStartRestart}
