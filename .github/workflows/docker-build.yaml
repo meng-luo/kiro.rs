@@ -41,9 +41,27 @@ jobs:
             echo "should_build=true" >> $GITHUB_OUTPUT
           fi
 
-  build:
+  matrix:
     needs: pre-check
     if: needs.pre-check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      should_manifest: ${{ steps.matrix.outputs.should_manifest }}
+    steps:
+      - name: Prepare build matrix
+        id: matrix
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest","arch":"amd64"}]}' >> $GITHUB_OUTPUT
+            echo 'should_manifest=false' >> $GITHUB_OUTPUT
+          else
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest","arch":"amd64"},{"platform":"linux/arm64","runner":"ubuntu-22.04-arm","arch":"arm64"}]}' >> $GITHUB_OUTPUT
+            echo 'should_manifest=true' >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: matrix
     runs-on: ${{ matrix.runner }}
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -51,14 +69,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-22.04-arm
-            arch: arm64
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -121,7 +132,10 @@ jobs:
             org.opencontainers.image.description=Kiro.rs Docker Image
 
   manifest:
-    needs: build
+    needs:
+      - matrix
+      - build
+    if: needs.matrix.outputs.should_manifest == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Log in to GitHub Container Registry

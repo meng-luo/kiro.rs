@@ -18,7 +18,10 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 
 FROM rust:1.92-alpine AS chef
 
-RUN apk add --no-cache musl-dev perl make && cargo install cargo-chef --locked
+RUN apk add --no-cache musl-dev perl make
+RUN --mount=type=cache,id=cargo-chef-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-chef-git,target=/usr/local/cargo/git \
+    cargo install cargo-chef --locked
 
 WORKDIR /app
 
