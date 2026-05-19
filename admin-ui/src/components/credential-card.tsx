@@ -182,14 +182,14 @@ function disabledReasonLabel(reason?: string) {
 function modelOptionsFor(credential: CredentialStatusItem) {
   const supportsOpus = balanceLabel(credential).supportsOpus
   const base = [
-    { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-    { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
-    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+    { value: 'claude-haiku-4.5', label: 'Claude Haiku 4.5' },
+    { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },
+    { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
   ]
   if (supportsOpus) {
     base.unshift(
-      { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-      { value: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
+      { value: 'claude-opus-4.6', label: 'Claude Opus 4.6' },
+      { value: 'claude-opus-4.7', label: 'Claude Opus 4.7' },
     )
   }
   return base
@@ -301,7 +301,7 @@ export function CredentialCard({
   const [showTestDialog, setShowTestDialog] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [maxConcurrentValue, setMaxConcurrentValue] = useState(String(credential.maxConcurrent))
-  const [testModel, setTestModel] = useState(modelOptionsFor(credential)[0]?.value ?? 'claude-sonnet-4-6')
+  const [testModel, setTestModel] = useState(modelOptionsFor(credential)[0]?.value ?? 'claude-sonnet-4.6')
   const [testPrompt, setTestPrompt] = useState('请回复一句简短的话，确认连接已可用。')
   const [testing, setTesting] = useState(false)
   const [testEvents, setTestEvents] = useState<CredentialTestEvent[]>([])
