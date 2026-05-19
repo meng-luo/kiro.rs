@@ -225,7 +225,7 @@ fn default_update_channel() -> String {
 }
 
 fn default_update_github_repo() -> String {
-    "shusfun/kiro-rs".to_string()
+    "shusfun/kiro.rs".to_string()
 }
 
 fn default_update_artifact_name_template() -> String {

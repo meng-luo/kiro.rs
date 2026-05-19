@@ -72,6 +72,7 @@ struct DockerVersionInfo {
     version: String,
     published_at: Option<String>,
     release_notes_url: Option<String>,
+    update_available: bool,
 }
 
 /// 缓存的余额条目（含时间戳）
@@ -432,7 +433,11 @@ impl AdminService {
                     .to_string(),
             ));
         }
-        let version_info = self.check_system_version().await?;
+        let version_info = if self.is_docker_deployment() {
+            self.get_system_version()
+        } else {
+            self.check_system_version().await?
+        };
         let target_version = payload
             .version
             .clone()
@@ -811,7 +816,7 @@ impl AdminService {
         );
         if let Some(docker_version) = latest_docker {
             response.latest_version = docker_version.version.clone();
-            response.update_available = docker_version.version != self.current_version;
+            response.update_available = docker_version.update_available;
             response.latest_published_at = docker_version.published_at;
             response.release_notes_url = docker_version.release_notes_url;
             response.update_hint = if response.update_available {
@@ -873,15 +878,20 @@ impl AdminService {
     async fn fetch_latest_docker_version(
         &self,
     ) -> Result<Option<DockerVersionInfo>, AdminServiceError> {
-        let latest_release = self.fetch_latest_release().await?;
-        Ok(latest_release.map(|release| DockerVersionInfo {
-            version: if self.token_manager.config().update.channel == "beta" {
-                format!("beta ({})", release.tag_name.trim_start_matches('v'))
-            } else {
-                release.tag_name.trim_start_matches('v').to_string()
-            },
-            published_at: release.published_at,
-            release_notes_url: Some(release.html_url),
+        let config = self.token_manager.config();
+        let channel = config.update.channel.trim();
+        if channel.is_empty() {
+            return Ok(None);
+        }
+
+        let current_version = self.current_version.trim();
+        let update_available = current_version != channel;
+
+        Ok(Some(DockerVersionInfo {
+            version: channel.to_string(),
+            published_at: None,
+            release_notes_url: None,
+            update_available,
         }))
     }
 
