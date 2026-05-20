@@ -18,6 +18,8 @@ import type {
   SystemOperationJob,
   SystemUpdateRequest,
   SystemRollbackRequest,
+  PromptCacheConfigResponse,
+  PromptCacheConfigRequest,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -191,6 +193,18 @@ export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'bala
 // 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+export async function getPromptCacheConfig(): Promise<PromptCacheConfigResponse> {
+  const { data } = await api.get<PromptCacheConfigResponse>('/config/prompt-cache')
+  return data
+}
+
+export async function setPromptCacheConfig(
+  payload: PromptCacheConfigRequest
+): Promise<PromptCacheConfigResponse> {
+  const { data } = await api.put<PromptCacheConfigResponse>('/config/prompt-cache', payload)
   return data
 }
 

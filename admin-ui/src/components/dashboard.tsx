@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
+  Settings,
   Sun,
   Trash2,
   Upload,
@@ -28,9 +29,11 @@ import {
   DialogContent,
   DialogDescription,
   DialogHeader,
+  DialogFooter,
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
@@ -48,6 +51,8 @@ import {
   useRestartSystem,
   useRollbackSystemVersion,
   useSetLoadBalancingMode,
+  usePromptCacheConfig,
+  useSetPromptCacheConfig,
   useSystemJob,
   useSystemVersion,
   useUpdateSystemVersion,
@@ -158,6 +163,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [versionDialogOpen, setVersionDialogOpen] = useState(false)
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
@@ -173,6 +179,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const [redisUrlInput, setRedisUrlInput] = useState('')
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [activeView, setActiveView] = useState<'accounts' | 'diagnostics'>('accounts')
@@ -193,6 +200,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: resetFailure } = useResetFailure()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+  const { data: promptCacheConfig, isLoading: isLoadingPromptCache } = usePromptCacheConfig()
+  const { mutate: setPromptCacheConfig, isPending: isSavingPromptCache } = useSetPromptCacheConfig()
   const { data: systemVersion, isLoading: isLoadingVersion } = useSystemVersion()
   const { mutate: checkSystemVersion, isPending: isCheckingVersion } = useCheckSystemVersion()
   const { mutate: updateSystemVersion, isPending: isUpdatingSystem } = useUpdateSystemVersion()
@@ -244,6 +253,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
       setActiveJobId((prev) => prev ?? systemVersion.latestJob?.jobId ?? null)
     }
   }, [systemVersion?.latestJob?.jobId])
+
+  useEffect(() => {
+    if (!settingsDialogOpen || !promptCacheConfig) return
+    setRedisUrlInput(promptCacheConfig.redisUrl ?? '')
+  }, [settingsDialogOpen, promptCacheConfig])
 
   useEffect(() => {
     const validIds = new Set(credentials.map((credential) => credential.id))
@@ -613,6 +627,19 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
+  const handleSavePromptCache = () => {
+    setPromptCacheConfig({ redisUrl: redisUrlInput.trim() || null }, {
+      onSuccess: (response) => {
+        setRedisUrlInput(response.redisUrl ?? '')
+        toast.success(response.connected ? '缓存显示已启用' : '缓存显示已关闭')
+        setSettingsDialogOpen(false)
+      },
+      onError: (error) => {
+        toast.error(`保存失败: ${extractErrorMessage(error)}`)
+      },
+    })
+  }
+
   const handleCheckVersion = () => {
     checkSystemVersion(undefined, {
       onSuccess: (response) => {
@@ -721,6 +748,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </Button>
             <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
               {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+            </Button>
+            <Button variant="ghost" size="icon" onClick={() => setSettingsDialogOpen(true)} title="打开系统设置">
+              <Settings className="h-5 w-5" />
             </Button>
             <Button variant="ghost" size="icon" onClick={handleRefresh}>
               <RefreshCw className="h-5 w-5" />
@@ -921,6 +951,77 @@ export function Dashboard({ onLogout }: DashboardProps) {
         results={verifyResults}
         onCancel={handleCancelVerify}
       />
+
+      <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>系统设置</DialogTitle>
+            <DialogDescription>
+              配置后，使用记录会显示可复用内容带来的缓存读写情况。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="rounded-md border bg-muted/20 px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">缓存显示</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {isLoadingPromptCache
+                      ? '正在读取状态'
+                      : promptCacheConfig?.connected
+                        ? '已启用'
+                        : '未启用'}
+                  </div>
+                </div>
+                <Badge variant={promptCacheConfig?.connected ? 'success' : 'outline'}>
+                  {promptCacheConfig?.connected ? '已连接' : '未连接'}
+                </Badge>
+              </div>
+              {promptCacheConfig?.lastError ? (
+                <div className="mt-3 truncate text-xs text-destructive" title={promptCacheConfig.lastError}>
+                  {promptCacheConfig.lastError}
+                </div>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Redis 地址</label>
+              <Input
+                value={redisUrlInput}
+                onChange={(event) => setRedisUrlInput(event.target.value)}
+                placeholder="redis://127.0.0.1:6379/0"
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                留空保存后会关闭缓存显示；保存时会先确认连接可用。
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettingsDialogOpen(false)}>取消</Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRedisUrlInput('')
+                setPromptCacheConfig({ redisUrl: null }, {
+                  onSuccess: () => {
+                    toast.success('缓存显示已关闭')
+                    setSettingsDialogOpen(false)
+                  },
+                  onError: (error) => {
+                    toast.error(`保存失败: ${extractErrorMessage(error)}`)
+                  },
+                })
+              }}
+              disabled={isSavingPromptCache}
+            >
+              关闭
+            </Button>
+            <Button onClick={handleSavePromptCache} disabled={isSavingPromptCache}>
+              {isSavingPromptCache ? '保存中...' : '保存'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={versionDialogOpen} onOpenChange={setVersionDialogOpen}>
         <DialogContent className="max-w-3xl">

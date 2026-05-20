@@ -17,6 +17,8 @@ import {
   getDiagnosticsSummary,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  getPromptCacheConfig,
+  setPromptCacheConfig,
   getSystemVersion,
   checkSystemVersion,
   updateSystemVersion,
@@ -24,7 +26,13 @@ import {
   restartSystem,
   getSystemJob,
 } from '@/api/credentials'
-import type { AddCredentialRequest, DiagnosticsFilters, SystemRollbackRequest, SystemUpdateRequest } from '@/types/api'
+import type {
+  AddCredentialRequest,
+  DiagnosticsFilters,
+  PromptCacheConfigRequest,
+  SystemRollbackRequest,
+  SystemUpdateRequest,
+} from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -208,6 +216,23 @@ export function useSetLoadBalancingMode() {
     mutationFn: setLoadBalancingMode,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
+    },
+  })
+}
+
+export function usePromptCacheConfig() {
+  return useQuery({
+    queryKey: ['promptCacheConfig'],
+    queryFn: getPromptCacheConfig,
+  })
+}
+
+export function useSetPromptCacheConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: PromptCacheConfigRequest) => setPromptCacheConfig(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['promptCacheConfig'] })
     },
   })
 }

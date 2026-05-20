@@ -38,6 +38,17 @@ export interface SystemOperationJob {
   canRetry: boolean
 }
 
+export interface PromptCacheConfigResponse {
+  configured: boolean
+  connected: boolean
+  redisUrl?: string | null
+  lastError?: string | null
+}
+
+export interface PromptCacheConfigRequest {
+  redisUrl?: string | null
+}
+
 // 单个凭据状态
 export interface CredentialStatusItem {
   id: number
