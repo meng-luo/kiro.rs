@@ -98,6 +98,14 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_password: Option<String>,
 
+    /// 代理使用方式：inherit 使用全局代理，direct 直连，proxy 使用代理池
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_mode: Option<String>,
+
+    /// 绑定的代理池 ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<u64>,
+
     /// 凭据是否被禁用（默认为 false）
     #[serde(default)]
     pub disabled: bool,
@@ -346,6 +354,8 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            proxy_mode: None,
+            proxy_id: None,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -465,6 +475,8 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            proxy_mode: None,
+            proxy_id: None,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -497,6 +509,8 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            proxy_mode: None,
+            proxy_id: None,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
@@ -612,6 +626,8 @@ mod tests {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            proxy_mode: None,
+            proxy_id: None,
             disabled: false,
             kiro_api_key: None,
             endpoint: None,

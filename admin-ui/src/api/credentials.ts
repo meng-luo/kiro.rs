@@ -20,6 +20,16 @@ import type {
   SystemRollbackRequest,
   PromptCacheConfigResponse,
   PromptCacheConfigRequest,
+  AdminSettingsResponse,
+  AdminSettingsRequest,
+  ProxyListResponse,
+  ProxyListItem,
+  ProxyUpsertRequest,
+  BatchIdsRequest,
+  BatchDisabledRequest,
+  BatchCredentialUpdateRequest,
+  BatchOperationResponse,
+  CredentialStatusItem,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -198,6 +208,77 @@ export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promi
 
 export async function getPromptCacheConfig(): Promise<PromptCacheConfigResponse> {
   const { data } = await api.get<PromptCacheConfigResponse>('/config/prompt-cache')
+  return data
+}
+
+export async function getAdminSettings(): Promise<AdminSettingsResponse> {
+  const { data } = await api.get<AdminSettingsResponse>('/settings')
+  return data
+}
+
+export async function setAdminSettings(
+  payload: AdminSettingsRequest
+): Promise<AdminSettingsResponse> {
+  const { data } = await api.put<AdminSettingsResponse>('/settings', payload)
+  return data
+}
+
+export async function getProxies(): Promise<ProxyListResponse> {
+  const { data } = await api.get<ProxyListResponse>('/proxies')
+  return data
+}
+
+export async function createProxy(payload: ProxyUpsertRequest): Promise<ProxyListItem> {
+  const { data } = await api.post<ProxyListItem>('/proxies', payload)
+  return data
+}
+
+export async function updateProxy(id: number, payload: ProxyUpsertRequest): Promise<ProxyListItem> {
+  const { data } = await api.put<ProxyListItem>(`/proxies/${id}`, payload)
+  return data
+}
+
+export async function deleteProxy(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/proxies/${id}`)
+  return data
+}
+
+export async function testProxy(id: number): Promise<ProxyListItem> {
+  const { data } = await api.post<ProxyListItem>(`/proxies/${id}/test`)
+  return data
+}
+
+export async function getProxyAccounts(id: number): Promise<CredentialStatusItem[]> {
+  const { data } = await api.get<CredentialStatusItem[]>(`/proxies/${id}/accounts`)
+  return data
+}
+
+export async function batchSetCredentialDisabled(
+  payload: BatchDisabledRequest
+): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/credentials/batch/disabled', payload)
+  return data
+}
+
+export async function batchResetCredentials(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/credentials/batch/reset', payload)
+  return data
+}
+
+export async function batchRefreshCredentials(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/credentials/batch/refresh', payload)
+  return data
+}
+
+export async function batchDeleteCredentials(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/credentials/batch/delete', payload)
+  return data
+}
+
+export async function batchUpdateCredentials(
+  payload: BatchCredentialUpdateRequest
+): Promise<BatchOperationResponse> {
+  const { data } = await api.patch<BatchOperationResponse>('/credentials/batch', payload)
   return data
 }
 

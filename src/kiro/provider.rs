@@ -84,8 +84,8 @@ impl KiroProvider {
         );
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
 
@@ -112,10 +112,7 @@ impl KiroProvider {
     }
 
     /// 根据凭据选择 endpoint 实现
-    fn endpoint_for(
-        &self,
-        credentials: &KiroCredentials,
-    ) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
+    fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
         let name = credentials
             .endpoint
             .as_deref()
@@ -131,7 +128,8 @@ impl KiroProvider {
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
     #[allow(dead_code)]
     pub async fn call_api(&self, request_body: &str) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry(request_body, false, None, None).await
+        self.call_api_with_retry(request_body, false, None, None)
+            .await
     }
 
     pub async fn call_api_with_metadata(
@@ -147,7 +145,8 @@ impl KiroProvider {
     /// 发送流式 API 请求
     #[allow(dead_code)]
     pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry(request_body, true, None, None).await
+        self.call_api_with_retry(request_body, true, None, None)
+            .await
     }
 
     pub async fn call_api_stream_with_metadata(
@@ -289,7 +288,12 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }
@@ -357,7 +361,7 @@ impl KiroProvider {
             original_model,
             input_tokens,
         )
-            .await
+        .await
     }
 
     async fn call_api_with_retry_and_options(
@@ -379,7 +383,9 @@ impl KiroProvider {
 
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
-        let original_model = original_model.map(|m| m.to_string()).or_else(|| model.clone());
+        let original_model = original_model
+            .map(|m| m.to_string())
+            .or_else(|| model.clone());
         let session_key = Self::extract_session_key(request_body);
         let session_hash = session_key.as_deref().map(Self::hash_short);
         let mut tried_account_ids: HashSet<u64> = HashSet::new();
@@ -582,12 +588,7 @@ impl KiroProvider {
                     &body,
                     None,
                 ));
-                let err = anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                );
+                let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
                 if strict_preferred_account {
                     return Err(err);
                 }
@@ -637,7 +638,12 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }
@@ -659,12 +665,7 @@ impl KiroProvider {
                     &body,
                     None,
                 ));
-                let err = anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                );
+                let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
                 if strict_preferred_account {
                     return Err(err);
                 }
@@ -704,12 +705,7 @@ impl KiroProvider {
                     &body,
                     Some(kind_text.to_string()),
                 ));
-                let err = anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                );
+                let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
                 if strict_preferred_account {
                     return Err(err);
                 }

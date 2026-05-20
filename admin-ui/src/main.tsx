@@ -15,7 +15,8 @@ const queryClient = new QueryClient({
 })
 
 const savedTheme = storage.getTheme()
-document.documentElement.classList.toggle('dark', savedTheme === 'dark')
+const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
+document.documentElement.classList.toggle('dark', savedTheme === 'dark' || (savedTheme === 'system' && prefersDark))
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

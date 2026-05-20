@@ -49,6 +49,18 @@ export interface PromptCacheConfigRequest {
   redisUrl?: string | null
 }
 
+export type AdminTheme = 'light' | 'dark' | 'system'
+
+export interface AdminSettingsResponse {
+  theme: AdminTheme
+  promptCache: PromptCacheConfigResponse
+}
+
+export interface AdminSettingsRequest {
+  theme?: AdminTheme
+  redisUrl?: string | null
+}
+
 // 单个凭据状态
 export interface CredentialStatusItem {
   id: number
@@ -68,6 +80,10 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  proxyMode?: 'inherit' | 'direct' | 'proxy' | string
+  proxyId?: number
+  proxyName?: string
+  proxyStatus?: string
   refreshFailureCount: number
   disabledReason?: string
   endpoint: string
@@ -158,6 +174,62 @@ export interface DiagnosticsFilters {
 
 export interface DiagnosticsCliResponse {
   command: string
+}
+
+export interface ProxyListItem {
+  id: number
+  name: string
+  protocol: 'http' | 'https' | 'socks5' | string
+  host: string
+  port: number
+  username?: string | null
+  hasPassword: boolean
+  disabled: boolean
+  lastTestedAt?: string | null
+  lastTestStatus?: 'ok' | 'failed' | 'unknown' | string | null
+  lastLatencyMs?: number | null
+  lastError?: string | null
+  accountCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProxyListResponse {
+  total: number
+  enabledCount: number
+  proxies: ProxyListItem[]
+}
+
+export interface ProxyUpsertRequest {
+  name: string
+  protocol: string
+  host: string
+  port: number
+  username?: string | null
+  password?: string | null
+  disabled: boolean
+}
+
+export interface BatchIdsRequest {
+  ids: number[]
+}
+
+export interface BatchDisabledRequest extends BatchIdsRequest {
+  disabled: boolean
+}
+
+export interface BatchCredentialUpdateRequest extends BatchIdsRequest {
+  priority?: number
+  maxConcurrent?: number
+  disabled?: boolean
+  proxyMode?: 'inherit' | 'direct' | 'proxy' | string
+  proxyId?: number | null
+}
+
+export interface BatchOperationResponse {
+  successCount: number
+  failCount: number
+  messages: string[]
 }
 
 // 成功响应

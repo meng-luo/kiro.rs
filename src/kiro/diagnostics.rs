@@ -208,7 +208,12 @@ impl DiagnosticsStore {
 
         let mut inner = self.inner.lock();
         let mut updated = None;
-        if let Some(entry) = inner.entries.iter_mut().rev().find(|entry| entry.request_id == request_id) {
+        if let Some(entry) = inner
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.request_id == request_id)
+        {
             if input_tokens.is_some() {
                 entry.input_tokens = input_tokens;
             }
@@ -271,7 +276,11 @@ impl DiagnosticsStore {
             average_duration_ms,
             input_tokens,
             output_tokens,
-            model_rank: Self::rank(entries.iter().filter_map(|entry| entry.original_model.clone())),
+            model_rank: Self::rank(
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.original_model.clone()),
+            ),
             credential_rank: Self::rank(
                 entries
                     .iter()
@@ -366,7 +375,10 @@ impl DiagnosticsStore {
                 return false;
             }
         }
-        if query.credential_id.is_some_and(|id| entry.credential_id != Some(id)) {
+        if query
+            .credential_id
+            .is_some_and(|id| entry.credential_id != Some(id))
+        {
             return false;
         }
         if let Some(model) = &query.model {
@@ -374,7 +386,10 @@ impl DiagnosticsStore {
                 return false;
             }
         }
-        if query.success.is_some_and(|success| entry.success != success) {
+        if query
+            .success
+            .is_some_and(|success| entry.success != success)
+        {
             return false;
         }
         if let Some(kind) = &query.rate_limit_kind {

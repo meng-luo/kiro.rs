@@ -35,12 +35,15 @@ use crate::kiro::token_manager::{AcquireOptions, MultiTokenManager};
 use crate::model::config::Config;
 
 use super::error::AdminServiceError;
+use super::proxy_store::{ProxyItem, ProxyListItem, ProxyStore};
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialTestRequest, CredentialsStatusResponse, DiagnosticsCliResponse,
-    DiagnosticsQueryRequest, LoadBalancingModeResponse, PromptCacheConfigRequest,
-    PromptCacheConfigResponse, SetLoadBalancingModeRequest, SetMaxConcurrentRequest,
-    SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
+    AddCredentialRequest, AddCredentialResponse, AdminSettingsRequest, AdminSettingsResponse,
+    BalanceResponse, BatchCredentialUpdateRequest, BatchDisabledRequest, BatchIdsRequest,
+    BatchOperationResponse, CredentialStatusItem, CredentialTestRequest, CredentialsStatusResponse,
+    DiagnosticsCliResponse, DiagnosticsQueryRequest, LoadBalancingModeResponse,
+    PromptCacheConfigRequest, PromptCacheConfigResponse, ProxyListResponse, ProxyUpsertRequest,
+    SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SystemOperationJobResponse,
+    SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -105,6 +108,7 @@ pub struct AdminService {
     system_jobs: Mutex<HashMap<String, SystemOperationJobResponse>>,
     http_client: Client,
     prompt_cache: Arc<PromptCacheManager>,
+    proxy_store: ProxyStore,
 }
 
 impl AdminService {
@@ -117,6 +121,10 @@ impl AdminService {
         let cache_path = token_manager
             .cache_dir()
             .map(|d| d.join("kiro_balance_cache.json"));
+        let proxy_path = token_manager
+            .cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("kiro_proxies.json");
 
         let balance_cache = Self::load_balance_cache_from(&cache_path);
         let current_version = env!("CARGO_PKG_VERSION").to_string();
@@ -155,6 +163,7 @@ impl AdminService {
             system_jobs: Mutex::new(system_jobs),
             http_client,
             prompt_cache,
+            proxy_store: ProxyStore::new(proxy_path),
         }
     }
 
@@ -163,42 +172,64 @@ impl AdminService {
         let snapshot = self.token_manager.snapshot();
         let default_endpoint = self.token_manager.config().default_endpoint.clone();
 
+        let proxy_data = self.proxy_store.load().unwrap_or_default();
+        let proxy_lookup: HashMap<u64, ProxyItem> = proxy_data
+            .proxies
+            .into_iter()
+            .map(|proxy| (proxy.id, proxy))
+            .collect();
+
         let mut credentials: Vec<CredentialStatusItem> = snapshot
             .entries
             .into_iter()
-            .map(|entry| CredentialStatusItem {
-                id: entry.id,
-                priority: entry.priority,
-                disabled: entry.disabled,
-                failure_count: entry.failure_count,
-                is_current: entry.id == snapshot.current_id,
-                expires_at: entry.expires_at,
-                auth_method: entry.auth_method,
-                has_profile_arn: entry.has_profile_arn,
-                refresh_token_hash: entry.refresh_token_hash,
-                api_key_hash: entry.api_key_hash,
-                masked_api_key: entry.masked_api_key,
-                email: entry.email,
-                subscription_title: entry.subscription_title,
-                success_count: entry.success_count,
-                last_used_at: entry.last_used_at.clone(),
-                has_proxy: entry.has_proxy,
-                proxy_url: entry.proxy_url,
-                refresh_failure_count: entry.refresh_failure_count,
-                disabled_reason: entry.disabled_reason,
-                endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
-                dispatch_state: entry.dispatch_state,
-                current_concurrent: entry.current_concurrent,
-                max_concurrent: entry.max_concurrent,
-                cooldown_remaining_ms: entry.cooldown_remaining_ms,
-                last_rate_limit_kind: entry.last_rate_limit_kind,
-                recent_429_count: entry.recent_429_count,
-                recent_suspicious_count: entry.recent_suspicious_count,
-                sticky_session_count: entry.sticky_session_count,
-                sticky_detached: entry.sticky_detached,
-                dispatch_path: entry.dispatch_path,
-                soft_fallback_eligible: entry.soft_fallback_eligible,
-                last_soft_fallback_at: entry.last_soft_fallback_at,
+            .map(|entry| {
+                let proxy = entry.proxy_id.and_then(|id| proxy_lookup.get(&id));
+                CredentialStatusItem {
+                    id: entry.id,
+                    priority: entry.priority,
+                    disabled: entry.disabled,
+                    failure_count: entry.failure_count,
+                    is_current: entry.id == snapshot.current_id,
+                    expires_at: entry.expires_at,
+                    auth_method: entry.auth_method,
+                    has_profile_arn: entry.has_profile_arn,
+                    refresh_token_hash: entry.refresh_token_hash,
+                    api_key_hash: entry.api_key_hash,
+                    masked_api_key: entry.masked_api_key,
+                    email: entry.email,
+                    subscription_title: entry.subscription_title,
+                    success_count: entry.success_count,
+                    last_used_at: entry.last_used_at.clone(),
+                    has_proxy: entry.has_proxy,
+                    proxy_url: entry.proxy_url,
+                    proxy_mode: entry.proxy_mode,
+                    proxy_id: entry.proxy_id,
+                    proxy_name: proxy.map(|item| item.name.clone()),
+                    proxy_status: proxy.map(|item| {
+                        if item.disabled {
+                            "disabled".to_string()
+                        } else {
+                            item.last_test_status
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string())
+                        }
+                    }),
+                    refresh_failure_count: entry.refresh_failure_count,
+                    disabled_reason: entry.disabled_reason,
+                    endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
+                    dispatch_state: entry.dispatch_state,
+                    current_concurrent: entry.current_concurrent,
+                    max_concurrent: entry.max_concurrent,
+                    cooldown_remaining_ms: entry.cooldown_remaining_ms,
+                    last_rate_limit_kind: entry.last_rate_limit_kind,
+                    recent_429_count: entry.recent_429_count,
+                    recent_suspicious_count: entry.recent_suspicious_count,
+                    sticky_session_count: entry.sticky_session_count,
+                    sticky_detached: entry.sticky_detached,
+                    dispatch_path: entry.dispatch_path,
+                    soft_fallback_eligible: entry.soft_fallback_eligible,
+                    last_soft_fallback_at: entry.last_soft_fallback_at,
+                }
             })
             .collect();
 
@@ -473,6 +504,8 @@ impl AdminService {
             proxy_url: req.proxy_url,
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,
+            proxy_mode: None,
+            proxy_id: None,
             disabled: false, // 新添加的凭据默认启用
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
@@ -562,6 +595,514 @@ impl AdminService {
             redis_url: status.redis_url,
             last_error: status.last_error,
         })
+    }
+
+    pub fn get_admin_settings(&self) -> AdminSettingsResponse {
+        AdminSettingsResponse {
+            theme: self.current_admin_theme(),
+            prompt_cache: self.get_prompt_cache_config(),
+        }
+    }
+
+    pub async fn set_admin_settings(
+        &self,
+        req: AdminSettingsRequest,
+    ) -> Result<AdminSettingsResponse, AdminServiceError> {
+        if let Some(theme) = req.theme.as_deref() {
+            if !matches!(theme, "light" | "dark" | "system") {
+                return Err(AdminServiceError::InvalidCredential(
+                    "theme 必须是 light、dark 或 system".to_string(),
+                ));
+            }
+            self.persist_admin_theme(theme.to_string())?;
+        }
+
+        if req.redis_url.is_some() {
+            self.set_prompt_cache_config(PromptCacheConfigRequest {
+                redis_url: req.redis_url,
+            })
+            .await?;
+        }
+
+        Ok(self.get_admin_settings())
+    }
+
+    pub fn list_proxies(&self) -> Result<ProxyListResponse, AdminServiceError> {
+        let data = self
+            .proxy_store
+            .load()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        let snapshot = self.token_manager.snapshot();
+        let proxies = data
+            .proxies
+            .iter()
+            .map(|proxy| {
+                let account_count = snapshot
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.proxy_id == Some(proxy.id))
+                    .count();
+                Self::proxy_list_item(proxy, account_count)
+            })
+            .collect::<Vec<_>>();
+        Ok(ProxyListResponse {
+            total: proxies.len(),
+            enabled_count: proxies.iter().filter(|item| !item.disabled).count(),
+            proxies,
+        })
+    }
+
+    pub fn create_proxy(
+        &self,
+        req: ProxyUpsertRequest,
+    ) -> Result<ProxyListItem, AdminServiceError> {
+        let mut data = self
+            .proxy_store
+            .load()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Self::validate_proxy_request(&req)?;
+        let now = ProxyItem::now_timestamp();
+        let proxy = ProxyItem {
+            id: ProxyStore::next_id(&data),
+            name: req.name.trim().to_string(),
+            protocol: req.protocol.trim().to_lowercase(),
+            host: req.host.trim().to_string(),
+            port: req.port,
+            username: req.username.filter(|value| !value.trim().is_empty()),
+            password: req.password.filter(|value| !value.trim().is_empty()),
+            disabled: req.disabled,
+            last_tested_at: None,
+            last_test_status: None,
+            last_latency_ms: None,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        data.proxies.push(proxy.clone());
+        self.proxy_store
+            .save(&data)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(Self::proxy_list_item(&proxy, 0))
+    }
+
+    pub fn update_proxy(
+        &self,
+        id: u64,
+        req: ProxyUpsertRequest,
+    ) -> Result<ProxyListItem, AdminServiceError> {
+        let mut data = self
+            .proxy_store
+            .load()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Self::validate_proxy_request(&req)?;
+        let proxy = data
+            .proxies
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| AdminServiceError::InvalidCredential(format!("代理不存在: {}", id)))?;
+        proxy.name = req.name.trim().to_string();
+        proxy.protocol = req.protocol.trim().to_lowercase();
+        proxy.host = req.host.trim().to_string();
+        proxy.port = req.port;
+        proxy.username = req.username.filter(|value| !value.trim().is_empty());
+        if let Some(password) = req.password.filter(|value| !value.trim().is_empty()) {
+            proxy.password = Some(password);
+        }
+        proxy.disabled = req.disabled;
+        proxy.updated_at = ProxyItem::now_timestamp();
+        let result = Self::proxy_list_item(proxy, self.proxy_account_ids(id).len());
+        self.proxy_store
+            .save(&data)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(result)
+    }
+
+    pub fn delete_proxy(&self, id: u64) -> Result<(), AdminServiceError> {
+        let accounts = self.proxy_account_ids(id);
+        if !accounts.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "代理已关联 {} 个账号，请先迁移或解绑",
+                accounts.len()
+            )));
+        }
+        let mut data = self
+            .proxy_store
+            .load()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        let before = data.proxies.len();
+        data.proxies.retain(|item| item.id != id);
+        if data.proxies.len() == before {
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "代理不存在: {}",
+                id
+            )));
+        }
+        self.proxy_store
+            .save(&data)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn test_proxy(&self, id: u64) -> Result<ProxyListItem, AdminServiceError> {
+        let mut data = self
+            .proxy_store
+            .load()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        let proxy = data
+            .proxies
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| AdminServiceError::InvalidCredential(format!("代理不存在: {}", id)))?;
+        let started = std::time::Instant::now();
+        let proxy_config = Self::proxy_config_from_item(proxy);
+        let test_result = match build_client(
+            Some(&proxy_config),
+            15,
+            self.token_manager.config().tls_backend,
+        ) {
+            Ok(client) => client
+                .get("https://www.google.com/generate_204")
+                .send()
+                .await
+                .and_then(|response| response.error_for_status())
+                .map(|_| ())
+                .map_err(anyhow::Error::from),
+            Err(error) => Err(error),
+        };
+        proxy.last_tested_at = Some(ProxyItem::now_timestamp());
+        proxy.last_latency_ms =
+            Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+        match test_result {
+            Ok(_) => {
+                proxy.last_test_status = Some("ok".to_string());
+                proxy.last_error = None;
+            }
+            Err(error) => {
+                proxy.last_test_status = Some("failed".to_string());
+                proxy.last_error = Some(error.to_string());
+            }
+        }
+        proxy.updated_at = ProxyItem::now_timestamp();
+        let result = Self::proxy_list_item(proxy, self.proxy_account_ids(id).len());
+        self.proxy_store
+            .save(&data)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(result)
+    }
+
+    pub fn proxy_accounts(&self, id: u64) -> Vec<CredentialStatusItem> {
+        self.get_all_credentials()
+            .credentials
+            .into_iter()
+            .filter(|credential| credential.proxy_id == Some(id))
+            .collect()
+    }
+
+    pub fn batch_set_disabled(
+        &self,
+        req: BatchDisabledRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_batch_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.set_disabled(id, req.disabled) {
+                Ok(_) => response.success_count += 1,
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub fn batch_reset(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_batch_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.reset_and_enable(id) {
+                Ok(_) => response.success_count += 1,
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub async fn batch_refresh(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_batch_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.force_refresh_token(id).await {
+                Ok(_) => response.success_count += 1,
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub fn batch_delete(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_batch_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.delete_credential(id) {
+                Ok(_) => response.success_count += 1,
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub fn batch_update_credentials(
+        &self,
+        req: BatchCredentialUpdateRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_batch_ids(&req.ids)?;
+        if req.priority.is_none()
+            && req.max_concurrent.is_none()
+            && req.disabled.is_none()
+            && req.proxy_mode.is_none()
+        {
+            return Err(AdminServiceError::InvalidCredential(
+                "请选择至少一个要更新的内容".to_string(),
+            ));
+        }
+
+        let proxy_binding = if let Some(mode) = req.proxy_mode.as_deref() {
+            Some(self.resolve_proxy_binding(mode, req.proxy_id)?)
+        } else {
+            None
+        };
+
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            let result = (|| -> Result<(), AdminServiceError> {
+                if let Some(priority) = req.priority {
+                    self.set_priority(id, priority)?;
+                }
+                if let Some(max_concurrent) = req.max_concurrent {
+                    self.token_manager
+                        .set_max_concurrent(id, max_concurrent)
+                        .map_err(|e| self.classify_error(e, id))?;
+                }
+                if let Some(disabled) = req.disabled {
+                    self.set_disabled(id, disabled)?;
+                }
+                if let Some((mode, proxy_id, proxy_url, proxy_username, proxy_password)) =
+                    proxy_binding.clone()
+                {
+                    self.token_manager
+                        .update_proxy_binding(
+                            id,
+                            mode,
+                            proxy_id,
+                            proxy_url,
+                            proxy_username,
+                            proxy_password,
+                        )
+                        .map_err(|e| self.classify_error(e, id))?;
+                }
+                Ok(())
+            })();
+
+            match result {
+                Ok(_) => response.success_count += 1,
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    fn current_admin_theme(&self) -> String {
+        match self.token_manager.config().admin_ui.theme.as_str() {
+            "light" | "dark" | "system" => self.token_manager.config().admin_ui.theme.clone(),
+            _ => "system".to_string(),
+        }
+    }
+
+    fn persist_admin_theme(&self, theme: String) -> Result<(), AdminServiceError> {
+        use anyhow::Context;
+
+        let config_path = self
+            .token_manager
+            .config()
+            .config_path()
+            .ok_or_else(|| {
+                AdminServiceError::InternalError("配置文件路径未知，无法保存主题设置".to_string())
+            })?
+            .to_path_buf();
+
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        config.admin_ui.theme = theme;
+        config
+            .save()
+            .with_context(|| format!("保存主题设置失败: {}", config_path.display()))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(())
+    }
+
+    fn validate_proxy_request(req: &ProxyUpsertRequest) -> Result<(), AdminServiceError> {
+        let name = req.name.trim();
+        let protocol = req.protocol.trim().to_lowercase();
+        let host = req.host.trim();
+
+        if name.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "代理名称不能为空".to_string(),
+            ));
+        }
+        if !matches!(protocol.as_str(), "http" | "https" | "socks5" | "socks5h") {
+            return Err(AdminServiceError::InvalidCredential(
+                "代理协议必须是 http、https、socks5 或 socks5h".to_string(),
+            ));
+        }
+        if host.is_empty() || host.contains('/') || host.contains('\\') {
+            return Err(AdminServiceError::InvalidCredential(
+                "代理地址格式不正确".to_string(),
+            ));
+        }
+        if req.port == 0 {
+            return Err(AdminServiceError::InvalidCredential(
+                "代理端口必须大于 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn proxy_list_item(proxy: &ProxyItem, account_count: usize) -> ProxyListItem {
+        ProxyListItem {
+            id: proxy.id,
+            name: proxy.name.clone(),
+            protocol: proxy.protocol.clone(),
+            host: proxy.host.clone(),
+            port: proxy.port,
+            username: proxy.username.clone(),
+            has_password: proxy
+                .password
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            disabled: proxy.disabled,
+            last_tested_at: proxy.last_tested_at.clone(),
+            last_test_status: proxy.last_test_status.clone(),
+            last_latency_ms: proxy.last_latency_ms,
+            last_error: proxy.last_error.clone(),
+            account_count,
+            created_at: proxy.created_at.clone(),
+            updated_at: proxy.updated_at.clone(),
+        }
+    }
+
+    fn proxy_account_ids(&self, id: u64) -> Vec<u64> {
+        self.token_manager
+            .snapshot()
+            .entries
+            .into_iter()
+            .filter(|entry| entry.proxy_id == Some(id))
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    fn proxy_config_from_item(proxy: &ProxyItem) -> ProxyConfig {
+        let config = ProxyConfig::new(proxy.url());
+        match (&proxy.username, &proxy.password) {
+            (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
+                config.with_auth(username.clone(), password.clone())
+            }
+            _ => config,
+        }
+    }
+
+    fn validate_batch_ids(&self, ids: &[u64]) -> Result<(), AdminServiceError> {
+        if ids.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "请选择至少一个账号".to_string(),
+            ));
+        }
+        if ids.len() > 500 {
+            return Err(AdminServiceError::InvalidCredential(
+                "一次最多处理 500 个账号".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_proxy_binding(
+        &self,
+        mode: &str,
+        proxy_id: Option<u64>,
+    ) -> Result<
+        (
+            Option<String>,
+            Option<u64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+        AdminServiceError,
+    > {
+        match mode {
+            "inherit" => Ok((Some("inherit".to_string()), None, None, None, None)),
+            "direct" => Ok((
+                Some("direct".to_string()),
+                None,
+                Some("direct".to_string()),
+                None,
+                None,
+            )),
+            "proxy" => {
+                let proxy_id = proxy_id.ok_or_else(|| {
+                    AdminServiceError::InvalidCredential("请选择要绑定的代理".to_string())
+                })?;
+                let data = self
+                    .proxy_store
+                    .load()
+                    .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+                let proxy = data
+                    .proxies
+                    .into_iter()
+                    .find(|item| item.id == proxy_id)
+                    .ok_or_else(|| {
+                        AdminServiceError::InvalidCredential(format!("代理不存在: {}", proxy_id))
+                    })?;
+                if proxy.disabled {
+                    return Err(AdminServiceError::InvalidCredential(
+                        "请选择启用中的代理".to_string(),
+                    ));
+                }
+                Ok((
+                    Some("proxy".to_string()),
+                    Some(proxy.id),
+                    Some(proxy.url()),
+                    proxy.username,
+                    proxy.password,
+                ))
+            }
+            _ => Err(AdminServiceError::InvalidCredential(
+                "代理使用方式必须是 inherit、direct 或 proxy".to_string(),
+            )),
+        }
     }
 
     /// 获取系统版本信息

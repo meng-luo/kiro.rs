@@ -14,10 +14,11 @@ use tokio::time::{Duration, interval};
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, CredentialTestRequest, DiagnosticsQueryRequest,
-        PromptCacheConfigRequest, SetDisabledRequest, SetLoadBalancingModeRequest,
-        SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse, SystemRollbackRequest,
-        SystemUpdateRequest,
+        AddCredentialRequest, AdminSettingsRequest, BatchCredentialUpdateRequest,
+        BatchDisabledRequest, BatchIdsRequest, CredentialTestRequest, DiagnosticsQueryRequest,
+        PromptCacheConfigRequest, ProxyUpsertRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
+        SystemRollbackRequest, SystemUpdateRequest,
     },
 };
 
@@ -95,6 +96,22 @@ pub async fn get_diagnostics_cli(
     Query(query): Query<DiagnosticsQueryRequest>,
 ) -> impl IntoResponse {
     Json(state.service.diagnostics_cli(query))
+}
+
+/// GET /api/admin/settings
+pub async fn get_admin_settings(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_admin_settings())
+}
+
+/// PUT /api/admin/settings
+pub async fn set_admin_settings(
+    State(state): State<AdminState>,
+    Json(payload): Json<AdminSettingsRequest>,
+) -> impl IntoResponse {
+    match state.service.set_admin_settings(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
 }
 
 /// POST /api/admin/credentials/:id/disabled
@@ -212,6 +229,87 @@ pub async fn delete_credential(
     }
 }
 
+/// POST /api/admin/credentials/batch/disabled
+pub async fn batch_set_credential_disabled(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchDisabledRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_set_disabled(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/batch/reset
+pub async fn batch_reset_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_reset(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/batch/refresh
+pub async fn batch_refresh_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_refresh(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/batch/delete
+pub async fn batch_delete_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_delete(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PATCH /api/admin/credentials/batch
+pub async fn batch_update_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchCredentialUpdateRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_update_credentials(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PUT /api/admin/credentials/:id/proxy
+pub async fn bind_credential_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let proxy_mode = payload
+        .get("proxyMode")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let proxy_id = payload.get("proxyId").and_then(|value| value.as_u64());
+    match state
+        .service
+        .batch_update_credentials(BatchCredentialUpdateRequest {
+            ids: vec![id],
+            priority: None,
+            max_concurrent: None,
+            disabled: None,
+            proxy_mode,
+            proxy_id,
+        }) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// POST /api/admin/credentials/:id/refresh
 /// 强制刷新凭据 Token
 pub async fn force_refresh_token(
@@ -289,6 +387,64 @@ pub async fn set_prompt_cache_config(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// GET /api/admin/proxies
+pub async fn list_proxies(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.list_proxies() {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies
+pub async fn create_proxy(
+    State(state): State<AdminState>,
+    Json(payload): Json<ProxyUpsertRequest>,
+) -> impl IntoResponse {
+    match state.service.create_proxy(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PUT /api/admin/proxies/:id
+pub async fn update_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<ProxyUpsertRequest>,
+) -> impl IntoResponse {
+    match state.service.update_proxy(id, payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// DELETE /api/admin/proxies/:id
+pub async fn delete_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.delete_proxy(id) {
+        Ok(_) => Json(SuccessResponse::new(format!("代理 #{} 已删除", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies/:id/test
+pub async fn test_proxy(State(state): State<AdminState>, Path(id): Path<u64>) -> impl IntoResponse {
+    match state.service.test_proxy(id).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/proxies/:id/accounts
+pub async fn get_proxy_accounts(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    Json(state.service.proxy_accounts(id))
 }
 
 /// GET /api/admin/system/version

@@ -116,6 +116,18 @@ pub struct CredentialStatusItem {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// 代理使用方式
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_mode: Option<String>,
+    /// 绑定的代理池 ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<u64>,
+    /// 绑定的代理名称
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_name: Option<String>,
+    /// 绑定代理的当前状态
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_status: Option<String>,
     /// Token 刷新连续失败次数
     pub refresh_failure_count: u32,
     /// 禁用原因
@@ -240,6 +252,82 @@ pub struct PromptCacheConfigResponse {
 pub struct PromptCacheConfigRequest {
     #[serde(default)]
     pub redis_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSettingsResponse {
+    pub theme: String,
+    pub prompt_cache: PromptCacheConfigResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSettingsRequest {
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub redis_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyUpsertRequest {
+    pub name: String,
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyListResponse {
+    pub total: usize,
+    pub enabled_count: usize,
+    pub proxies: Vec<super::proxy_store::ProxyListItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchIdsRequest {
+    pub ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDisabledRequest {
+    pub ids: Vec<u64>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCredentialUpdateRequest {
+    pub ids: Vec<u64>,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub disabled: Option<bool>,
+    #[serde(default)]
+    pub proxy_mode: Option<String>,
+    #[serde(default)]
+    pub proxy_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOperationResponse {
+    pub success_count: usize,
+    pub fail_count: usize,
+    pub messages: Vec<String>,
 }
 
 /// 添加凭据请求

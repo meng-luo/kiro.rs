@@ -125,6 +125,21 @@ impl Default for RateLimitCooldownConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUiConfig {
+    #[serde(default = "default_admin_theme")]
+    pub theme: String,
+}
+
+impl Default for AdminUiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_admin_theme(),
+        }
+    }
+}
+
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,6 +245,10 @@ pub struct Config {
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
 
+    /// Admin UI 配置
+    #[serde(default)]
+    pub admin_ui: AdminUiConfig,
+
     /// 限频冷却配置
     #[serde(default)]
     pub rate_limit_cooldown: RateLimitCooldownConfig,
@@ -278,6 +297,10 @@ fn default_load_balancing_mode() -> String {
 
 fn default_extract_thinking() -> bool {
     true
+}
+
+fn default_admin_theme() -> String {
+    "system".to_string()
 }
 
 fn default_endpoint() -> String {
@@ -388,6 +411,7 @@ impl Default for Config {
             endpoints: HashMap::new(),
             update: UpdateConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
+            admin_ui: AdminUiConfig::default(),
             rate_limit_cooldown: RateLimitCooldownConfig::default(),
             config_path: None,
         }

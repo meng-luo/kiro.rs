@@ -558,6 +558,10 @@ pub struct CredentialEntrySnapshot {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// 代理使用方式
+    pub proxy_mode: Option<String>,
+    /// 绑定的代理池 ID
+    pub proxy_id: Option<u64>,
     /// Token 刷新连续失败次数
     pub refresh_failure_count: u32,
     /// 禁用原因
@@ -2084,6 +2088,8 @@ impl MultiTokenManager {
                     last_used_at: e.last_used_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
+                    proxy_mode: e.credentials.proxy_mode.clone(),
+                    proxy_id: e.credentials.proxy_id,
                     refresh_failure_count: e.refresh_failure_count,
                     disabled_reason: e.disabled_reason.map(|r| {
                         match r {
@@ -2246,6 +2252,31 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.max_concurrent = sanitized;
             entry.credentials.max_concurrent = Some(sanitized);
+        }
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    pub fn update_proxy_binding(
+        &self,
+        id: u64,
+        proxy_mode: Option<String>,
+        proxy_id: Option<u64>,
+        proxy_url: Option<String>,
+        proxy_username: Option<String>,
+        proxy_password: Option<String>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials.proxy_mode = proxy_mode;
+            entry.credentials.proxy_id = proxy_id;
+            entry.credentials.proxy_url = proxy_url;
+            entry.credentials.proxy_username = proxy_username;
+            entry.credentials.proxy_password = proxy_password;
         }
         self.persist_credentials()?;
         Ok(())

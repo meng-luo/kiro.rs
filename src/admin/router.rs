@@ -2,18 +2,22 @@
 
 use axum::{
     Router, middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post, put},
 };
 
 use super::{
     handlers::{
-        add_credential, check_system_version, delete_credential, force_refresh_token,
-        get_all_credentials, get_credential_balance, get_diagnostics_cli, get_diagnostics_requests,
-        get_diagnostics_summary, get_load_balancing_mode, get_prompt_cache_config, get_system_job,
-        get_system_version, recover_credential, reset_failure_count, restart_system,
-        rollback_system_version, set_credential_disabled, set_credential_max_concurrent,
-        set_credential_priority, set_load_balancing_mode, set_prompt_cache_config,
-        stream_credentials, test_credential, update_system_version,
+        add_credential, batch_delete_credentials, batch_refresh_credentials,
+        batch_reset_credentials, batch_set_credential_disabled, batch_update_credentials,
+        bind_credential_proxy, check_system_version, create_proxy, delete_credential, delete_proxy,
+        force_refresh_token, get_admin_settings, get_all_credentials, get_credential_balance,
+        get_diagnostics_cli, get_diagnostics_requests, get_diagnostics_summary,
+        get_load_balancing_mode, get_prompt_cache_config, get_proxy_accounts, get_system_job,
+        get_system_version, list_proxies, recover_credential, reset_failure_count, restart_system,
+        rollback_system_version, set_admin_settings, set_credential_disabled,
+        set_credential_max_concurrent, set_credential_priority, set_load_balancing_mode,
+        set_prompt_cache_config, stream_credentials, test_credential, test_proxy, update_proxy,
+        update_system_version,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -49,6 +53,17 @@ pub fn create_admin_router(state: AdminState) -> Router {
             get(get_all_credentials).post(add_credential),
         )
         .route("/credentials/stream", get(stream_credentials))
+        .route("/credentials/batch", patch(batch_update_credentials))
+        .route(
+            "/credentials/batch/disabled",
+            post(batch_set_credential_disabled),
+        )
+        .route("/credentials/batch/reset", post(batch_reset_credentials))
+        .route(
+            "/credentials/batch/refresh",
+            post(batch_refresh_credentials),
+        )
+        .route("/credentials/batch/delete", post(batch_delete_credentials))
         .route("/credentials/{id}", delete(delete_credential))
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))
@@ -59,11 +74,17 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/recover", post(recover_credential))
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
+        .route("/credentials/{id}/proxy", put(bind_credential_proxy))
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/credentials/{id}/test", post(test_credential))
         .route("/diagnostics/summary", get(get_diagnostics_summary))
         .route("/diagnostics/requests", get(get_diagnostics_requests))
         .route("/diagnostics/cli", get(get_diagnostics_cli))
+        .route("/settings", get(get_admin_settings).put(set_admin_settings))
+        .route("/proxies", get(list_proxies).post(create_proxy))
+        .route("/proxies/{id}", put(update_proxy).delete(delete_proxy))
+        .route("/proxies/{id}/test", post(test_proxy))
+        .route("/proxies/{id}/accounts", get(get_proxy_accounts))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

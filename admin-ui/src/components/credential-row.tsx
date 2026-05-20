@@ -25,7 +25,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
-import { useDeleteCredential, useForceRefreshToken, useRecoverCredential, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
+import { useBatchUpdateCredentials, useDeleteCredential, useForceRefreshToken, useProxies, useRecoverCredential, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
 import { testCredential } from '@/api/credentials'
 import { cn } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent } from '@/types/api'
@@ -253,6 +253,8 @@ export function CredentialRow({
   const [showTestDialog, setShowTestDialog] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [maxConcurrentValue, setMaxConcurrentValue] = useState(String(credential.maxConcurrent))
+  const [proxyModeValue, setProxyModeValue] = useState(credential.proxyMode || (credential.hasProxy ? 'direct' : 'inherit'))
+  const [proxyIdValue, setProxyIdValue] = useState(credential.proxyId ? String(credential.proxyId) : '')
   const [testModel, setTestModel] = useState(modelOptionsFor(credential)[0]?.value ?? 'claude-sonnet-4.6')
   const [testPrompt, setTestPrompt] = useState('请回复一句简短的话，确认连接已可用。')
   const [testing, setTesting] = useState(false)
@@ -264,6 +266,8 @@ export function CredentialRow({
   const recoverCredential = useRecoverCredential()
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
+  const proxies = useProxies()
+  const updateCredential = useBatchUpdateCredentials()
 
   const status = statusMeta(credential)
   const rateLimit = limitMeta(credential.lastRateLimitKind)
@@ -278,7 +282,9 @@ export function CredentialRow({
   useEffect(() => {
     setPriorityValue(String(credential.priority))
     setMaxConcurrentValue(String(credential.maxConcurrent))
-  }, [credential.priority, credential.maxConcurrent])
+    setProxyModeValue(credential.proxyMode || (credential.hasProxy ? 'direct' : 'inherit'))
+    setProxyIdValue(credential.proxyId ? String(credential.proxyId) : '')
+  }, [credential.priority, credential.maxConcurrent, credential.proxyMode, credential.hasProxy, credential.proxyId])
 
   const infoItems = useMemo(() => {
     const items = [
@@ -311,6 +317,11 @@ export function CredentialRow({
         label: '接入类型',
         value: authMethod?.text ?? balanceLabel(credential),
         title: authMethod?.title ?? '仅用于辅助理解账号类型，不决定调度。',
+      },
+      {
+        label: '连接方式',
+        value: credential.proxyName || (credential.proxyMode === 'direct' ? '直连' : credential.hasProxy ? '独立代理' : '默认连接'),
+        title: '这个账号发起请求时会使用的连接方式。',
       },
       {
         label: '优先级',
@@ -368,6 +379,16 @@ export function CredentialRow({
           setShowSettingsDialog(false)
         },
         onError: (err) => toast.error(`并发上限更新失败: ${(err as Error).message}`),
+      },
+    )
+    updateCredential.mutate(
+      {
+        ids: [credential.id],
+        proxyMode: proxyModeValue,
+        proxyId: proxyModeValue === 'proxy' ? Number(proxyIdValue) : null,
+      },
+      {
+        onError: (err) => toast.error(`连接方式保存失败: ${(err as Error).message}`),
       },
     )
   }
@@ -581,6 +602,35 @@ export function CredentialRow({
               <p className="truncate text-xs text-muted-foreground">账号同时承接请求的最大数量。</p>
             </div>
           </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">连接方式</label>
+              <select
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={proxyModeValue}
+                onChange={(event) => setProxyModeValue(event.target.value)}
+              >
+                <option value="inherit">使用默认连接</option>
+                <option value="direct">直连</option>
+                <option value="proxy">选择代理</option>
+              </select>
+            </div>
+            {proxyModeValue === 'proxy' ? (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">代理</label>
+                <select
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={proxyIdValue}
+                  onChange={(event) => setProxyIdValue(event.target.value)}
+                >
+                  <option value="">请选择代理</option>
+                  {(proxies.data?.proxies ?? []).filter((item) => !item.disabled).map((item) => (
+                    <option key={item.id} value={item.id}>{item.name} · {item.host}:{item.port}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+          </div>
           <div className="grid gap-3 md:grid-cols-2">
             {infoItems.map((item) => (
               <div key={item.label} className="rounded-md border bg-muted/20 px-3 py-3">
@@ -591,7 +641,12 @@ export function CredentialRow({
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowSettingsDialog(false)}>取消</Button>
-            <Button onClick={handleSaveSettings} disabled={setPriority.isPending || setMaxConcurrent.isPending}>保存设置</Button>
+            <Button
+              onClick={handleSaveSettings}
+              disabled={setPriority.isPending || setMaxConcurrent.isPending || updateCredential.isPending || (proxyModeValue === 'proxy' && !proxyIdValue)}
+            >
+              保存设置
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
