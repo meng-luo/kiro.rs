@@ -739,7 +739,7 @@ async fn handle_non_stream_request(
     let output_tokens = token::estimate_output_tokens(&content);
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-    let final_input_tokens = context_input_tokens.unwrap_or(cache_result.uncached_input_tokens);
+    let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
     let diagnostic_cache_usage = normalize_cache_result(cache_result, final_input_tokens);
     provider.token_manager().update_diagnostic_tokens(
         &provider_response.request_id,

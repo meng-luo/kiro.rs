@@ -1227,20 +1227,13 @@ impl BufferedStreamContext {
             .unwrap_or(self.estimated_input_tokens);
 
         // 更正 message_start 事件中的 input_tokens
-        let cache_creation_input_tokens = if self.cache_result.cache_creation_input_tokens > 0
-            && self.cache_result.cache_read_input_tokens == 0
-        {
-            final_input_tokens.max(0)
-        } else {
-            self.cache_result.cache_creation_input_tokens
-        };
         for event in &mut self.event_buffer {
             if event.event == "message_start" {
                 if let Some(message) = event.data.get_mut("message") {
                     if let Some(usage) = message.get_mut("usage") {
                         usage["input_tokens"] = serde_json::json!(final_input_tokens);
                         usage["cache_creation_input_tokens"] =
-                            serde_json::json!(cache_creation_input_tokens);
+                            serde_json::json!(self.cache_result.cache_creation_input_tokens);
                         usage["cache_read_input_tokens"] =
                             serde_json::json!(self.cache_result.cache_read_input_tokens);
                     }
@@ -1271,9 +1264,6 @@ impl BufferedStreamContext {
 
 pub fn normalize_cache_result(cache_result: CacheResult, input_tokens: i32) -> CacheResult {
     let mut result = cache_result;
-    if result.cache_creation_input_tokens > 0 && result.cache_read_input_tokens == 0 {
-        result.cache_creation_input_tokens = input_tokens.max(0);
-    }
     let cached_tokens = result.cache_creation_input_tokens + result.cache_read_input_tokens;
     result.uncached_input_tokens = (input_tokens - cached_tokens).max(0);
     result
@@ -1525,6 +1515,48 @@ mod tests {
         assert!(estimate_tokens("Hello") > 0);
         assert!(estimate_tokens("你好") > 0);
         assert!(estimate_tokens("Hello 你好") > 0);
+    }
+
+    #[test]
+    fn normalize_cache_result_does_not_expand_creation_tokens() {
+        let cache_result = CacheResult {
+            cache_creation_input_tokens: 12,
+            cache_read_input_tokens: 0,
+            uncached_input_tokens: 0,
+        };
+
+        let normalized = normalize_cache_result(cache_result, 100);
+
+        assert_eq!(normalized.cache_creation_input_tokens, 12);
+        assert_eq!(normalized.cache_read_input_tokens, 0);
+        assert_eq!(normalized.uncached_input_tokens, 88);
+    }
+
+    #[test]
+    fn buffered_stream_keeps_cache_creation_tokens_when_fixing_message_start() {
+        let mut ctx = BufferedStreamContext::new(
+            "claude-sonnet-4-5".to_string(),
+            100,
+            false,
+            Default::default(),
+        );
+        ctx.set_cache_result(CacheResult {
+            cache_creation_input_tokens: 12,
+            cache_read_input_tokens: 0,
+            uncached_input_tokens: 88,
+        });
+
+        let events = ctx.finish_and_get_all_events();
+        let usage = events
+            .iter()
+            .find(|event| event.event == "message_start")
+            .and_then(|event| event.data.get("message"))
+            .and_then(|message| message.get("usage"))
+            .expect("message_start usage should exist");
+
+        assert_eq!(usage["input_tokens"], serde_json::json!(100));
+        assert_eq!(usage["cache_creation_input_tokens"], serde_json::json!(12));
+        assert_eq!(usage["cache_read_input_tokens"], serde_json::json!(0));
     }
 
     #[test]

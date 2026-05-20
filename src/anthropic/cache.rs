@@ -16,6 +16,7 @@ use crate::token;
 
 const DEFAULT_TTL_SECS: u64 = 5 * 60;
 const EXTENDED_TTL_SECS: u64 = 60 * 60;
+const CACHE_KEY_PREFIX: &str = "prompt-cache:v2";
 
 #[derive(Debug, Clone)]
 pub struct CacheBreakpoint {
@@ -191,6 +192,7 @@ fn parse_ttl(cache_control: &CacheControl) -> u64 {
 fn update_with_json(hasher: &mut Sha256, value: &serde_json::Value) {
     let normalized = normalize_json_value(value.clone());
     let json = serde_json::to_string(&normalized).unwrap_or_default();
+    hasher.update((json.len() as u64).to_be_bytes());
     hasher.update(json.as_bytes());
 }
 
@@ -223,8 +225,10 @@ pub fn compute_cache_breakpoints(
     let mut cumulative_tokens = 0;
 
     if let Some(tools) = tools {
-        for tool in tools {
-            let value = serde_json::to_value(tool).unwrap_or_default();
+        let mut stable_tools = tools.iter().collect::<Vec<_>>();
+        stable_tools.sort_by(|a, b| a.name.cmp(&b.name));
+        for tool in stable_tools {
+            let value = normalize_tool(tool);
             update_with_json(&mut hasher, &value);
             cumulative_tokens +=
                 token::count_tokens(&serde_json::to_string(&value).unwrap_or_default()) as i32;
@@ -240,7 +244,8 @@ pub fn compute_cache_breakpoints(
 
     if let Some(system) = system {
         for message in system {
-            hasher.update(message.text.as_bytes());
+            let value = normalize_system_message(message);
+            update_with_json(&mut hasher, &value);
             cumulative_tokens += token::count_tokens(&message.text) as i32;
             if let Some(cache_control) = &message.cache_control {
                 breakpoints.push(CacheBreakpoint {
@@ -253,50 +258,125 @@ pub fn compute_cache_breakpoints(
     }
 
     for message in messages {
-        let value = serde_json::to_value(message).unwrap_or_default();
-        update_with_json(&mut hasher, &value);
-        cumulative_tokens += count_message_tokens(message);
-
-        if let Some(cache_control) = message_cache_control(message) {
-            breakpoints.push(CacheBreakpoint {
-                hash: format!("{:x}", hasher.clone().finalize()),
-                tokens: cumulative_tokens,
-                ttl: parse_ttl(&cache_control),
-            });
-        }
+        append_message_breakpoints(
+            message,
+            &mut hasher,
+            &mut cumulative_tokens,
+            &mut breakpoints,
+        );
     }
 
     breakpoints
 }
 
-fn count_message_tokens(message: &Message) -> i32 {
-    let mut total = token::count_tokens(&message.role) as i32;
+fn normalize_tool(tool: &Tool) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+    });
+    if let Some(tool_type) = &tool.tool_type {
+        value["type"] = serde_json::json!(tool_type);
+    }
+    if let Some(max_uses) = tool.max_uses {
+        value["max_uses"] = serde_json::json!(max_uses);
+    }
+    value
+}
+
+fn normalize_system_message(message: &SystemMessage) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "system",
+        "text": message.text,
+    })
+}
+
+fn append_message_breakpoints(
+    message: &Message,
+    hasher: &mut Sha256,
+    cumulative_tokens: &mut i32,
+    breakpoints: &mut Vec<CacheBreakpoint>,
+) {
     match &message.content {
-        serde_json::Value::String(text) => total += token::count_tokens(text) as i32,
+        serde_json::Value::String(text) => {
+            let value = serde_json::json!({
+                "kind": "message",
+                "role": message.role,
+                "type": "text",
+                "text": text,
+            });
+            update_with_json(hasher, &value);
+            *cumulative_tokens +=
+                token::count_tokens(&message.role) as i32 + token::count_tokens(text) as i32;
+        }
         serde_json::Value::Array(blocks) => {
-            for block in blocks {
-                if let Some(text) = block.get("text").and_then(|value| value.as_str()) {
-                    total += token::count_tokens(text) as i32;
-                } else {
-                    total += token::count_tokens(&serde_json::to_string(block).unwrap_or_default())
-                        as i32;
+            for (block_index, block) in blocks.iter().enumerate() {
+                let cache_control = block_cache_control(block);
+                let mut normalized_block = block.clone();
+                strip_cache_control(&mut normalized_block);
+                let value = serde_json::json!({
+                    "kind": "message",
+                    "role": message.role,
+                    "block_index": block_index,
+                    "block": normalized_block,
+                });
+                update_with_json(hasher, &value);
+                *cumulative_tokens += count_message_block_tokens(block);
+                if let Some(cache_control) = cache_control {
+                    breakpoints.push(CacheBreakpoint {
+                        hash: format!("{:x}", hasher.clone().finalize()),
+                        tokens: *cumulative_tokens,
+                        ttl: parse_ttl(&cache_control),
+                    });
                 }
             }
         }
         other => {
-            total += token::count_tokens(&serde_json::to_string(other).unwrap_or_default()) as i32
+            let value = serde_json::json!({
+                "kind": "message",
+                "role": message.role,
+                "content": other,
+            });
+            update_with_json(hasher, &value);
+            *cumulative_tokens += token::count_tokens(&message.role) as i32
+                + token::count_tokens(&serde_json::to_string(other).unwrap_or_default()) as i32;
         }
     }
-    total
 }
 
-fn message_cache_control(message: &Message) -> Option<CacheControl> {
-    let blocks = message.content.as_array()?;
-    blocks
-        .iter()
-        .filter_map(|block| block.get("cache_control"))
-        .filter_map(|value| serde_json::from_value::<CacheControl>(value.clone()).ok())
-        .last()
+fn count_message_block_tokens(block: &serde_json::Value) -> i32 {
+    if let Some(text) = block.get("text").and_then(|value| value.as_str()) {
+        token::count_tokens(text) as i32
+    } else if let Some(thinking) = block.get("thinking").and_then(|value| value.as_str()) {
+        token::count_tokens(thinking) as i32
+    } else {
+        let mut normalized = block.clone();
+        strip_cache_control(&mut normalized);
+        token::count_tokens(&serde_json::to_string(&normalized).unwrap_or_default()) as i32
+    }
+}
+
+fn block_cache_control(block: &serde_json::Value) -> Option<CacheControl> {
+    block
+        .get("cache_control")
+        .and_then(|value| serde_json::from_value::<CacheControl>(value.clone()).ok())
+}
+
+fn strip_cache_control(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("cache_control");
+            for item in map.values_mut() {
+                strip_cache_control(item);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_cache_control(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn lookup_or_create_with_connection(
@@ -309,7 +389,7 @@ async fn lookup_or_create_with_connection(
     let namespace = hash_api_key(api_key);
 
     for (index, breakpoint) in breakpoints.iter().enumerate().rev() {
-        let key = format!("prompt-cache:{}:{}", namespace, breakpoint.hash);
+        let key = cache_key(&namespace, breakpoint);
         let cached: Option<i32> = match connection.get(&key).await {
             Ok(value) => value,
             Err(error) => {
@@ -323,13 +403,10 @@ async fn lookup_or_create_with_connection(
 
         if let Some(cached_tokens) = cached {
             result.cache_read_input_tokens = cached_tokens;
-            let _ = connection
-                .expire::<_, ()>(&key, breakpoint.ttl as i64)
-                .await;
 
             let mut previous_tokens = cached_tokens;
             for later in breakpoints.iter().skip(index + 1) {
-                let later_key = format!("prompt-cache:{}:{}", namespace, later.hash);
+                let later_key = cache_key(&namespace, later);
                 if let Err(error) = connection
                     .set_ex::<_, _, ()>(&later_key, later.tokens, later.ttl)
                     .await
@@ -346,7 +423,7 @@ async fn lookup_or_create_with_connection(
     if result.cache_read_input_tokens == 0 {
         let mut previous_tokens = 0;
         for breakpoint in breakpoints {
-            let key = format!("prompt-cache:{}:{}", namespace, breakpoint.hash);
+            let key = cache_key(&namespace, breakpoint);
             if let Err(error) = connection
                 .set_ex::<_, _, ()>(&key, breakpoint.tokens, breakpoint.ttl)
                 .await
@@ -361,6 +438,10 @@ async fn lookup_or_create_with_connection(
     let cached_tokens = result.cache_read_input_tokens + result.cache_creation_input_tokens;
     result.uncached_input_tokens = (total_input_tokens - cached_tokens).max(0);
     result
+}
+
+fn cache_key(namespace: &str, breakpoint: &CacheBreakpoint) -> String {
+    format!("{}:{}:{}", CACHE_KEY_PREFIX, namespace, breakpoint.hash)
 }
 
 fn hash_api_key(api_key: &str) -> String {
@@ -434,6 +515,113 @@ mod tests {
             compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
         assert_eq!(breakpoints.len(), 1);
         assert!(breakpoints[0].tokens > 0);
+    }
+
+    #[test]
+    fn dynamic_block_after_cache_control_does_not_change_breakpoint_hash() {
+        let mut request = test_request_with_cache_control();
+        let original =
+            compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
+
+        request.messages[0].content = serde_json::json!([
+            {
+                "type": "text",
+                "text": "hello",
+                "cache_control": { "type": "ephemeral" }
+            },
+            {
+                "type": "text",
+                "text": "dynamic suffix"
+            }
+        ]);
+        let with_suffix =
+            compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
+
+        assert_eq!(original.len(), 1);
+        assert_eq!(with_suffix.len(), 1);
+        assert_eq!(original[0].hash, with_suffix[0].hash);
+        assert_eq!(original[0].tokens, with_suffix[0].tokens);
+    }
+
+    #[test]
+    fn cache_control_itself_does_not_affect_hash() {
+        let mut request = test_request_with_cache_control();
+        let default_ttl =
+            compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
+
+        request.messages[0].content = serde_json::json!([
+            {
+                "cache_control": { "ttl": "1h", "type": "ephemeral" },
+                "text": "hello",
+                "type": "text"
+            }
+        ]);
+        let one_hour =
+            compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
+
+        assert_eq!(default_ttl[0].hash, one_hour[0].hash);
+        assert_ne!(default_ttl[0].ttl, one_hour[0].ttl);
+    }
+
+    #[test]
+    fn json_object_key_order_does_not_affect_hash() {
+        let mut request_a = test_request_with_cache_control();
+        request_a.messages[0].content = serde_json::json!([
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{ "type": "text", "text": "done" }],
+                "cache_control": { "type": "ephemeral" }
+            }
+        ]);
+
+        let mut request_b = test_request_with_cache_control();
+        request_b.messages[0].content = serde_json::json!([
+            {
+                "cache_control": { "type": "ephemeral" },
+                "content": [{ "text": "done", "type": "text" }],
+                "tool_use_id": "toolu_1",
+                "type": "tool_result"
+            }
+        ]);
+
+        let breakpoints_a =
+            compute_cache_breakpoints(&request_a.tools, &request_a.system, &request_a.messages);
+        let breakpoints_b =
+            compute_cache_breakpoints(&request_b.tools, &request_b.system, &request_b.messages);
+
+        assert_eq!(breakpoints_a[0].hash, breakpoints_b[0].hash);
+    }
+
+    #[test]
+    fn tool_order_does_not_affect_hash() {
+        let tool_a = Tool {
+            tool_type: None,
+            name: "a".to_string(),
+            description: "first".to_string(),
+            input_schema: Default::default(),
+            max_uses: None,
+            cache_control: None,
+        };
+        let tool_b = Tool {
+            tool_type: None,
+            name: "b".to_string(),
+            description: "second".to_string(),
+            input_schema: Default::default(),
+            max_uses: None,
+            cache_control: Some(CacheControl {
+                cache_type: "ephemeral".to_string(),
+                ttl: None,
+            }),
+        };
+        let tools_ab = Some(vec![tool_a.clone(), tool_b.clone()]);
+        let tools_ba = Some(vec![tool_b, tool_a]);
+
+        let breakpoints_ab = compute_cache_breakpoints(&tools_ab, &None, &[]);
+        let breakpoints_ba = compute_cache_breakpoints(&tools_ba, &None, &[]);
+
+        assert_eq!(breakpoints_ab[0].hash, breakpoints_ba[0].hash);
+        assert_eq!(breakpoints_ab[0].tokens, breakpoints_ba[0].tokens);
     }
 
     #[test]
