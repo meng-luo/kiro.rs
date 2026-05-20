@@ -115,6 +115,7 @@ pub struct AdminService {
     http_client: Client,
     prompt_cache: Arc<PromptCacheManager>,
     proxy_store: ProxyStore,
+    admin_theme: Mutex<String>,
 }
 
 impl AdminService {
@@ -152,6 +153,7 @@ impl AdminService {
                 tracing::warn!("构建版本治理 HTTP 客户端失败，回退到默认客户端: {}", e);
                 Client::builder().build().expect("创建默认 HTTP 客户端失败")
             });
+        let admin_theme = Self::normalize_admin_theme(&token_manager.config().admin_ui.theme);
         let mut system_jobs = HashMap::new();
         if let Some(job) = persisted_latest_job {
             system_jobs.insert(job.job_id.clone(), job);
@@ -170,6 +172,7 @@ impl AdminService {
             http_client,
             prompt_cache,
             proxy_store: ProxyStore::new(proxy_path),
+            admin_theme: Mutex::new(admin_theme),
         }
     }
 
@@ -1262,8 +1265,12 @@ impl AdminService {
     }
 
     fn current_admin_theme(&self) -> String {
-        match self.token_manager.config().admin_ui.theme.as_str() {
-            "light" | "dark" | "system" => self.token_manager.config().admin_ui.theme.clone(),
+        self.admin_theme.lock().clone()
+    }
+
+    fn normalize_admin_theme(theme: &str) -> String {
+        match theme {
+            "light" | "dark" | "system" => theme.to_string(),
             _ => "system".to_string(),
         }
     }
@@ -1283,11 +1290,12 @@ impl AdminService {
         let mut config = Config::load(&config_path)
             .with_context(|| format!("重新加载配置失败: {}", config_path.display()))
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        config.admin_ui.theme = theme;
+        config.admin_ui.theme = theme.clone();
         config
             .save()
             .with_context(|| format!("保存主题设置失败: {}", config_path.display()))
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        *self.admin_theme.lock() = theme;
         Ok(())
     }
 

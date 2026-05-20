@@ -69,6 +69,10 @@ export function AppLayout({ onLogout }: AppLayoutProps) {
     setAdminSettings.mutate(
       { theme: next },
       {
+        onSuccess: (response) => {
+          storage.setTheme(response.theme)
+          applyTheme(response.theme)
+        },
         onError: (error) => toast.error(`保存失败: ${extractErrorMessage(error)}`),
       },
     )
