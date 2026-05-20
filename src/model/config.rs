@@ -195,6 +195,11 @@ pub struct Config {
     #[serde(default)]
     pub admin_api_key: Option<String>,
 
+    /// Redis 连接 URL（可选，启用 Prompt Cache 展示）
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redis_url: Option<String>,
+
     /// 负载均衡模式（"priority" 或 "balanced"）
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
@@ -376,6 +381,7 @@ impl Default for Config {
             proxy_username: None,
             proxy_password: None,
             admin_api_key: None,
+            redis_url: None,
             load_balancing_mode: default_load_balancing_mode(),
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),

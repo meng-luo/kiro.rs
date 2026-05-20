@@ -224,6 +224,24 @@ pub struct SystemRollbackRequest {
     pub backup_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCacheConfigResponse {
+    pub configured: bool,
+    pub connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redis_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCacheConfigRequest {
+    #[serde(default)]
+    pub redis_url: Option<String>,
+}
+
 /// 添加凭据请求
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

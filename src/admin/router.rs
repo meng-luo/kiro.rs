@@ -8,12 +8,12 @@ use axum::{
 use super::{
     handlers::{
         add_credential, check_system_version, delete_credential, force_refresh_token,
-        get_all_credentials, get_credential_balance, get_diagnostics_cli,
-        get_diagnostics_requests, get_diagnostics_summary, get_load_balancing_mode,
-        get_system_job, get_system_version, recover_credential, reset_failure_count,
-        restart_system, rollback_system_version, set_credential_disabled, stream_credentials,
-        set_credential_max_concurrent, set_credential_priority, set_load_balancing_mode,
-        test_credential, update_system_version,
+        get_all_credentials, get_credential_balance, get_diagnostics_cli, get_diagnostics_requests,
+        get_diagnostics_summary, get_load_balancing_mode, get_prompt_cache_config, get_system_job,
+        get_system_version, recover_credential, reset_failure_count, restart_system,
+        rollback_system_version, set_credential_disabled, set_credential_max_concurrent,
+        set_credential_priority, set_load_balancing_mode, set_prompt_cache_config,
+        stream_credentials, test_credential, update_system_version,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -52,7 +52,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}", delete(delete_credential))
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))
-        .route("/credentials/{id}/max-concurrent", post(set_credential_max_concurrent))
+        .route(
+            "/credentials/{id}/max-concurrent",
+            post(set_credential_max_concurrent),
+        )
         .route("/credentials/{id}/recover", post(recover_credential))
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
@@ -64,6 +67,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),
+        )
+        .route(
+            "/config/prompt-cache",
+            get(get_prompt_cache_config).put(set_prompt_cache_config),
         )
         .route("/system/version", get(get_system_version))
         .route("/system/version/check", post(check_system_version))

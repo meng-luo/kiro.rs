@@ -10,6 +10,7 @@ use axum::{
 use crate::kiro::provider::KiroProvider;
 
 use super::{
+    cache::PromptCacheManager,
     handlers::{count_tokens, get_models, health, post_messages, post_messages_cc},
     middleware::{AppState, auth_middleware, cors_layer},
 };
@@ -38,8 +39,9 @@ pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<std::sync::Arc<KiroProvider>>,
     extract_thinking: bool,
+    prompt_cache: std::sync::Arc<PromptCacheManager>,
 ) -> Router {
-    let mut state = AppState::new(api_key, extract_thinking);
+    let mut state = AppState::new(api_key, extract_thinking, prompt_cache);
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
     }

@@ -2,16 +2,16 @@
 
 use std::convert::Infallible;
 
-use anyhow::Error;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::token;
+use anyhow::Error;
 use axum::{
     Json as JsonExtractor,
     body::Body,
     extract::State,
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
@@ -24,7 +24,10 @@ use uuid::Uuid;
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
-use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
+use super::types::{
+    CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse,
+    OutputConfig, Thinking,
+};
 use super::websearch;
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
@@ -40,6 +43,20 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "available": snapshot.as_ref().map(|item| item.available).unwrap_or(0),
         "checkedAt": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+fn request_api_key(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(|value| value.to_string())
+        })
 }
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
@@ -210,6 +227,7 @@ pub async fn get_models() -> impl IntoResponse {
 /// 创建消息（对话）
 pub async fn post_messages(
     State(state): State<AppState>,
+    headers: HeaderMap,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
@@ -237,6 +255,8 @@ pub async fn post_messages(
 
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
+    let cache_request = payload.clone();
+    let api_key = request_api_key(&headers).unwrap_or_else(|| state.api_key.clone());
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
@@ -304,6 +324,10 @@ pub async fn post_messages(
         payload.messages,
         payload.tools,
     ) as i32;
+    let cache_result = state
+        .prompt_cache
+        .lookup_or_create(&api_key, &cache_request, input_tokens)
+        .await;
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -323,12 +347,22 @@ pub async fn post_messages(
             input_tokens,
             thinking_enabled,
             tool_name_map,
+            cache_result,
         )
         .await
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            tool_name_map,
+            cache_result,
+        )
+        .await
     }
 }
 
@@ -340,6 +374,7 @@ async fn handle_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    cache_result: super::cache::CacheResult,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let provider_response = match provider
@@ -351,7 +386,9 @@ async fn handle_stream_request(
     };
 
     // 创建流处理上下文
-    let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
+    let mut ctx =
+        StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
+    ctx.set_cache_result(cache_result);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -378,7 +415,7 @@ fn create_ping_sse() -> Bytes {
 }
 
 /// 创建 SSE 事件流
-    fn create_sse_stream(
+fn create_sse_stream(
     provider_response: crate::kiro::provider::ProviderResponse,
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     ctx: StreamContext,
@@ -456,11 +493,12 @@ fn create_ping_sse() -> Bytes {
                         }
                         None => {
                             // 流结束，发送最终事件
+                            let final_input_tokens = ctx.context_input_tokens.unwrap_or(ctx.input_tokens);
                             provider.token_manager().release_slot(&mut lease);
                             let final_events = ctx.generate_final_events();
                             provider.token_manager().update_diagnostic_tokens(
                                 &request_id,
-                                Some(ctx.context_input_tokens.unwrap_or(ctx.input_tokens)),
+                                Some(final_input_tokens),
                                 Some(ctx.output_tokens),
                             );
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
@@ -495,6 +533,7 @@ async fn handle_non_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    cache_result: super::cache::CacheResult,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let provider_response = match provider
@@ -563,14 +602,14 @@ async fn handle_non_stream_request(
                                 let input: serde_json::Value = if buffer.is_empty() {
                                     serde_json::json!({})
                                 } else {
-                                    serde_json::from_str(buffer)
-                                        .unwrap_or_else(|e| {
-                                            tracing::warn!(
-                                                "工具输入 JSON 解析失败: {}, tool_use_id: {}",
-                                                e, tool_use.tool_use_id
-                                            );
-                                            serde_json::json!({})
-                                        })
+                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
+                                        tracing::warn!(
+                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}",
+                                            e,
+                                            tool_use.tool_use_id
+                                        );
+                                        serde_json::json!({})
+                                    })
                                 };
 
                                 let original_name = tool_name_map
@@ -589,10 +628,9 @@ async fn handle_non_stream_request(
                         Event::ContextUsage(context_usage) => {
                             // 从上下文使用百分比计算实际的 input_tokens
                             let window_size = get_context_window_size(model);
-                            let actual_input_tokens = (context_usage.context_usage_percentage
-                                * (window_size as f64)
-                                / 100.0)
-                                as i32;
+                            let actual_input_tokens =
+                                (context_usage.context_usage_percentage * (window_size as f64)
+                                    / 100.0) as i32;
                             context_input_tokens = Some(actual_input_tokens);
                             // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
                             if context_usage.context_usage_percentage >= 100.0 {
@@ -658,7 +696,7 @@ async fn handle_non_stream_request(
     let output_tokens = token::estimate_output_tokens(&content);
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-    let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+    let final_input_tokens = context_input_tokens.unwrap_or(cache_result.uncached_input_tokens);
     provider.token_manager().update_diagnostic_tokens(
         &provider_response.request_id,
         Some(final_input_tokens),
@@ -676,7 +714,9 @@ async fn handle_non_stream_request(
         "stop_sequence": null,
         "usage": {
             "input_tokens": final_input_tokens,
-            "output_tokens": output_tokens
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_result.cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_result.cache_read_input_tokens
         }
     });
 
@@ -694,14 +734,10 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_opus_4_6 =
-        model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_opus_4_6 = model_lower.contains("opus")
+        && (model_lower.contains("4-6") || model_lower.contains("4.6"));
 
-    let thinking_type = if is_opus_4_6 {
-        "adaptive"
-    } else {
-        "enabled"
-    };
+    let thinking_type = if is_opus_4_6 { "adaptive" } else { "enabled" };
 
     tracing::info!(
         model = %payload.model,
@@ -713,7 +749,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         thinking_type: thinking_type.to_string(),
         budget_tokens: 20000,
     });
-    
+
     if is_opus_4_6 {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
@@ -752,6 +788,7 @@ pub async fn count_tokens(
 /// - message_start 中的 input_tokens 是从 contextUsageEvent 计算的准确值
 pub async fn post_messages_cc(
     State(state): State<AppState>,
+    headers: HeaderMap,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
@@ -780,6 +817,8 @@ pub async fn post_messages_cc(
 
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
+    let cache_request = payload.clone();
+    let api_key = request_api_key(&headers).unwrap_or_else(|| state.api_key.clone());
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
@@ -847,6 +886,10 @@ pub async fn post_messages_cc(
         payload.messages,
         payload.tools,
     ) as i32;
+    let cache_result = state
+        .prompt_cache
+        .lookup_or_create(&api_key, &cache_request, input_tokens)
+        .await;
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -866,12 +909,22 @@ pub async fn post_messages_cc(
             input_tokens,
             thinking_enabled,
             tool_name_map,
+            cache_result,
         )
         .await
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            tool_name_map,
+            cache_result,
+        )
+        .await
     }
 }
 
@@ -886,6 +939,7 @@ async fn handle_stream_request_buffered(
     estimated_input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    cache_result: super::cache::CacheResult,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let provider_response = match provider
@@ -897,7 +951,13 @@ async fn handle_stream_request_buffered(
     };
 
     // 创建缓冲流处理上下文
-    let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map);
+    let mut ctx = BufferedStreamContext::new(
+        model,
+        estimated_input_tokens,
+        thinking_enabled,
+        tool_name_map,
+    );
+    ctx.set_cache_result(cache_result);
 
     // 创建缓冲 SSE 流
     let stream = create_buffered_sse_stream(provider_response, provider, ctx);

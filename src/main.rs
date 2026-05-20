@@ -111,10 +111,7 @@ async fn main() {
 
     // 校验所有凭据声明的端点都已注册
     for cred in &credentials_list {
-        let name = cred
-            .endpoint
-            .as_deref()
-            .unwrap_or(&config.default_endpoint);
+        let name = cred.endpoint.as_deref().unwrap_or(&config.default_endpoint);
         if !endpoints.contains_key(name) {
             tracing::error!(
                 "凭据 id={:?} 指定了未知端点 \"{}\"（已注册: {:?}）",
@@ -157,6 +154,9 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
+    let prompt_cache =
+        anthropic::cache::PromptCacheManager::from_optional_url(config.redis_url.as_deref()).await;
+
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
     let kiro_provider = Arc::new(kiro_provider);
     let provider_for_admin = kiro_provider.clone();
@@ -164,6 +164,7 @@ async fn main() {
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
+        prompt_cache.clone(),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -183,6 +184,7 @@ async fn main() {
                 token_manager.clone(),
                 provider_for_admin.clone(),
                 endpoint_names.clone(),
+                prompt_cache.clone(),
             ));
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);

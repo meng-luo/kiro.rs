@@ -3,7 +3,10 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    response::{IntoResponse, sse::{Event, Sse}},
+    response::{
+        IntoResponse,
+        sse::{Event, Sse},
+    },
 };
 use futures::{StreamExt, stream};
 use tokio::time::{Duration, interval};
@@ -11,9 +14,10 @@ use tokio::time::{Duration, interval};
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, CredentialTestRequest, DiagnosticsQueryRequest, SetDisabledRequest,
-        SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
-        SystemRollbackRequest, SystemUpdateRequest,
+        AddCredentialRequest, CredentialTestRequest, DiagnosticsQueryRequest,
+        PromptCacheConfigRequest, SetDisabledRequest, SetLoadBalancingModeRequest,
+        SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse, SystemRollbackRequest,
+        SystemUpdateRequest,
     },
 };
 
@@ -50,7 +54,7 @@ pub async fn stream_credentials(State(state): State<AdminState>) -> impl IntoRes
                 last_payload = payload.clone();
                 Some((
                     Ok::<Event, std::convert::Infallible>(
-                        Event::default().event("credentials").data(payload)
+                        Event::default().event("credentials").data(payload),
                     ),
                     (state, ticker, last_payload, false),
                 ))
@@ -149,11 +153,7 @@ pub async fn recover_credential(
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
     match state.service.recover_credential(id) {
-        Ok(_) => Json(SuccessResponse::new(format!(
-            "凭据 #{} 本地阻塞已清理",
-            id
-        )))
-        .into_response(),
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 本地阻塞已清理", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
@@ -239,7 +239,7 @@ pub async fn test_credential(
         Ok(events) => {
             let stream = events.map(|item| match item {
                 Ok(payload) => Ok::<Event, std::convert::Infallible>(
-                    Event::default().data(payload.to_string())
+                    Event::default().data(payload.to_string()),
                 ),
                 Err(err) => Ok(Event::default().data(
                     serde_json::json!({
@@ -270,6 +270,22 @@ pub async fn set_load_balancing_mode(
     Json(payload): Json<SetLoadBalancingModeRequest>,
 ) -> impl IntoResponse {
     match state.service.set_load_balancing_mode(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/config/prompt-cache
+pub async fn get_prompt_cache_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_prompt_cache_config())
+}
+
+/// PUT /api/admin/config/prompt-cache
+pub async fn set_prompt_cache_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<PromptCacheConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.set_prompt_cache_config(payload).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

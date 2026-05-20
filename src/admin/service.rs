@@ -18,7 +18,11 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
+use crate::anthropic::cache::PromptCacheManager;
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::diagnostics::{
+    DiagnosticsQuery, DiagnosticsRequestsResponse, DiagnosticsSummaryResponse,
+};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::conversation::{
@@ -28,18 +32,15 @@ use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::{AcquireOptions, MultiTokenManager};
-use crate::kiro::diagnostics::{
-    DiagnosticsQuery, DiagnosticsRequestsResponse, DiagnosticsSummaryResponse,
-};
 use crate::model::config::Config;
 
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
     CredentialTestRequest, CredentialsStatusResponse, DiagnosticsCliResponse,
-    DiagnosticsQueryRequest, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
-    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest,
-    SystemUpdateRequest, SystemVersionResponse,
+    DiagnosticsQueryRequest, LoadBalancingModeResponse, PromptCacheConfigRequest,
+    PromptCacheConfigResponse, SetLoadBalancingModeRequest, SetMaxConcurrentRequest,
+    SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -103,6 +104,7 @@ pub struct AdminService {
     version_state: Mutex<CachedVersionState>,
     system_jobs: Mutex<HashMap<String, SystemOperationJobResponse>>,
     http_client: Client,
+    prompt_cache: Arc<PromptCacheManager>,
 }
 
 impl AdminService {
@@ -110,6 +112,7 @@ impl AdminService {
         token_manager: Arc<MultiTokenManager>,
         provider: Arc<KiroProvider>,
         known_endpoints: impl IntoIterator<Item = String>,
+        prompt_cache: Arc<PromptCacheManager>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -151,6 +154,7 @@ impl AdminService {
             version_state: Mutex::new(initial_version_state),
             system_jobs: Mutex::new(system_jobs),
             http_client,
+            prompt_cache,
         }
     }
 
@@ -234,7 +238,11 @@ impl AdminService {
         Self::push_query_part(
             &mut parts,
             "credentialId",
-            query.credential_id.as_ref().map(|v| v.to_string()).as_deref(),
+            query
+                .credential_id
+                .as_ref()
+                .map(|v| v.to_string())
+                .as_deref(),
         );
         Self::push_query_part(&mut parts, "model", query.model.as_deref());
         Self::push_query_part(
@@ -242,7 +250,11 @@ impl AdminService {
             "success",
             query.success.as_ref().map(|v| v.to_string()).as_deref(),
         );
-        Self::push_query_part(&mut parts, "rateLimitKind", query.rate_limit_kind.as_deref());
+        Self::push_query_part(
+            &mut parts,
+            "rateLimitKind",
+            query.rate_limit_kind.as_deref(),
+        );
         Self::push_query_part(&mut parts, "dispatchPath", query.dispatch_path.as_deref());
         Self::push_query_part(
             &mut parts,
@@ -265,12 +277,20 @@ impl AdminService {
 
     fn build_diagnostics_query(query: DiagnosticsQueryRequest) -> DiagnosticsQuery {
         DiagnosticsQuery {
-            since: query.since.as_deref().and_then(Self::parse_diagnostics_time),
-            until: query.until.as_deref().and_then(Self::parse_diagnostics_time),
+            since: query
+                .since
+                .as_deref()
+                .and_then(Self::parse_diagnostics_time),
+            until: query
+                .until
+                .as_deref()
+                .and_then(Self::parse_diagnostics_time),
             credential_id: query.credential_id,
             model: query.model.filter(|value| !value.trim().is_empty()),
             success: query.success,
-            rate_limit_kind: query.rate_limit_kind.filter(|value| !value.trim().is_empty()),
+            rate_limit_kind: query
+                .rate_limit_kind
+                .filter(|value| !value.trim().is_empty()),
             dispatch_path: query.dispatch_path.filter(|value| !value.trim().is_empty()),
             limit: query.limit,
             cursor: query.cursor,
@@ -279,10 +299,16 @@ impl AdminService {
 
     fn parse_diagnostics_time(value: &str) -> Option<DateTime<Utc>> {
         let trimmed = value.trim();
-        if let Some(hours) = trimmed.strip_suffix('h').and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(hours) = trimmed
+            .strip_suffix('h')
+            .and_then(|v| v.parse::<i64>().ok())
+        {
             return Some(Utc::now() - ChronoDuration::hours(hours.max(1)));
         }
-        if let Some(minutes) = trimmed.strip_suffix('m').and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(minutes) = trimmed
+            .strip_suffix('m')
+            .and_then(|v| v.parse::<i64>().ok())
+        {
             return Some(Utc::now() - ChronoDuration::minutes(minutes.max(1)));
         }
         DateTime::parse_from_rfc3339(trimmed)
@@ -495,6 +521,49 @@ impl AdminService {
         }
     }
 
+    pub fn get_prompt_cache_config(&self) -> PromptCacheConfigResponse {
+        let status = self.prompt_cache.status();
+        PromptCacheConfigResponse {
+            configured: status.configured,
+            connected: status.connected,
+            redis_url: status.redis_url,
+            last_error: status.last_error,
+        }
+    }
+
+    pub async fn set_prompt_cache_config(
+        &self,
+        req: PromptCacheConfigRequest,
+    ) -> Result<PromptCacheConfigResponse, AdminServiceError> {
+        let previous_url = self.prompt_cache.raw_redis_url();
+        let requested_url = req
+            .redis_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let status = self
+            .prompt_cache
+            .apply_redis_url(requested_url.clone())
+            .await
+            .map_err(|e| AdminServiceError::InvalidCredential(format!("Redis 连接失败: {}", e)))?;
+
+        if let Err(error) = self.persist_prompt_cache_url(requested_url.clone()) {
+            if let Err(rollback_error) = self.prompt_cache.apply_redis_url(previous_url).await {
+                tracing::warn!("回滚 Redis 连接失败: {}", rollback_error);
+            }
+            return Err(AdminServiceError::InternalError(error.to_string()));
+        }
+
+        Ok(PromptCacheConfigResponse {
+            configured: status.configured,
+            connected: status.connected,
+            redis_url: status.redis_url,
+            last_error: status.last_error,
+        })
+    }
+
     /// 获取系统版本信息
     pub fn get_system_version(&self) -> SystemVersionResponse {
         let latest_job = self.latest_job();
@@ -668,6 +737,25 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
 
         Ok(LoadBalancingModeResponse { mode: req.mode })
+    }
+
+    fn persist_prompt_cache_url(&self, redis_url: Option<String>) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        let config_path = self
+            .token_manager
+            .config()
+            .config_path()
+            .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存 Redis 设置"))?
+            .to_path_buf();
+
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))?;
+        config.redis_url = redis_url;
+        config
+            .save()
+            .with_context(|| format!("保存 Redis 设置失败: {}", config_path.display()))?;
+        Ok(())
     }
 
     /// 强制刷新指定凭据的 Token
