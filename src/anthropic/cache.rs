@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use super::types::{CacheControl, Message, MessagesRequest, SystemMessage, Tool};
 use crate::token;
 
-const DEFAULT_TTL_SECS: u64 = 5 * 60;
-const EXTENDED_TTL_SECS: u64 = 60 * 60;
+const SHORT_TTL_SECS: u64 = 5 * 60;
+const DEFAULT_TTL_SECS: u64 = 60 * 60;
 const CACHE_KEY_PREFIX: &str = "prompt-cache:v2";
 
 #[derive(Debug, Clone)]
@@ -184,7 +184,7 @@ fn normalize_redis_url(value: &str) -> Option<String> {
 
 fn parse_ttl(cache_control: &CacheControl) -> u64 {
     match cache_control.ttl.as_deref() {
-        Some("1h") => EXTENDED_TTL_SECS,
+        Some("5m") => SHORT_TTL_SECS,
         _ => DEFAULT_TTL_SECS,
     }
 }
@@ -560,7 +560,25 @@ mod tests {
             compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
 
         assert_eq!(default_ttl[0].hash, one_hour[0].hash);
-        assert_ne!(default_ttl[0].ttl, one_hour[0].ttl);
+        assert_eq!(default_ttl[0].ttl, one_hour[0].ttl);
+        assert_eq!(default_ttl[0].ttl, 60 * 60);
+    }
+
+    #[test]
+    fn explicit_five_minute_ttl_is_respected() {
+        let mut request = test_request_with_cache_control();
+        request.messages[0].content = serde_json::json!([
+            {
+                "cache_control": { "ttl": "5m", "type": "ephemeral" },
+                "text": "hello",
+                "type": "text"
+            }
+        ]);
+
+        let breakpoints =
+            compute_cache_breakpoints(&request.tools, &request.system, &request.messages);
+
+        assert_eq!(breakpoints[0].ttl, 5 * 60);
     }
 
     #[test]
