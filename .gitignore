@@ -14,3 +14,12 @@
 /kiro_stats.json
 .ace-tool/
 /.env.local
+.DS_Store
+
+# 本地调研和原型产物
+/docs/admin-prototype.html
+/docs/frontend-scheduler-prototype.html
+/docs/runtime-log-analysis.html
+/docs/scheduler-minimal-design.html
+/tools/analyze_kiro_logs.py
+/tools/analyze_kiro_recovery_windows.py
