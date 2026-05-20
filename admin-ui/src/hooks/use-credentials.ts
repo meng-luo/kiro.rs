@@ -1,6 +1,8 @@
+import { useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getCredentials,
+  streamCredentials,
   setCredentialDisabled,
   setCredentialMaxConcurrent,
   setCredentialPriority,
@@ -10,6 +12,9 @@ import {
   getCredentialBalance,
   addCredential,
   deleteCredential,
+  getDiagnosticsCli,
+  getDiagnosticsRequests,
+  getDiagnosticsSummary,
   getLoadBalancingMode,
   setLoadBalancingMode,
   getSystemVersion,
@@ -19,14 +24,73 @@ import {
   restartSystem,
   getSystemJob,
 } from '@/api/credentials'
-import type { AddCredentialRequest, SystemRollbackRequest, SystemUpdateRequest } from '@/types/api'
+import type { AddCredentialRequest, DiagnosticsFilters, SystemRollbackRequest, SystemUpdateRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
-    refetchInterval: 30000, // 每 30 秒刷新一次
+    refetchInterval: 60000, // SSE 断线时兜底刷新
+  })
+}
+
+export function useCredentialsStream(enabled = true) {
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    if (!enabled) return
+
+    let stopped = false
+    let retryTimer: number | undefined
+    let retryCount = 0
+    let controller: AbortController | null = null
+
+    const connect = () => {
+      if (stopped) return
+      controller = new AbortController()
+      streamCredentials((data) => {
+        retryCount = 0
+        queryClient.setQueryData(['credentials'], data)
+      }, controller.signal).catch((error) => {
+        if (stopped || controller?.signal.aborted) return
+        console.warn('账号列表推送已断开，准备重连:', error)
+        const delay = Math.min(30000, 1000 * 2 ** retryCount)
+        retryCount += 1
+        retryTimer = window.setTimeout(connect, delay)
+      })
+    }
+
+    connect()
+
+    return () => {
+      stopped = true
+      controller?.abort()
+      if (retryTimer) window.clearTimeout(retryTimer)
+    }
+  }, [enabled, queryClient])
+}
+
+export function useDiagnosticsSummary(filters: DiagnosticsFilters) {
+  return useQuery({
+    queryKey: ['diagnostics-summary', filters],
+    queryFn: () => getDiagnosticsSummary(filters),
+    refetchInterval: 30000,
+  })
+}
+
+export function useDiagnosticsRequests(filters: DiagnosticsFilters) {
+  return useQuery({
+    queryKey: ['diagnostics-requests', filters],
+    queryFn: () => getDiagnosticsRequests(filters),
+    refetchInterval: 30000,
+  })
+}
+
+export function useDiagnosticsCli(filters: DiagnosticsFilters) {
+  return useQuery({
+    queryKey: ['diagnostics-cli', filters],
+    queryFn: () => getDiagnosticsCli(filters),
   })
 }
 

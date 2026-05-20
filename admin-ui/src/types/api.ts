@@ -52,6 +52,7 @@ export interface CredentialStatusItem {
   refreshTokenHash?: string
   apiKeyHash?: string
   maskedApiKey?: string
+  subscriptionTitle?: string | null
   successCount: number
   lastUsedAt: string | null
   hasProxy: boolean
@@ -82,6 +83,70 @@ export interface BalanceResponse {
   remaining: number
   usagePercentage: number
   nextResetAt: number | null
+}
+
+export interface DiagnosticsBucket {
+  key: string
+  count: number
+}
+
+export interface DiagnosticsSummaryResponse {
+  totalRequests: number
+  successRequests: number
+  failedRequests: number
+  rateLimitedRequests: number
+  suspiciousRequests: number
+  averageDurationMs: number
+  inputTokens: number
+  outputTokens: number
+  modelRank: DiagnosticsBucket[]
+  credentialRank: DiagnosticsBucket[]
+  errorRank: DiagnosticsBucket[]
+}
+
+export interface RequestDiagnosticEntry {
+  requestId: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  originalModel?: string | null
+  mappedModel?: string | null
+  credentialId?: number | null
+  dispatchPath?: 'preferred' | 'sticky' | 'balanced' | 'soft_fallback' | string | null
+  stickyHit: boolean
+  stickyDetached: boolean
+  sessionHash?: string | null
+  success: boolean
+  upstreamStatus?: number | null
+  upstreamErrorCode?: string | null
+  upstreamMessageShort?: string | null
+  rateLimitKind?: 'normal_429' | 'suspicious_activity' | 'refresh_429' | string | null
+  cooldownMs?: number | null
+  cooldownUntil?: string | null
+  inputTokens?: number | null
+  outputTokens?: number | null
+}
+
+export interface DiagnosticsRequestsResponse {
+  items: RequestDiagnosticEntry[]
+  nextCursor?: number | null
+  total: number
+}
+
+export interface DiagnosticsFilters {
+  since?: string
+  until?: string
+  credentialId?: number
+  model?: string
+  success?: boolean
+  rateLimitKind?: string
+  dispatchPath?: string
+  limit?: number
+  cursor?: number
+}
+
+export interface DiagnosticsCliResponse {
+  command: string
 }
 
 // 成功响应

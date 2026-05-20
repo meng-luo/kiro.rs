@@ -74,6 +74,57 @@ impl Default for TlsBackend {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsConfig {
+    #[serde(default = "default_diagnostics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_diagnostics_max_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_diagnostics_retention_hours")]
+    pub retention_hours: i64,
+    #[serde(default = "default_diagnostics_persist")]
+    pub persist: bool,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_diagnostics_enabled(),
+            max_entries: default_diagnostics_max_entries(),
+            retention_hours: default_diagnostics_retention_hours(),
+            persist: default_diagnostics_persist(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitCooldownConfig {
+    #[serde(default = "default_normal_429_cooldown_seconds")]
+    pub normal_429_seconds: i64,
+    #[serde(default = "default_suspicious_first_cooldown_seconds")]
+    pub suspicious_first_seconds: i64,
+    #[serde(default = "default_suspicious_repeated_cooldown_seconds")]
+    pub suspicious_repeated_seconds: i64,
+    #[serde(default = "default_suspicious_repeat_window_seconds")]
+    pub suspicious_repeat_window_seconds: i64,
+    #[serde(default = "default_refresh_429_cooldown_seconds")]
+    pub refresh_429_seconds: i64,
+}
+
+impl Default for RateLimitCooldownConfig {
+    fn default() -> Self {
+        Self {
+            normal_429_seconds: default_normal_429_cooldown_seconds(),
+            suspicious_first_seconds: default_suspicious_first_cooldown_seconds(),
+            suspicious_repeated_seconds: default_suspicious_repeated_cooldown_seconds(),
+            suspicious_repeat_window_seconds: default_suspicious_repeat_window_seconds(),
+            refresh_429_seconds: default_refresh_429_cooldown_seconds(),
+        }
+    }
+}
+
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +221,14 @@ pub struct Config {
     #[serde(default)]
     pub update: UpdateConfig,
 
+    /// 请求诊断配置
+    #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
+
+    /// 限频冷却配置
+    #[serde(default)]
+    pub rate_limit_cooldown: RateLimitCooldownConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -218,6 +277,42 @@ fn default_extract_thinking() -> bool {
 
 fn default_endpoint() -> String {
     crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
+}
+
+fn default_diagnostics_enabled() -> bool {
+    true
+}
+
+fn default_diagnostics_max_entries() -> usize {
+    20_000
+}
+
+fn default_diagnostics_retention_hours() -> i64 {
+    72
+}
+
+fn default_diagnostics_persist() -> bool {
+    true
+}
+
+fn default_normal_429_cooldown_seconds() -> i64 {
+    5 * 60
+}
+
+fn default_suspicious_first_cooldown_seconds() -> i64 {
+    15 * 60
+}
+
+fn default_suspicious_repeated_cooldown_seconds() -> i64 {
+    30 * 60
+}
+
+fn default_suspicious_repeat_window_seconds() -> i64 {
+    60 * 60
+}
+
+fn default_refresh_429_cooldown_seconds() -> i64 {
+    5 * 60
 }
 
 fn default_update_channel() -> String {
@@ -286,6 +381,8 @@ impl Default for Config {
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
             update: UpdateConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
+            rate_limit_cooldown: RateLimitCooldownConfig::default(),
             config_path: None,
         }
     }

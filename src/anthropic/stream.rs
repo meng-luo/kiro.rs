@@ -1221,6 +1221,15 @@ impl BufferedStreamContext {
 
         std::mem::take(&mut self.event_buffer)
     }
+
+    pub fn final_token_usage(&self) -> (i32, i32) {
+        (
+            self.inner
+                .context_input_tokens
+                .unwrap_or(self.estimated_input_tokens),
+            self.inner.output_tokens,
+        )
+    }
 }
 
 /// 简单的 token 估算

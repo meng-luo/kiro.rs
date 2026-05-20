@@ -2,15 +2,16 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::{IntoResponse, sse::{Event, Sse}},
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream};
+use tokio::time::{Duration, interval};
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, CredentialTestRequest, SetDisabledRequest,
+        AddCredentialRequest, CredentialTestRequest, DiagnosticsQueryRequest, SetDisabledRequest,
         SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
         SystemRollbackRequest, SystemUpdateRequest,
     },
@@ -21,6 +22,75 @@ use super::{
 pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoResponse {
     let response = state.service.get_all_credentials();
     Json(response)
+}
+
+/// GET /api/admin/credentials/stream
+/// 持续推送账号列表快照
+pub async fn stream_credentials(State(state): State<AdminState>) -> impl IntoResponse {
+    let stream = stream::unfold(
+        (state, interval(Duration::from_secs(2)), String::new(), true),
+        |(state, mut ticker, mut last_payload, first)| async move {
+            if !first {
+                ticker.tick().await;
+            }
+
+            let payload = match serde_json::to_string(&state.service.get_all_credentials()) {
+                Ok(payload) => payload,
+                Err(error) => serde_json::json!({
+                    "error": {
+                        "type": "serialization_error",
+                        "message": error.to_string(),
+                    }
+                })
+                .to_string(),
+            };
+
+            let should_send = first || payload != last_payload;
+            if should_send {
+                last_payload = payload.clone();
+                Some((
+                    Ok::<Event, std::convert::Infallible>(
+                        Event::default().event("credentials").data(payload)
+                    ),
+                    (state, ticker, last_payload, false),
+                ))
+            } else {
+                Some((
+                    Ok(Event::default().event("ping").data("{}")),
+                    (state, ticker, last_payload, false),
+                ))
+            }
+        },
+    );
+
+    Sse::new(stream).into_response()
+}
+
+/// GET /api/admin/diagnostics/summary
+/// 获取请求诊断聚合数据
+pub async fn get_diagnostics_summary(
+    State(state): State<AdminState>,
+    Query(query): Query<DiagnosticsQueryRequest>,
+) -> impl IntoResponse {
+    Json(state.service.diagnostics_summary(query))
+}
+
+/// GET /api/admin/diagnostics/requests
+/// 获取请求诊断明细
+pub async fn get_diagnostics_requests(
+    State(state): State<AdminState>,
+    Query(query): Query<DiagnosticsQueryRequest>,
+) -> impl IntoResponse {
+    Json(state.service.diagnostics_requests(query))
+}
+
+/// GET /api/admin/diagnostics/cli
+/// 根据当前筛选条件生成可复制的 CLI 命令
+pub async fn get_diagnostics_cli(
+    State(state): State<AdminState>,
+    Query(query): Query<DiagnosticsQueryRequest>,
+) -> impl IntoResponse {
+    Json(state.service.diagnostics_cli(query))
 }
 
 /// POST /api/admin/credentials/:id/disabled

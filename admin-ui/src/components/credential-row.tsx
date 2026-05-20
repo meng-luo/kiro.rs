@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import {
   Activity,
+  MoreHorizontal,
   Loader2,
   PlugZap,
   RefreshCw,
@@ -120,25 +121,6 @@ function authMethodLabel(authMethod: string | null): { text: string; title: stri
   }
 }
 
-function disabledReasonLabel(reason?: string) {
-  switch (reason) {
-    case 'Manual':
-      return { text: '手动停用', title: '这是手动关闭的账号。' }
-    case 'TooManyFailures':
-      return { text: '连续失败过多', title: '该账号连续失败次数过多。' }
-    case 'TooManyRefreshFailures':
-      return { text: '刷新失败过多', title: '该账号刷新访问状态连续失败。' }
-    case 'QuotaExceeded':
-      return { text: '额度已用尽', title: '该账号本周期可用额度已耗尽。' }
-    case 'InvalidRefreshToken':
-      return { text: '登录已失效', title: '该账号的刷新凭据已失效。' }
-    case 'InvalidConfig':
-      return { text: '配置无效', title: '该账号配置不完整或格式不正确。' }
-    default:
-      return reason ? { text: reason, title: reason } : null
-  }
-}
-
 function dispatchPathLabel(path?: CredentialStatusItem['dispatchPath']) {
   switch (path) {
     case 'preferred':
@@ -230,6 +212,10 @@ function balanceLabel(credential: CredentialStatusItem) {
   return credential.maskedApiKey ? '按量调用' : '账号订阅'
 }
 
+function subscriptionLabel(credential: CredentialStatusItem, balance: BalanceResponse | null) {
+  return credential.subscriptionTitle || balance?.subscriptionTitle || '未查询'
+}
+
 function probeStatusText(credential: CredentialStatusItem) {
   if (credential.disabled) return '已停用'
   switch (credential.dispatchState) {
@@ -282,7 +268,6 @@ export function CredentialRow({
   const status = statusMeta(credential)
   const rateLimit = limitMeta(credential.lastRateLimitKind)
   const authMethod = authMethodLabel(credential.authMethod)
-  const disabledReason = disabledReasonLabel(credential.disabledReason)
   const dispatchPathMeta = dispatchPathLabel(credential.dispatchPath)
   const canRecover = credential.dispatchState === 'blocked'
   const canRefresh = !credential.disabled && credential.authMethod !== 'api_key'
@@ -324,8 +309,13 @@ export function CredentialRow({
       },
       {
         label: '接入类型',
-        value: balanceLabel(credential),
-        title: '仅用于辅助理解账号类型，不决定调度。',
+        value: authMethod?.text ?? balanceLabel(credential),
+        title: authMethod?.title ?? '仅用于辅助理解账号类型，不决定调度。',
+      },
+      {
+        label: '优先级',
+        value: String(credential.priority),
+        title: '数字越小越优先。',
       },
       {
         label: '最后调用',
@@ -339,7 +329,7 @@ export function CredentialRow({
       },
     ]
     return items
-  }, [balance, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title])
+  }, [authMethod?.text, authMethod?.title, balance, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title])
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -492,16 +482,10 @@ export function CredentialRow({
             </div>
           </div>
         </td>
-        <td className="max-w-[180px] px-3 py-3">
-          <div className="flex items-center gap-2 overflow-hidden">
-            <Badge variant={status.variant} className="whitespace-nowrap" title={status.title}>{status.text}</Badge>
-            {disabledReason && <Badge variant="outline" className="max-w-[100px] truncate whitespace-nowrap" title={disabledReason.title}>{disabledReason.text}</Badge>}
-          </div>
-        </td>
-        <td className="max-w-[140px] px-3 py-3">
-          <Badge variant={credential.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'} className="max-w-full truncate whitespace-nowrap" title={dispatchPathMeta.title}>
-            {dispatchPathMeta.text}
-          </Badge>
+        <td className="max-w-[160px] px-3 py-3">
+          <CellText title={subscriptionLabel(credential, balance)}>
+            {loadingBalance ? '查询中...' : subscriptionLabel(credential, balance)}
+          </CellText>
         </td>
         <td className="w-[170px] px-3 py-3">
           <div className="space-y-2">
@@ -536,14 +520,6 @@ export function CredentialRow({
             {credential.stickyDetached ? '已解除粘性' : `${credential.stickySessionCount} 个活跃会话`}
           </CellText>
         </td>
-        <td className="w-[90px] px-3 py-3">
-          <CellText>{String(credential.priority)}</CellText>
-        </td>
-        <td className="max-w-[120px] px-3 py-3">
-          <CellText title={authMethod?.title ?? balanceLabel(credential)}>
-            {authMethod?.text ?? balanceLabel(credential)}
-          </CellText>
-        </td>
         <td className="max-w-[120px] px-3 py-3">
           <div className="flex items-center gap-2">
             <span className="shrink-0 text-xs text-muted-foreground">参与调度</span>
@@ -554,28 +530,31 @@ export function CredentialRow({
             />
           </div>
         </td>
-        <td className="w-[260px] px-3 py-3">
-          <div className="flex items-center justify-end gap-2 whitespace-nowrap">
-            <Button size="sm" variant="outline" onClick={() => setShowTestDialog(true)} title="测试这个账号此刻是否真的还能调用">
+        <td className="w-[230px] px-3 py-3">
+          <div className="flex items-center justify-end gap-1 whitespace-nowrap">
+            <Button size="icon" variant="ghost" onClick={() => setShowTestDialog(true)} title="测试这个账号此刻是否真的还能调用">
               <PlugZap className="h-4 w-4" />
             </Button>
-            <Button size="sm" variant="outline" onClick={() => onViewBalance(credential.id)} title="查看余额">
+            <Button size="icon" variant="ghost" onClick={() => onViewBalance(credential.id)} title="查看余额">
               <Wallet className="h-4 w-4" />
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setShowSettingsDialog(true)} title="修改优先级和并发上限">
+            <Button size="icon" variant="ghost" onClick={() => setShowSettingsDialog(true)} title="修改账号设置">
               <Settings2 className="h-4 w-4" />
             </Button>
             {canRecover && (
-              <Button size="sm" variant="outline" onClick={handleRecover} disabled={recoverCredential.isPending} title="清理本地阻塞">
+              <Button size="icon" variant="ghost" onClick={handleRecover} disabled={recoverCredential.isPending} title="清理本地阻塞">
                 <ShieldAlert className="h-4 w-4" />
               </Button>
             )}
             {canRefresh && (
-              <Button size="sm" variant="outline" onClick={handleRefreshToken} disabled={forceRefresh.isPending} title="强制刷新 Token">
+              <Button size="icon" variant="ghost" onClick={handleRefreshToken} disabled={forceRefresh.isPending} title="强制刷新 Token">
                 <RefreshCw className={cn('h-4 w-4', forceRefresh.isPending && 'animate-spin')} />
               </Button>
             )}
-            <Button size="sm" variant="destructive" onClick={() => setShowDeleteDialog(true)} title="删除这个账号">
+            <Button size="icon" variant="ghost" onClick={() => setShowSettingsDialog(true)} title="查看更多信息">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+            <Button size="icon" variant="ghost" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setShowDeleteDialog(true)} title="删除这个账号">
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>

@@ -8,16 +8,21 @@
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
+use uuid::Uuid;
 
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::diagnostics::RequestDiagnosticUpdate;
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::{AcquireOptions, DispatchLease, MultiTokenManager, RateLimitKind};
+use crate::kiro::token_manager::{
+    AcquireOptions, CallContext, DispatchLease, MultiTokenManager, RateLimitKind,
+};
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
@@ -48,6 +53,7 @@ pub struct KiroProvider {
 pub struct ProviderResponse {
     pub response: reqwest::Response,
     pub lease: DispatchLease,
+    pub request_id: String,
     pub dispatch_path: String,
     pub used_soft_fallback: bool,
     pub account_state_at_start: String,
@@ -123,22 +129,62 @@ impl KiroProvider {
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
+    #[allow(dead_code)]
     pub async fn call_api(&self, request_body: &str) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry(request_body, false).await
+        self.call_api_with_retry(request_body, false, None, None).await
+    }
+
+    pub async fn call_api_with_metadata(
+        &self,
+        request_body: &str,
+        original_model: Option<&str>,
+        input_tokens: Option<i32>,
+    ) -> anyhow::Result<ProviderResponse> {
+        self.call_api_with_retry(request_body, false, original_model, input_tokens)
+            .await
     }
 
     /// 发送流式 API 请求
+    #[allow(dead_code)]
     pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry(request_body, true).await
+        self.call_api_with_retry(request_body, true, None, None).await
     }
 
+    pub async fn call_api_stream_with_metadata(
+        &self,
+        request_body: &str,
+        original_model: Option<&str>,
+        input_tokens: Option<i32>,
+    ) -> anyhow::Result<ProviderResponse> {
+        self.call_api_with_retry(request_body, true, original_model, input_tokens)
+            .await
+    }
+
+    #[allow(dead_code)]
     pub async fn call_api_stream_for_account(
         &self,
         request_body: &str,
         options: AcquireOptions,
     ) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry_and_options(request_body, true, Some(options))
+        self.call_api_with_retry_and_options(request_body, true, Some(options), None, None)
             .await
+    }
+
+    pub async fn call_api_stream_for_account_with_metadata(
+        &self,
+        request_body: &str,
+        options: AcquireOptions,
+        original_model: Option<&str>,
+        input_tokens: Option<i32>,
+    ) -> anyhow::Result<ProviderResponse> {
+        self.call_api_with_retry_and_options(
+            request_body,
+            true,
+            Some(options),
+            original_model,
+            input_tokens,
+        )
+        .await
     }
 
     /// 发送 MCP API 请求（WebSearch 等工具调用）
@@ -301,8 +347,16 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_stream: bool,
+        original_model: Option<&str>,
+        input_tokens: Option<i32>,
     ) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry_and_options(request_body, is_stream, None)
+        self.call_api_with_retry_and_options(
+            request_body,
+            is_stream,
+            None,
+            original_model,
+            input_tokens,
+        )
             .await
     }
 
@@ -311,7 +365,12 @@ impl KiroProvider {
         request_body: &str,
         is_stream: bool,
         base_options: Option<AcquireOptions>,
+        original_model: Option<&str>,
+        input_tokens: Option<i32>,
     ) -> anyhow::Result<ProviderResponse> {
+        let request_id = Uuid::new_v4().to_string();
+        let started_at = chrono::Utc::now();
+        let started_instant = Instant::now();
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
@@ -320,7 +379,9 @@ impl KiroProvider {
 
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
+        let original_model = original_model.map(|m| m.to_string()).or_else(|| model.clone());
         let session_key = Self::extract_session_key(request_body);
+        let session_hash = session_key.as_deref().map(Self::hash_short);
         let mut tried_account_ids: HashSet<u64> = HashSet::new();
         let mut base_options = base_options.unwrap_or_else(|| AcquireOptions::new(model.clone()));
         if base_options.model.is_none() {
@@ -342,6 +403,19 @@ impl KiroProvider {
             {
                 Ok(c) => c,
                 Err(e) => {
+                    self.record_api_diagnostic(RequestDiagnosticUpdate {
+                        request_id: request_id.clone(),
+                        started_at,
+                        finished_at: chrono::Utc::now(),
+                        duration_ms: started_instant.elapsed().as_millis() as u64,
+                        original_model: original_model.clone(),
+                        mapped_model: model.clone(),
+                        success: false,
+                        upstream_error_code: Some("acquire_context_failed".to_string()),
+                        upstream_message_short: Some(Self::short_message(&e.to_string())),
+                        input_tokens,
+                        ..Default::default()
+                    });
                     last_error = Some(e);
                     continue;
                 }
@@ -356,8 +430,27 @@ impl KiroProvider {
                     if let Some(mut lease) = ctx.lease.take() {
                         self.token_manager.release_slot(&mut lease);
                     }
-                    last_error = Some(e);
+                    let message = e.to_string();
+                    last_error = Some(anyhow::anyhow!(message.clone()));
                     self.token_manager.report_failure(ctx.id);
+                    self.record_api_diagnostic(RequestDiagnosticUpdate {
+                        request_id: request_id.clone(),
+                        started_at,
+                        finished_at: chrono::Utc::now(),
+                        duration_ms: started_instant.elapsed().as_millis() as u64,
+                        original_model: original_model.clone(),
+                        mapped_model: model.clone(),
+                        credential_id: Some(ctx.id),
+                        dispatch_path: Some(ctx.dispatch_path.to_string()),
+                        sticky_hit: ctx.dispatch_path.to_string() == "sticky",
+                        sticky_detached: false,
+                        session_hash: session_hash.clone(),
+                        success: false,
+                        upstream_error_code: Some("endpoint_config_error".to_string()),
+                        upstream_message_short: Some(Self::short_message(&message)),
+                        input_tokens,
+                        ..Default::default()
+                    });
                     tried_account_ids.insert(ctx.id);
                     continue;
                 }
@@ -395,7 +488,26 @@ impl KiroProvider {
                     );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
-                    last_error = Some(e.into());
+                    let message = e.to_string();
+                    self.record_api_diagnostic(RequestDiagnosticUpdate {
+                        request_id: request_id.clone(),
+                        started_at,
+                        finished_at: chrono::Utc::now(),
+                        duration_ms: started_instant.elapsed().as_millis() as u64,
+                        original_model: original_model.clone(),
+                        mapped_model: model.clone(),
+                        credential_id: Some(ctx.id),
+                        dispatch_path: Some(ctx.dispatch_path.to_string()),
+                        sticky_hit: ctx.dispatch_path.to_string() == "sticky",
+                        sticky_detached: false,
+                        session_hash: session_hash.clone(),
+                        success: false,
+                        upstream_error_code: Some("send_failed".to_string()),
+                        upstream_message_short: Some(Self::short_message(&message)),
+                        input_tokens,
+                        ..Default::default()
+                    });
+                    last_error = Some(anyhow::anyhow!(message));
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
                     }
@@ -412,9 +524,27 @@ impl KiroProvider {
                     .lease
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("缺少调度租约"))?;
+                self.record_api_diagnostic(RequestDiagnosticUpdate {
+                    request_id: request_id.clone(),
+                    started_at,
+                    finished_at: chrono::Utc::now(),
+                    duration_ms: started_instant.elapsed().as_millis() as u64,
+                    original_model: original_model.clone(),
+                    mapped_model: model.clone(),
+                    credential_id: Some(ctx.id),
+                    dispatch_path: Some(ctx.dispatch_path.to_string()),
+                    sticky_hit: ctx.dispatch_path.to_string() == "sticky",
+                    sticky_detached: false,
+                    session_hash: session_hash.clone(),
+                    success: true,
+                    upstream_status: Some(status.as_u16()),
+                    input_tokens,
+                    ..Default::default()
+                });
                 return Ok(ProviderResponse {
                     response,
                     lease,
+                    request_id: request_id.clone(),
                     dispatch_path: ctx.dispatch_path.to_string(),
                     used_soft_fallback: ctx.used_soft_fallback,
                     account_state_at_start: ctx.account_state_at_start.to_string(),
@@ -438,6 +568,20 @@ impl KiroProvider {
                 );
 
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                self.record_api_diagnostic(Self::failure_diagnostic(
+                    &request_id,
+                    started_at,
+                    started_instant,
+                    original_model.clone(),
+                    model.clone(),
+                    input_tokens,
+                    &session_hash,
+                    &ctx,
+                    status.as_u16(),
+                    "quota_exhausted",
+                    &body,
+                    None,
+                ));
                 let err = anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
@@ -462,6 +606,20 @@ impl KiroProvider {
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
+                self.record_api_diagnostic(Self::failure_diagnostic(
+                    &request_id,
+                    started_at,
+                    started_instant,
+                    original_model.clone(),
+                    model.clone(),
+                    input_tokens,
+                    &session_hash,
+                    &ctx,
+                    status.as_u16(),
+                    "bad_request",
+                    &body,
+                    None,
+                ));
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
@@ -487,6 +645,20 @@ impl KiroProvider {
                 }
 
                 let has_available = self.token_manager.report_failure(ctx.id);
+                self.record_api_diagnostic(Self::failure_diagnostic(
+                    &request_id,
+                    started_at,
+                    started_instant,
+                    original_model.clone(),
+                    model.clone(),
+                    input_tokens,
+                    &session_hash,
+                    &ctx,
+                    status.as_u16(),
+                    "credential_error",
+                    &body,
+                    None,
+                ));
                 let err = anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
@@ -517,6 +689,21 @@ impl KiroProvider {
                     RateLimitKind::Normal429
                 };
                 self.token_manager.report_rate_limited(ctx.id, kind);
+                let kind_text = Self::rate_limit_kind_label(kind);
+                self.record_api_diagnostic(Self::failure_diagnostic(
+                    &request_id,
+                    started_at,
+                    started_instant,
+                    original_model.clone(),
+                    model.clone(),
+                    input_tokens,
+                    &session_hash,
+                    &ctx,
+                    status.as_u16(),
+                    kind_text,
+                    &body,
+                    Some(kind_text.to_string()),
+                ));
                 let err = anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
@@ -540,6 +727,20 @@ impl KiroProvider {
                     status,
                     body
                 );
+                self.record_api_diagnostic(Self::failure_diagnostic(
+                    &request_id,
+                    started_at,
+                    started_instant,
+                    original_model.clone(),
+                    model.clone(),
+                    input_tokens,
+                    &session_hash,
+                    &ctx,
+                    status.as_u16(),
+                    "upstream_transient",
+                    &body,
+                    None,
+                ));
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
@@ -554,6 +755,20 @@ impl KiroProvider {
 
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
             if status.is_client_error() {
+                self.record_api_diagnostic(Self::failure_diagnostic(
+                    &request_id,
+                    started_at,
+                    started_instant,
+                    original_model.clone(),
+                    model.clone(),
+                    input_tokens,
+                    &session_hash,
+                    &ctx,
+                    status.as_u16(),
+                    "client_error",
+                    &body,
+                    None,
+                ));
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
@@ -565,6 +780,20 @@ impl KiroProvider {
                 status,
                 body
             );
+            self.record_api_diagnostic(Self::failure_diagnostic(
+                &request_id,
+                started_at,
+                started_instant,
+                original_model.clone(),
+                model.clone(),
+                input_tokens,
+                &session_hash,
+                &ctx,
+                status.as_u16(),
+                "unknown_error",
+                &body,
+                None,
+            ));
             last_error = Some(anyhow::anyhow!(
                 "{} API 请求失败: {} {}",
                 api_type,
@@ -617,6 +846,77 @@ impl KiroProvider {
         lower.contains("suspicious activity")
             || lower.contains("due to suspicious activity")
             || lower.contains("suspicious_activity")
+    }
+
+    fn record_api_diagnostic(&self, update: RequestDiagnosticUpdate) {
+        tracing::info!(
+            request_id = %update.request_id,
+            credential_id = update.credential_id,
+            original_model = update.original_model.as_deref().unwrap_or("-"),
+            mapped_model = update.mapped_model.as_deref().unwrap_or("-"),
+            dispatch_path = update.dispatch_path.as_deref().unwrap_or("-"),
+            success = update.success,
+            upstream_status = update.upstream_status,
+            rate_limit_kind = update.rate_limit_kind.as_deref().unwrap_or("-"),
+            duration_ms = update.duration_ms,
+            "API 请求诊断事件"
+        );
+        self.token_manager.record_diagnostic(update);
+    }
+
+    fn failure_diagnostic(
+        request_id: &str,
+        started_at: chrono::DateTime<chrono::Utc>,
+        started_instant: Instant,
+        original_model: Option<String>,
+        mapped_model: Option<String>,
+        input_tokens: Option<i32>,
+        session_hash: &Option<String>,
+        ctx: &CallContext,
+        status: u16,
+        error_code: &str,
+        body: &str,
+        rate_limit_kind: Option<String>,
+    ) -> RequestDiagnosticUpdate {
+        RequestDiagnosticUpdate {
+            request_id: request_id.to_string(),
+            started_at,
+            finished_at: chrono::Utc::now(),
+            duration_ms: started_instant.elapsed().as_millis() as u64,
+            original_model,
+            mapped_model,
+            credential_id: Some(ctx.id),
+            dispatch_path: Some(ctx.dispatch_path.to_string()),
+            sticky_hit: ctx.dispatch_path.to_string() == "sticky",
+            sticky_detached: rate_limit_kind.as_deref() == Some("suspicious_activity"),
+            session_hash: session_hash.clone(),
+            success: false,
+            upstream_status: Some(status),
+            upstream_error_code: Some(error_code.to_string()),
+            upstream_message_short: Some(Self::short_message(body)),
+            rate_limit_kind,
+            input_tokens,
+            ..Default::default()
+        }
+    }
+
+    fn short_message(body: &str) -> String {
+        let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        collapsed.chars().take(300).collect()
+    }
+
+    fn hash_short(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        hex::encode(hasher.finalize())[..16].to_string()
+    }
+
+    fn rate_limit_kind_label(kind: RateLimitKind) -> &'static str {
+        match kind {
+            RateLimitKind::Normal429 => "normal_429",
+            RateLimitKind::SuspiciousActivity => "suspicious_activity",
+            RateLimitKind::Refresh429 => "refresh_429",
+        }
     }
 
     fn retry_delay(attempt: usize) -> Duration {

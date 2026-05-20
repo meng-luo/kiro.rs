@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use flate2::read::GzDecoder;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
@@ -28,14 +28,18 @@ use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::{AcquireOptions, MultiTokenManager};
+use crate::kiro::diagnostics::{
+    DiagnosticsQuery, DiagnosticsRequestsResponse, DiagnosticsSummaryResponse,
+};
 use crate::model::config::Config;
 
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialTestRequest, CredentialsStatusResponse, LoadBalancingModeResponse,
-    SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SystemOperationJobResponse,
-    SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
+    CredentialTestRequest, CredentialsStatusResponse, DiagnosticsCliResponse,
+    DiagnosticsQueryRequest, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest,
+    SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -171,6 +175,7 @@ impl AdminService {
                 api_key_hash: entry.api_key_hash,
                 masked_api_key: entry.masked_api_key,
                 email: entry.email,
+                subscription_title: entry.subscription_title,
                 success_count: entry.success_count,
                 last_used_at: entry.last_used_at.clone(),
                 has_proxy: entry.has_proxy,
@@ -204,6 +209,92 @@ impl AdminService {
             current_id: snapshot.current_id,
             credentials,
         }
+    }
+
+    pub fn diagnostics_summary(
+        &self,
+        query: DiagnosticsQueryRequest,
+    ) -> DiagnosticsSummaryResponse {
+        let query = Self::build_diagnostics_query(query);
+        self.token_manager.diagnostics_summary(&query)
+    }
+
+    pub fn diagnostics_requests(
+        &self,
+        query: DiagnosticsQueryRequest,
+    ) -> DiagnosticsRequestsResponse {
+        let query = Self::build_diagnostics_query(query);
+        self.token_manager.query_diagnostics(&query)
+    }
+
+    pub fn diagnostics_cli(&self, query: DiagnosticsQueryRequest) -> DiagnosticsCliResponse {
+        let mut parts = Vec::new();
+        Self::push_query_part(&mut parts, "since", query.since.as_deref());
+        Self::push_query_part(&mut parts, "until", query.until.as_deref());
+        Self::push_query_part(
+            &mut parts,
+            "credentialId",
+            query.credential_id.as_ref().map(|v| v.to_string()).as_deref(),
+        );
+        Self::push_query_part(&mut parts, "model", query.model.as_deref());
+        Self::push_query_part(
+            &mut parts,
+            "success",
+            query.success.as_ref().map(|v| v.to_string()).as_deref(),
+        );
+        Self::push_query_part(&mut parts, "rateLimitKind", query.rate_limit_kind.as_deref());
+        Self::push_query_part(&mut parts, "dispatchPath", query.dispatch_path.as_deref());
+        Self::push_query_part(
+            &mut parts,
+            "limit",
+            query.limit.as_ref().map(|v| v.to_string()).as_deref(),
+        );
+
+        let query_string = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", parts.join("&"))
+        };
+        DiagnosticsCliResponse {
+            command: format!(
+                "curl -sS -H \"x-api-key: $ADMIN_API_KEY\" \"http://127.0.0.1:8991/api/admin/diagnostics/requests{}\" | jq",
+                query_string
+            ),
+        }
+    }
+
+    fn build_diagnostics_query(query: DiagnosticsQueryRequest) -> DiagnosticsQuery {
+        DiagnosticsQuery {
+            since: query.since.as_deref().and_then(Self::parse_diagnostics_time),
+            until: query.until.as_deref().and_then(Self::parse_diagnostics_time),
+            credential_id: query.credential_id,
+            model: query.model.filter(|value| !value.trim().is_empty()),
+            success: query.success,
+            rate_limit_kind: query.rate_limit_kind.filter(|value| !value.trim().is_empty()),
+            dispatch_path: query.dispatch_path.filter(|value| !value.trim().is_empty()),
+            limit: query.limit,
+            cursor: query.cursor,
+        }
+    }
+
+    fn parse_diagnostics_time(value: &str) -> Option<DateTime<Utc>> {
+        let trimmed = value.trim();
+        if let Some(hours) = trimmed.strip_suffix('h').and_then(|v| v.parse::<i64>().ok()) {
+            return Some(Utc::now() - ChronoDuration::hours(hours.max(1)));
+        }
+        if let Some(minutes) = trimmed.strip_suffix('m').and_then(|v| v.parse::<i64>().ok()) {
+            return Some(Utc::now() - ChronoDuration::minutes(minutes.max(1)));
+        }
+        DateTime::parse_from_rfc3339(trimmed)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    fn push_query_part(parts: &mut Vec<String>, key: &str, value: Option<&str>) {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            return;
+        };
+        parts.push(format!("{}={}", key, urlencoding::encode(value)));
     }
 
     /// 设置凭据禁用状态
@@ -620,7 +711,12 @@ impl AdminService {
 
         let provider_response = self
             .provider
-            .call_api_stream_for_account(&request_body, options)
+            .call_api_stream_for_account_with_metadata(
+                &request_body,
+                options,
+                Some(&payload.model_id),
+                None,
+            )
             .await
             .map_err(|e| self.classify_test_credential_error(e, id, &model_id))?;
 

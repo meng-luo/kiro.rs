@@ -105,6 +105,8 @@ pub struct CredentialStatusItem {
     pub masked_api_key: Option<String>,
     /// 用户邮箱（用于前端显示）
     pub email: Option<String>,
+    /// 订阅等级
+    pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
@@ -149,6 +151,26 @@ pub struct CredentialStatusItem {
     /// 最近一次软回退时间（RFC3339）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_soft_fallback_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsQueryRequest {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub credential_id: Option<u64>,
+    pub model: Option<String>,
+    pub success: Option<bool>,
+    pub rate_limit_kind: Option<String>,
+    pub dispatch_path: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsCliResponse {
+    pub command: String,
 }
 
 // ============ 操作请求 ============

@@ -8,9 +8,10 @@ use axum::{
 use super::{
     handlers::{
         add_credential, check_system_version, delete_credential, force_refresh_token,
-        get_all_credentials, get_credential_balance, get_load_balancing_mode,
+        get_all_credentials, get_credential_balance, get_diagnostics_cli,
+        get_diagnostics_requests, get_diagnostics_summary, get_load_balancing_mode,
         get_system_job, get_system_version, recover_credential, reset_failure_count,
-        restart_system, rollback_system_version, set_credential_disabled,
+        restart_system, rollback_system_version, set_credential_disabled, stream_credentials,
         set_credential_max_concurrent, set_credential_priority, set_load_balancing_mode,
         test_credential, update_system_version,
     },
@@ -47,6 +48,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
             "/credentials",
             get(get_all_credentials).post(add_credential),
         )
+        .route("/credentials/stream", get(stream_credentials))
         .route("/credentials/{id}", delete(delete_credential))
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))
@@ -56,6 +58,9 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/credentials/{id}/test", post(test_credential))
+        .route("/diagnostics/summary", get(get_diagnostics_summary))
+        .route("/diagnostics/requests", get(get_diagnostics_requests))
+        .route("/diagnostics/cli", get(get_diagnostics_cli))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

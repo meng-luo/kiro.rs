@@ -17,6 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::diagnostics::{
+    DiagnosticsQuery, DiagnosticsRequestsResponse, DiagnosticsStore, DiagnosticsSummaryResponse,
+    RequestDiagnosticUpdate,
+};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::token_refresh::{
@@ -64,8 +68,6 @@ fn mask_api_key(key: &str) -> String {
 }
 
 const DEFAULT_MAX_CONCURRENT: u32 = 3;
-const NORMAL_429_COOLDOWN_SECS: i64 = 5 * 60;
-const SUSPICIOUS_COOLDOWN_SECS: i64 = 30 * 60;
 const STICKY_SESSION_TTL_SECS: i64 = 30 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +479,8 @@ struct CredentialEntry {
     recent_429_count: u32,
     /// 最近 suspicious 次数
     recent_suspicious_count: u32,
+    /// 最近一次 suspicious 触发时间
+    last_suspicious_at: Option<DateTime<Utc>>,
     /// 最近一次被绑定的活跃时间
     sticky_detached: bool,
     /// 最近一次选号路径
@@ -588,6 +592,8 @@ pub struct CredentialEntrySnapshot {
     pub soft_fallback_eligible: bool,
     /// 最近一次软回退时间
     pub last_soft_fallback_at: Option<String>,
+    /// 订阅等级
+    pub subscription_title: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -673,6 +679,8 @@ pub struct MultiTokenManager {
     sticky_bindings: Mutex<HashMap<String, StickyBinding>>,
     /// 同优先级轮询游标
     round_robin_cursor: Mutex<HashMap<u32, usize>>,
+    /// 请求诊断存储
+    diagnostics: DiagnosticsStore,
 }
 
 /// 每个凭据最大 API 调用失败次数
@@ -769,6 +777,7 @@ impl MultiTokenManager {
                     last_rate_limit_kind: None,
                     recent_429_count: 0,
                     recent_suspicious_count: 0,
+                    last_suspicious_at: None,
                     sticky_detached: false,
                     last_dispatch_path: None,
                     last_soft_fallback_at: None,
@@ -817,6 +826,10 @@ impl MultiTokenManager {
             .unwrap_or(0);
 
         let load_balancing_mode = config.load_balancing_mode.clone();
+        let diagnostics_config = config.diagnostics.clone();
+        let diagnostics_path = credentials_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.join("kiro_request_diagnostics.jsonl")));
         let manager = Self {
             config,
             proxy,
@@ -830,6 +843,7 @@ impl MultiTokenManager {
             stats_dirty: AtomicBool::new(false),
             sticky_bindings: Mutex::new(HashMap::new()),
             round_robin_cursor: Mutex::new(HashMap::new()),
+            diagnostics: DiagnosticsStore::new(diagnostics_config, diagnostics_path),
         };
 
         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
@@ -1279,10 +1293,10 @@ impl MultiTokenManager {
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
                 Ok(mut ctx) => {
+                    self.acquire_slot(id, options.runtime_probe || selection.used_soft_fallback)?;
                     if let Some(session_key) = options.session_key.as_deref() {
                         self.bind_session(session_key, id);
                     }
-                    self.acquire_slot(id, options.runtime_probe || selection.used_soft_fallback)?;
                     ctx.lease = Some(DispatchLease::new(id));
                     ctx.dispatch_path = selection.dispatch_path;
                     ctx.used_soft_fallback = selection.used_soft_fallback;
@@ -1503,6 +1517,28 @@ impl MultiTokenManager {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     }
 
+    pub fn record_diagnostic(&self, update: RequestDiagnosticUpdate) {
+        self.diagnostics.record(update);
+    }
+
+    pub fn update_diagnostic_tokens(
+        &self,
+        request_id: &str,
+        input_tokens: Option<i32>,
+        output_tokens: Option<i32>,
+    ) {
+        self.diagnostics
+            .update_tokens(request_id, input_tokens, output_tokens);
+    }
+
+    pub fn query_diagnostics(&self, query: &DiagnosticsQuery) -> DiagnosticsRequestsResponse {
+        self.diagnostics.query(query)
+    }
+
+    pub fn diagnostics_summary(&self, query: &DiagnosticsQuery) -> DiagnosticsSummaryResponse {
+        self.diagnostics.summary(query)
+    }
+
     /// 统计数据文件路径
     fn stats_path(&self) -> Option<PathBuf> {
         self.cache_dir().map(|d| d.join("kiro_stats.json"))
@@ -1634,12 +1670,26 @@ impl MultiTokenManager {
                 None => return false,
             };
 
+            let now = Utc::now();
+            let cooldown_config = &self.config.rate_limit_cooldown;
             let cooldown_secs = match kind {
-                RateLimitKind::Normal429 => NORMAL_429_COOLDOWN_SECS,
-                RateLimitKind::SuspiciousActivity => SUSPICIOUS_COOLDOWN_SECS,
-                RateLimitKind::Refresh429 => NORMAL_429_COOLDOWN_SECS,
+                RateLimitKind::Normal429 => cooldown_config.normal_429_seconds,
+                RateLimitKind::SuspiciousActivity => {
+                    let repeated = entry.last_suspicious_at.is_some_and(|last| {
+                        now - last
+                            <= Duration::seconds(
+                                cooldown_config.suspicious_repeat_window_seconds.max(1),
+                            )
+                    });
+                    if repeated {
+                        cooldown_config.suspicious_repeated_seconds
+                    } else {
+                        cooldown_config.suspicious_first_seconds
+                    }
+                }
+                RateLimitKind::Refresh429 => cooldown_config.refresh_429_seconds,
             };
-            let next_deadline = Utc::now() + Duration::seconds(cooldown_secs);
+            let next_deadline = now + Duration::seconds(cooldown_secs.max(1));
             entry.cooldown_until = Some(
                 entry
                     .cooldown_until
@@ -1647,7 +1697,7 @@ impl MultiTokenManager {
                     .unwrap_or(next_deadline),
             );
             entry.last_rate_limit_kind = Some(kind);
-            entry.last_used_at = Some(Utc::now().to_rfc3339());
+            entry.last_used_at = Some(now.to_rfc3339());
             match kind {
                 RateLimitKind::Normal429 => {
                     entry.recent_429_count += 1;
@@ -1656,6 +1706,7 @@ impl MultiTokenManager {
                 RateLimitKind::SuspiciousActivity => {
                     entry.recent_suspicious_count += 1;
                     entry.sticky_detached = true;
+                    entry.last_suspicious_at = Some(now);
                     self.detach_session_binding_for_account(id);
                 }
                 RateLimitKind::Refresh429 => {
@@ -1673,6 +1724,7 @@ impl MultiTokenManager {
         entry.last_rate_limit_kind = None;
         entry.recent_429_count = 0;
         entry.recent_suspicious_count = 0;
+        entry.last_suspicious_at = None;
         entry.sticky_detached = false;
     }
 
@@ -2075,6 +2127,7 @@ impl MultiTokenManager {
                         now,
                     ),
                     last_soft_fallback_at: e.last_soft_fallback_at.clone(),
+                    subscription_title: e.credentials.subscription_title.clone(),
                 })
                 .collect(),
             current_id,
@@ -2437,6 +2490,7 @@ impl MultiTokenManager {
                 last_rate_limit_kind: None,
                 recent_429_count: 0,
                 recent_suspicious_count: 0,
+                last_suspicious_at: None,
                 sticky_detached: false,
                 last_dispatch_path: None,
                 last_soft_fallback_at: None,

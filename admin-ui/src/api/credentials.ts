@@ -10,6 +10,10 @@ import type {
   AddCredentialRequest,
   AddCredentialResponse,
   CredentialTestRequest,
+  DiagnosticsCliResponse,
+  DiagnosticsFilters,
+  DiagnosticsRequestsResponse,
+  DiagnosticsSummaryResponse,
   SystemVersionResponse,
   SystemOperationJob,
   SystemUpdateRequest,
@@ -36,6 +40,69 @@ api.interceptors.request.use((config) => {
 // 获取所有凭据状态
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
   const { data } = await api.get<CredentialsStatusResponse>('/credentials')
+  return data
+}
+
+export async function streamCredentials(
+  onMessage: (data: CredentialsStatusResponse) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const apiKey = storage.getApiKey()
+  const response = await fetch('/api/admin/credentials/stream', {
+    headers: {
+      ...(apiKey ? { 'x-api-key': apiKey } : {}),
+    },
+    signal,
+  })
+
+  if (!response.ok || !response.body) {
+    throw new Error(`账号列表推送连接失败: HTTP ${response.status}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() ?? ''
+
+    for (const chunk of chunks) {
+      const event = chunk.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim()
+      const data = chunk.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim()
+      if (event !== 'credentials' || !data) continue
+      onMessage(JSON.parse(data) as CredentialsStatusResponse)
+    }
+  }
+}
+
+function diagnosticsParams(filters: DiagnosticsFilters) {
+  const params = new URLSearchParams()
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    params.set(key, String(value))
+  })
+  return params
+}
+
+export async function getDiagnosticsSummary(filters: DiagnosticsFilters): Promise<DiagnosticsSummaryResponse> {
+  const params = diagnosticsParams(filters)
+  const { data } = await api.get<DiagnosticsSummaryResponse>(`/diagnostics/summary?${params.toString()}`)
+  return data
+}
+
+export async function getDiagnosticsRequests(filters: DiagnosticsFilters): Promise<DiagnosticsRequestsResponse> {
+  const params = diagnosticsParams(filters)
+  const { data } = await api.get<DiagnosticsRequestsResponse>(`/diagnostics/requests?${params.toString()}`)
+  return data
+}
+
+export async function getDiagnosticsCli(filters: DiagnosticsFilters): Promise<DiagnosticsCliResponse> {
+  const params = diagnosticsParams(filters)
+  const { data } = await api.get<DiagnosticsCliResponse>(`/diagnostics/cli?${params.toString()}`)
   return data
 }
 

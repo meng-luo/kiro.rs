@@ -37,9 +37,11 @@ import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { CredentialRow } from '@/components/credential-row'
+import { DiagnosticsDashboard } from '@/components/diagnostics-dashboard'
 import {
   useCheckSystemVersion,
   useCredentials,
+  useCredentialsStream,
   useDeleteCredential,
   useLoadBalancingMode,
   useResetFailure,
@@ -173,6 +175,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [activeView, setActiveView] = useState<'accounts' | 'diagnostics'>('accounts')
   const [pageSize, setPageSize] = useState(20)
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -185,6 +188,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
+  useCredentialsStream()
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
@@ -729,6 +733,27 @@ export function Dashboard({ onLogout }: DashboardProps) {
       </header>
 
       <main className="container mx-auto space-y-6 px-4 py-6 md:px-8">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant={activeView === 'accounts' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setActiveView('accounts')}
+          >
+            账号列表
+          </Button>
+          <Button
+            variant={activeView === 'diagnostics' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setActiveView('diagnostics')}
+          >
+            请求统计
+          </Button>
+        </div>
+
+        {activeView === 'diagnostics' ? (
+          <DiagnosticsDashboard />
+        ) : (
+          <>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
           <StatCard label="账号总数" value={data?.total || 0} />
           <StatCard label="启用账号" value={enabledCredentialCount} valueClassName="text-green-600" />
@@ -830,21 +855,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
               <div className="rounded-md border py-10 text-center text-muted-foreground">暂无账号</div>
             ) : (
               <div className="overflow-x-auto rounded-md border">
-                <table className="min-w-[1480px] w-full border-collapse">
+                <table className="min-w-[1180px] w-full border-collapse">
                   <thead>
                     <tr>
                       <TableHead className="w-12">
                         <Checkbox checked={isCurrentPageAllSelected} onCheckedChange={handleToggleSelectCurrentPage} />
                       </TableHead>
                       <TableHead>账号</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>调度</TableHead>
+                      <TableHead>订阅等级</TableHead>
                       <TableHead>并发</TableHead>
                       <TableHead>最近调用</TableHead>
                       <TableHead>限频</TableHead>
                       <TableHead>粘性</TableHead>
-                      <TableHead>优先级</TableHead>
-                      <TableHead>接入方式</TableHead>
                       <TableHead>调度开关</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </tr>
@@ -883,6 +905,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
             ) : null}
           </CardContent>
         </Card>
+          </>
+        )}
       </main>
 
       <BalanceDialog credentialId={selectedCredentialId} open={balanceDialogOpen} onOpenChange={setBalanceDialogOpen} />
