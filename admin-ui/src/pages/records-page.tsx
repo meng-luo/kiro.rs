@@ -26,6 +26,7 @@ export function RecordsPage() {
   const [credentialId, setCredentialId] = useState('')
   const [model, setModel] = useState('')
   const [status, setStatus] = useState('all')
+  const [cursor, setCursor] = useState<number | undefined>(undefined)
   const credentials = useCredentials()
 
   const filters: DiagnosticsFilters = {
@@ -34,12 +35,14 @@ export function RecordsPage() {
     credentialId: credentialId ? Number(credentialId) : undefined,
     model: model.trim() || undefined,
     success: status === 'success' ? true : status === 'failed' ? false : undefined,
+    rateLimitOnly: status === 'limited' ? true : undefined,
+    cursor,
   }
   const requests = useDiagnosticsRequests(filters)
   const items = requests.data?.items ?? []
 
   const exportCsv = () => {
-    const header = ['时间', '请求 ID', '模型', '账号', '状态', '耗时', '输入 Token', '输出 Token']
+    const header = ['时间', '请求 ID', '模型', '账号', '状态', '耗时', '输入 Token', '缓存写入 Token', '缓存命中 Token', '输出 Token']
     const rows = items.map((item) => [
       formatTime(item.startedAt),
       item.requestId,
@@ -48,6 +51,8 @@ export function RecordsPage() {
       item.success ? '成功' : item.rateLimitKind ? '限频' : '失败',
       String(item.durationMs ?? ''),
       String(item.inputTokens ?? ''),
+      String(item.cacheCreationInputTokens ?? ''),
+      String(item.cacheReadInputTokens ?? ''),
       String(item.outputTokens ?? ''),
     ])
     const csv = [header, ...rows].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -84,20 +89,21 @@ export function RecordsPage() {
           <CardTitle className="text-base">筛选</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-5">
-          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={range} onChange={(event) => setRange(event.target.value)}>
+          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={range} onChange={(event) => { setRange(event.target.value); setCursor(undefined) }}>
             {ranges.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
-          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={credentialId} onChange={(event) => setCredentialId(event.target.value)}>
+          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={credentialId} onChange={(event) => { setCredentialId(event.target.value); setCursor(undefined) }}>
             <option value="">全部账号</option>
             {(credentials.data?.credentials ?? []).map((item) => (
               <option key={item.id} value={item.id}>{item.email || `账号 #${item.id}`}</option>
             ))}
           </select>
-          <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder="模型名称" />
-          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={status} onChange={(event) => setStatus(event.target.value)}>
+          <Input value={model} onChange={(event) => { setModel(event.target.value); setCursor(undefined) }} placeholder="模型名称" />
+          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={status} onChange={(event) => { setStatus(event.target.value); setCursor(undefined) }}>
             <option value="all">全部结果</option>
             <option value="success">成功</option>
             <option value="failed">失败</option>
+            <option value="limited">限频</option>
           </select>
           <div className="flex items-center text-sm text-muted-foreground">
             共 {formatNumber(requests.data?.total ?? 0)} 条
@@ -108,7 +114,7 @@ export function RecordsPage() {
       <Card className="rounded-md">
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-sm">
+            <table className="w-full min-w-[1120px] text-sm">
               <thead className="border-b bg-muted/30">
                 <tr className="text-left text-xs text-muted-foreground">
                   <th className="px-4 py-3 font-medium">时间</th>
@@ -118,6 +124,7 @@ export function RecordsPage() {
                   <th className="px-4 py-3 font-medium">结果</th>
                   <th className="px-4 py-3 font-medium">耗时</th>
                   <th className="px-4 py-3 font-medium">Token</th>
+                  <th className="px-4 py-3 font-medium">缓存</th>
                   <th className="px-4 py-3 font-medium">提示</th>
                 </tr>
               </thead>
@@ -130,7 +137,14 @@ export function RecordsPage() {
                     <td className="px-4 py-3">{item.credentialId ? `#${item.credentialId}` : '-'}</td>
                     <td className="px-4 py-3">{statusBadge(item)}</td>
                     <td className="px-4 py-3">{formatDuration(item.durationMs)}</td>
-                    <td className="px-4 py-3">{formatNumber((item.inputTokens ?? 0) + (item.outputTokens ?? 0))}</td>
+                    <td className="px-4 py-3">
+                      <div>{formatNumber((item.inputTokens ?? 0) + (item.outputTokens ?? 0))}</div>
+                      <div className="text-xs text-muted-foreground">输入 {formatNumber(item.inputTokens ?? 0)} / 输出 {formatNumber(item.outputTokens ?? 0)}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="whitespace-nowrap">命中 {formatNumber(item.cacheReadInputTokens ?? 0)}</div>
+                      <div className="text-xs text-muted-foreground">写入 {formatNumber(item.cacheCreationInputTokens ?? 0)}</div>
+                    </td>
                     <td className="max-w-[240px] truncate px-4 py-3 text-muted-foreground" title={item.upstreamMessageShort ?? ''}>
                       {item.upstreamMessageShort || item.rateLimitKind || '-'}
                     </td>
@@ -138,7 +152,7 @@ export function RecordsPage() {
                 ))}
                 {items.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">暂无记录</td>
+                    <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground">暂无记录</td>
                   </tr>
                 ) : null}
               </tbody>
@@ -146,6 +160,11 @@ export function RecordsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="outline" disabled={!cursor} onClick={() => setCursor(undefined)}>回到第一页</Button>
+        <Button variant="outline" disabled={!requests.data?.nextCursor} onClick={() => setCursor(requests.data?.nextCursor ?? undefined)}>下一页</Button>
+      </div>
     </div>
   )
 }

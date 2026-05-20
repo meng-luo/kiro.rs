@@ -213,7 +213,17 @@ function balanceLabel(credential: CredentialStatusItem) {
 }
 
 function subscriptionLabel(credential: CredentialStatusItem, balance: BalanceResponse | null) {
-  return credential.subscriptionTitle || balance?.subscriptionTitle || '未查询'
+  return credential.subscriptionTitle || balance?.subscriptionTitle || credential.cachedBalance?.balance.subscriptionTitle || '未查询'
+}
+
+function displayBalance(credential: CredentialStatusItem, balance: BalanceResponse | null) {
+  return balance || credential.cachedBalance?.balance || null
+}
+
+function balanceFreshText(credential: CredentialStatusItem, balance: BalanceResponse | null) {
+  if (balance) return '刚刚更新'
+  if (!credential.cachedBalance) return '未查询'
+  return credential.cachedBalance.fresh ? '最近更新' : '待更新'
 }
 
 function probeStatusText(credential: CredentialStatusItem) {
@@ -278,6 +288,7 @@ export function CredentialRow({
   const progressValue = credential.maxConcurrent > 0
     ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
     : 0
+  const visibleBalance = displayBalance(credential, balance)
 
   useEffect(() => {
     setPriorityValue(String(credential.priority))
@@ -335,12 +346,12 @@ export function CredentialRow({
       },
       {
         label: '剩余额度',
-        value: loadingBalance ? '查询中...' : balance ? `${balance.remaining.toFixed(2)} / ${balance.usageLimit.toFixed(2)}` : '未查询',
+        value: loadingBalance ? '查询中...' : visibleBalance ? `${visibleBalance.remaining.toFixed(2)} / ${visibleBalance.usageLimit.toFixed(2)}` : '未查询',
         title: '仅用于辅助观察，不决定调度。',
       },
     ]
     return items
-  }, [authMethod?.text, authMethod?.title, balance, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title])
+  }, [authMethod?.text, authMethod?.title, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title, visibleBalance])
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -504,9 +515,23 @@ export function CredentialRow({
           </div>
         </td>
         <td className="max-w-[160px] px-3 py-3">
-          <CellText title={subscriptionLabel(credential, balance)}>
-            {loadingBalance ? '查询中...' : subscriptionLabel(credential, balance)}
-          </CellText>
+          <div className="space-y-1">
+            <CellText title={subscriptionLabel(credential, visibleBalance)}>
+              {loadingBalance ? '查询中...' : subscriptionLabel(credential, visibleBalance)}
+            </CellText>
+            {visibleBalance ? (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span className="truncate">{balanceFreshText(credential, balance)}</span>
+                  <span className="whitespace-nowrap">{visibleBalance.usagePercentage.toFixed(1)}%</span>
+                </div>
+                <Progress value={Math.min(100, Math.max(0, visibleBalance.usagePercentage))} />
+                <CellText className="text-xs text-muted-foreground" title={`剩余 ${visibleBalance.remaining.toFixed(2)}，已用 ${visibleBalance.currentUsage.toFixed(2)}`}>
+                  {`${visibleBalance.remaining.toFixed(2)} / ${visibleBalance.usageLimit.toFixed(2)}`}
+                </CellText>
+              </div>
+            ) : null}
+          </div>
         </td>
         <td className="w-[170px] px-3 py-3">
           <div className="space-y-2">

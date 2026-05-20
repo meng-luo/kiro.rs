@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Network, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Check, Copy, Network, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MetricCard } from '@/components/metric-card'
 import { useCreateProxy, useDeleteProxy, useProxies, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
@@ -39,6 +40,10 @@ export function ProxiesPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<ProxyListItem | null>(null)
   const [form, setForm] = useState<ProxyUpsertRequest>(emptyForm)
+  const [query, setQuery] = useState('')
+  const [protocol, setProtocol] = useState('all')
+  const [state, setState] = useState('all')
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
 
   useEffect(() => {
     if (!dialogOpen) return
@@ -74,7 +79,71 @@ export function ProxiesPage() {
       .catch((error) => toast.error(extractErrorMessage(error)))
   }
 
-  const list = proxies.data?.proxies ?? []
+  const list = (proxies.data?.proxies ?? []).filter((proxy) => {
+    const keyword = query.trim().toLowerCase()
+    if (keyword && !`${proxy.name} ${proxy.host} ${proxy.port}`.toLowerCase().includes(keyword)) return false
+    if (protocol !== 'all' && proxy.protocol !== protocol) return false
+    if (state === 'enabled' && proxy.disabled) return false
+    if (state === 'disabled' && !proxy.disabled) return false
+    if (state === 'failed' && proxy.lastTestStatus !== 'failed') return false
+    if (state === 'unknown' && proxy.lastTestStatus) return false
+    return true
+  })
+  const visibleIds = list.map((item) => item.id)
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleVisible = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (allVisibleSelected) visibleIds.forEach((id) => next.delete(id))
+      else visibleIds.forEach((id) => next.add(id))
+      return next
+    })
+  }
+
+  const selectedArray = Array.from(selectedIds)
+
+  const copyProxy = async (proxy: ProxyListItem) => {
+    await navigator.clipboard.writeText(`${proxy.protocol}://${proxy.host}:${proxy.port}`)
+    toast.success('代理地址已复制')
+  }
+
+  const testSelected = async () => {
+    let success = 0
+    for (const id of selectedArray) {
+      try {
+        const item = await testProxy.mutateAsync(id)
+        if (item.lastTestStatus === 'ok') success += 1
+      } catch {
+        // 单个失败继续测试剩余代理
+      }
+    }
+    toast.success(`测试完成：${success}/${selectedArray.length} 个可用`)
+  }
+
+  const deleteSelected = async () => {
+    if (!confirm(`确定删除 ${selectedArray.length} 个代理吗？已绑定账号的代理不会被删除。`)) return
+    let success = 0
+    for (const id of selectedArray) {
+      try {
+        await deleteProxy.mutateAsync(id)
+        success += 1
+      } catch {
+        // 单个失败继续处理剩余代理
+      }
+    }
+    setSelectedIds(new Set())
+    toast.success(`已删除 ${success}/${selectedArray.length} 个代理`)
+  }
 
   return (
     <div className="space-y-6">
@@ -96,6 +165,48 @@ export function ProxiesPage() {
       </div>
 
       <Card className="rounded-md">
+        <CardContent className="grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_160px_160px_auto]">
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或地址" />
+          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={protocol} onChange={(event) => setProtocol(event.target.value)}>
+            <option value="all">全部协议</option>
+            <option value="http">http</option>
+            <option value="https">https</option>
+            <option value="socks5">socks5</option>
+          </select>
+          <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={state} onChange={(event) => setState(event.target.value)}>
+            <option value="all">全部状态</option>
+            <option value="enabled">已启用</option>
+            <option value="disabled">已停用</option>
+            <option value="failed">不可用</option>
+            <option value="unknown">未测试</option>
+          </select>
+          <Button variant="outline" onClick={toggleVisible} disabled={visibleIds.length === 0}>
+            <Check className="h-4 w-4" />
+            {allVisibleSelected ? '取消选择' : '选择结果'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {selectedIds.size > 0 ? (
+        <div className="rounded-md border bg-background p-3 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="text-sm font-medium">已选择 {selectedIds.size} 个代理</div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={testSelected} disabled={testProxy.isPending}>
+                <RefreshCw className="h-4 w-4" />
+                测试
+              </Button>
+              <Button size="sm" variant="destructive" onClick={deleteSelected} disabled={deleteProxy.isPending}>
+                <Trash2 className="h-4 w-4" />
+                删除
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>取消选择</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <Card className="rounded-md">
         <CardHeader>
           <CardTitle className="text-base">代理列表</CardTitle>
         </CardHeader>
@@ -106,7 +217,9 @@ export function ProxiesPage() {
             list.map((proxy) => (
               <div key={proxy.id} className="rounded-md border p-4">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="min-w-0">
+                  <div className="flex min-w-0 gap-3">
+                    <Checkbox checked={selectedIds.has(proxy.id)} onCheckedChange={() => toggleSelect(proxy.id)} />
+                    <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <div className="truncate font-medium">{proxy.name}</div>
                       {status(proxy)}
@@ -119,8 +232,13 @@ export function ProxiesPage() {
                       {proxy.lastLatencyMs ? ` · ${proxy.lastLatencyMs}ms` : ''}
                     </div>
                     {proxy.lastError ? <div className="mt-2 truncate text-xs text-destructive" title={proxy.lastError}>{proxy.lastError}</div> : null}
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => copyProxy(proxy)}>
+                      <Copy className="h-4 w-4" />
+                      复制
+                    </Button>
                     <Button size="sm" variant="outline" onClick={() => testProxy.mutate(proxy.id, {
                       onSuccess: (item) => toast.success(item.lastTestStatus === 'ok' ? '代理可用' : '测试完成'),
                       onError: (error) => toast.error(extractErrorMessage(error)),

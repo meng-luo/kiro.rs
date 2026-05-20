@@ -238,7 +238,7 @@ export function DiagnosticsDashboard() {
         <StatCard icon={XCircle} label="失败数" value={formatNumber(data?.failedRequests)} hint="按上游结果统计" tone="bg-rose-100 text-rose-700" />
         <StatCard icon={ShieldAlert} label="风控限频" value={formatNumber(data?.suspiciousRequests)} hint={`${formatNumber(data?.rateLimitedRequests)} 次总限频`} tone="bg-amber-100 text-amber-700" />
         <StatCard icon={Clock3} label="平均耗时" value={formatDuration(data?.averageDurationMs)} hint="从发起到上游返回" tone="bg-emerald-100 text-emerald-700" />
-        <StatCard icon={CheckCircle2} label="Token" value={formatNumber((data?.inputTokens ?? 0) + (data?.outputTokens ?? 0))} hint={`${formatNumber(data?.inputTokens)} 输入`} tone="bg-sky-100 text-sky-700" />
+        <StatCard icon={CheckCircle2} label="Token" value={formatNumber((data?.inputTokens ?? 0) + (data?.outputTokens ?? 0))} hint={`${formatNumber(data?.cacheReadInputTokens ?? 0)} 命中缓存`} tone="bg-sky-100 text-sky-700" />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">

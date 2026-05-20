@@ -76,6 +76,7 @@ export interface CredentialStatusItem {
   apiKeyHash?: string
   maskedApiKey?: string
   subscriptionTitle?: string | null
+  cachedBalance?: CachedBalanceStatus | null
   successCount: number
   lastUsedAt: string | null
   hasProxy: boolean
@@ -112,6 +113,12 @@ export interface BalanceResponse {
   nextResetAt: number | null
 }
 
+export interface CachedBalanceStatus {
+  cachedAt: string
+  fresh: boolean
+  balance: BalanceResponse
+}
+
 export interface DiagnosticsBucket {
   key: string
   count: number
@@ -126,6 +133,9 @@ export interface DiagnosticsSummaryResponse {
   averageDurationMs: number
   inputTokens: number
   outputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
+  uncachedInputTokens: number
   modelRank: DiagnosticsBucket[]
   credentialRank: DiagnosticsBucket[]
   errorRank: DiagnosticsBucket[]
@@ -152,6 +162,9 @@ export interface RequestDiagnosticEntry {
   cooldownUntil?: string | null
   inputTokens?: number | null
   outputTokens?: number | null
+  cacheCreationInputTokens?: number | null
+  cacheReadInputTokens?: number | null
+  uncachedInputTokens?: number | null
 }
 
 export interface DiagnosticsRequestsResponse {
@@ -166,6 +179,7 @@ export interface DiagnosticsFilters {
   credentialId?: number
   model?: string
   success?: boolean
+  rateLimitOnly?: boolean
   rateLimitKind?: string
   dispatchPath?: string
   limit?: number

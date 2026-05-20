@@ -205,6 +205,11 @@ export function AccountsPage() {
   const allCredentials = data?.credentials ?? []
   const alertCount = allCredentials.filter((item) => item.disabled || item.dispatchState !== 'ready').length
   const disabledCount = allCredentials.filter((item) => item.disabled).length
+  const cachedBalanceCount = allCredentials.filter((item) => item.cachedBalance).length
+  const lowBalanceCount = allCredentials.filter((item) => {
+    const balance = item.cachedBalance?.balance
+    return balance && balance.usageLimit > 0 && balance.usagePercentage >= 80
+  }).length
 
   return (
     <div className="space-y-6">
@@ -225,8 +230,26 @@ export function AccountsPage() {
         <MetricCard label="启用账号" value={data?.enabledCount ?? 0} />
         <MetricCard label="可用账号" value={data?.schedulableCount ?? 0} />
         <MetricCard label="需要处理" value={alertCount} />
-        <MetricCard label="已停用" value={disabledCount} />
+        <MetricCard label="有余额记录" value={cachedBalanceCount} hint={lowBalanceCount > 0 ? `${lowBalanceCount} 个使用较高` : undefined} />
       </div>
+
+      {selectedIds.size > 0 ? (
+        <div className="sticky top-3 z-10 rounded-md border bg-background/95 p-3 shadow-sm backdrop-blur">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="text-sm font-medium">已选择 {selectedIds.size} 个账号</div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={handleBatchVerify}><CheckCircle2 className="h-4 w-4" />验活</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchRefresh.mutateAsync({ ids: selectedArray }), '已刷新选中的账号')}><RefreshCw className="h-4 w-4" />刷新 Token</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchReset.mutateAsync({ ids: selectedArray }), '已恢复选中的账号')}><RotateCcw className="h-4 w-4" />恢复</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: false }), '已启用选中的账号')}>启用</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已停用选中的账号')}>停用</Button>
+              <Button size="sm" variant="outline" onClick={() => setBulkEditOpen(true)}>绑定代理</Button>
+              <Button size="sm" variant="destructive" onClick={handleBatchDelete}><Trash2 className="h-4 w-4" />删除</Button>
+              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>取消选择</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <Card className="rounded-md">
         <CardHeader className="space-y-4">
@@ -239,13 +262,6 @@ export function AccountsPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" onClick={toggleSelectCurrentPage}>{isCurrentPageAllSelected ? '取消当前页' : '选择当前页'}</Button>
-              <Button size="sm" variant="outline" onClick={handleBatchVerify} disabled={selectedIds.size === 0}><CheckCircle2 className="h-4 w-4" />验活</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchRefresh.mutateAsync({ ids: selectedArray }), '已刷新选中的账号')} disabled={selectedIds.size === 0}><RefreshCw className="h-4 w-4" />刷新 Token</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchReset.mutateAsync({ ids: selectedArray }), '已恢复选中的账号')} disabled={selectedIds.size === 0}><RotateCcw className="h-4 w-4" />恢复</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: false }), '已启用选中的账号')} disabled={selectedIds.size === 0}>启用</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已停用选中的账号')} disabled={selectedIds.size === 0}>停用</Button>
-              <Button size="sm" variant="outline" onClick={() => setBulkEditOpen(true)} disabled={selectedIds.size === 0}>绑定代理</Button>
-              <Button size="sm" variant="destructive" onClick={handleBatchDelete} disabled={selectedIds.size === 0}><Trash2 className="h-4 w-4" />删除</Button>
               <Button size="sm" variant="outline" onClick={queryCurrentPageInfo} disabled={queryingInfo}>{queryingInfo ? `查询 ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询余额'}</Button>
             </div>
           </div>
@@ -268,7 +284,7 @@ export function AccountsPage() {
                 <tr>
                   <TableHead className="w-12"><Checkbox checked={isCurrentPageAllSelected} onCheckedChange={toggleSelectCurrentPage} /></TableHead>
                   <TableHead>账号</TableHead>
-                  <TableHead>订阅</TableHead>
+                  <TableHead>订阅与余额</TableHead>
                   <TableHead>并发</TableHead>
                   <TableHead>最近调用</TableHead>
                   <TableHead>限频</TableHead>
