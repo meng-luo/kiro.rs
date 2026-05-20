@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
-use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
+use super::stream::{BufferedStreamContext, SseEvent, StreamContext, normalize_cache_result};
 use super::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse,
     OutputConfig, Thinking,
@@ -62,6 +62,7 @@ fn request_api_key(headers: &HeaderMap) -> Option<String> {
 /// 将 KiroProvider 错误映射为 HTTP 响应
 fn map_provider_error(err: Error) -> Response {
     let err_str = err.to_string();
+    let lower = err_str.to_lowercase();
 
     // 上下文窗口满了（对话历史累积超出模型上下文窗口限制）
     if err_str.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
@@ -88,6 +89,39 @@ fn map_provider_error(err: Error) -> Response {
         )
             .into_response();
     }
+
+    if lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("限频")
+    {
+        tracing::warn!(error = %err, "上游暂时限频");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse::new(
+                "rate_limit_error",
+                format!("上游暂时限频: {}", err),
+            )),
+        )
+            .into_response();
+    }
+
+    if err_str.contains("当前没有可直接调度的凭据")
+        || err_str.contains("所有凭据已用尽")
+        || err_str.contains("INSUFFICIENT_MODEL_CAPACITY")
+        || lower.contains("insufficient model capacity")
+    {
+        tracing::warn!(error = %err, "当前没有可承接请求的账号");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new(
+                "service_unavailable",
+                format!("当前没有账号可以承接请求: {}", err),
+            )),
+        )
+            .into_response();
+    }
+
     tracing::error!("Kiro API 调用失败: {}", err);
     (
         StatusCode::BAD_GATEWAY,
@@ -478,12 +512,17 @@ fn create_sse_stream(
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
                             // 发送最终事件并结束
+                            let final_input_tokens = ctx.context_input_tokens.unwrap_or(ctx.input_tokens);
+                            let cache_usage = normalize_cache_result(ctx.cache_result, final_input_tokens);
                             provider.token_manager().release_slot(&mut lease);
                             let final_events = ctx.generate_final_events();
                             provider.token_manager().update_diagnostic_tokens(
                                 &request_id,
-                                Some(ctx.context_input_tokens.unwrap_or(ctx.input_tokens)),
+                                Some(final_input_tokens),
                                 Some(ctx.output_tokens),
+                                Some(cache_usage.cache_creation_input_tokens),
+                                Some(cache_usage.cache_read_input_tokens),
+                                Some(cache_usage.uncached_input_tokens),
                             );
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
@@ -494,12 +533,16 @@ fn create_sse_stream(
                         None => {
                             // 流结束，发送最终事件
                             let final_input_tokens = ctx.context_input_tokens.unwrap_or(ctx.input_tokens);
+                            let cache_usage = normalize_cache_result(ctx.cache_result, final_input_tokens);
                             provider.token_manager().release_slot(&mut lease);
                             let final_events = ctx.generate_final_events();
                             provider.token_manager().update_diagnostic_tokens(
                                 &request_id,
                                 Some(final_input_tokens),
                                 Some(ctx.output_tokens),
+                                Some(cache_usage.cache_creation_input_tokens),
+                                Some(cache_usage.cache_read_input_tokens),
+                                Some(cache_usage.uncached_input_tokens),
                             );
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
@@ -697,10 +740,14 @@ async fn handle_non_stream_request(
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(cache_result.uncached_input_tokens);
+    let diagnostic_cache_usage = normalize_cache_result(cache_result, final_input_tokens);
     provider.token_manager().update_diagnostic_tokens(
         &provider_response.request_id,
         Some(final_input_tokens),
         Some(output_tokens),
+        Some(diagnostic_cache_usage.cache_creation_input_tokens),
+        Some(diagnostic_cache_usage.cache_read_input_tokens),
+        Some(diagnostic_cache_usage.uncached_input_tokens),
     );
 
     // 构建 Anthropic 响应
@@ -1047,10 +1094,14 @@ fn create_buffered_sse_stream(
                                 // 发生错误，完成处理并返回所有事件
                                 let all_events = ctx.finish_and_get_all_events();
                                 let (input_tokens, output_tokens) = ctx.final_token_usage();
+                                let cache_usage = ctx.diagnostic_cache_usage();
                                 provider.token_manager().update_diagnostic_tokens(
                                     &request_id,
                                     Some(input_tokens),
                                     Some(output_tokens),
+                                    Some(cache_usage.cache_creation_input_tokens),
+                                    Some(cache_usage.cache_read_input_tokens),
+                                    Some(cache_usage.uncached_input_tokens),
                                 );
                                 provider.token_manager().release_slot(&mut lease);
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
@@ -1063,10 +1114,14 @@ fn create_buffered_sse_stream(
                                 // 流结束，完成处理并返回所有事件（已更正 input_tokens）
                                 let all_events = ctx.finish_and_get_all_events();
                                 let (input_tokens, output_tokens) = ctx.final_token_usage();
+                                let cache_usage = ctx.diagnostic_cache_usage();
                                 provider.token_manager().update_diagnostic_tokens(
                                     &request_id,
                                     Some(input_tokens),
                                     Some(output_tokens),
+                                    Some(cache_usage.cache_creation_input_tokens),
+                                    Some(cache_usage.cache_read_input_tokens),
+                                    Some(cache_usage.uncached_input_tokens),
                                 );
                                 provider.token_manager().release_slot(&mut lease);
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events

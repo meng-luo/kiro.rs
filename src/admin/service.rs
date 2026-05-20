@@ -39,11 +39,11 @@ use super::proxy_store::{ProxyItem, ProxyListItem, ProxyStore};
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AdminSettingsRequest, AdminSettingsResponse,
     BalanceResponse, BatchCredentialUpdateRequest, BatchDisabledRequest, BatchIdsRequest,
-    BatchOperationResponse, CredentialStatusItem, CredentialTestRequest, CredentialsStatusResponse,
-    DiagnosticsCliResponse, DiagnosticsQueryRequest, LoadBalancingModeResponse,
-    PromptCacheConfigRequest, PromptCacheConfigResponse, ProxyListResponse, ProxyUpsertRequest,
-    SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SystemOperationJobResponse,
-    SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
+    BatchOperationResponse, CachedBalanceStatus, CredentialStatusItem, CredentialTestRequest,
+    CredentialsStatusResponse, DiagnosticsCliResponse, DiagnosticsQueryRequest,
+    LoadBalancingModeResponse, PromptCacheConfigRequest, PromptCacheConfigResponse,
+    ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest, SetMaxConcurrentRequest,
+    SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -51,6 +51,10 @@ pub type TestEventStream =
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
+/// 后台余额刷新周期（秒），低频小批量避免打扰主请求。
+const BALANCE_REFRESH_INTERVAL_SECS: u64 = 180;
+/// 后台每轮最多刷新账号数。
+const BALANCE_REFRESH_BATCH_SIZE: usize = 3;
 /// GitHub API 地址
 const GITHUB_API_BASE: &str = "https://api.github.com/repos";
 
@@ -167,10 +171,30 @@ impl AdminService {
         }
     }
 
+    pub fn start_balance_refresh_task(self: &Arc<Self>) {
+        if self.cache_path.is_none() {
+            return;
+        }
+
+        let service = self.clone();
+        tokio::spawn(async move {
+            let initial_delay = fastrand::u64(15..=60);
+            tokio::time::sleep(Duration::from_secs(initial_delay)).await;
+            let mut ticker =
+                tokio::time::interval(Duration::from_secs(BALANCE_REFRESH_INTERVAL_SECS));
+
+            loop {
+                ticker.tick().await;
+                service.refresh_random_balance_batch().await;
+            }
+        });
+    }
+
     /// 获取所有凭据状态
     pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
         let snapshot = self.token_manager.snapshot();
         let default_endpoint = self.token_manager.config().default_endpoint.clone();
+        let balance_lookup = self.cached_balance_lookup();
 
         let proxy_data = self.proxy_store.load().unwrap_or_default();
         let proxy_lookup: HashMap<u64, ProxyItem> = proxy_data
@@ -184,6 +208,7 @@ impl AdminService {
             .into_iter()
             .map(|entry| {
                 let proxy = entry.proxy_id.and_then(|id| proxy_lookup.get(&id));
+                let cached_balance = balance_lookup.get(&entry.id).cloned();
                 CredentialStatusItem {
                     id: entry.id,
                     priority: entry.priority,
@@ -198,6 +223,7 @@ impl AdminService {
                     masked_api_key: entry.masked_api_key,
                     email: entry.email,
                     subscription_title: entry.subscription_title,
+                    cached_balance,
                     success_count: entry.success_count,
                     last_used_at: entry.last_used_at.clone(),
                     has_proxy: entry.has_proxy,
@@ -286,6 +312,15 @@ impl AdminService {
             "rateLimitKind",
             query.rate_limit_kind.as_deref(),
         );
+        Self::push_query_part(
+            &mut parts,
+            "rateLimitOnly",
+            query
+                .rate_limit_only
+                .as_ref()
+                .map(|v| v.to_string())
+                .as_deref(),
+        );
         Self::push_query_part(&mut parts, "dispatchPath", query.dispatch_path.as_deref());
         Self::push_query_part(
             &mut parts,
@@ -319,6 +354,7 @@ impl AdminService {
             credential_id: query.credential_id,
             model: query.model.filter(|value| !value.trim().is_empty()),
             success: query.success,
+            rate_limit_only: query.rate_limit_only,
             rate_limit_kind: query
                 .rate_limit_kind
                 .filter(|value| !value.trim().is_empty()),
@@ -462,6 +498,74 @@ impl AdminService {
             usage_percentage,
             next_reset_at: usage.next_date_reset,
         })
+    }
+
+    async fn refresh_random_balance_batch(&self) {
+        let snapshot = self.token_manager.snapshot();
+        let mut ids = snapshot
+            .entries
+            .iter()
+            .filter(|entry| !entry.disabled)
+            .filter(|entry| {
+                entry.last_used_at.is_some()
+                    || self
+                        .balance_cache
+                        .lock()
+                        .get(&entry.id)
+                        .is_none_or(|cached| {
+                            let now = Utc::now().timestamp() as f64;
+                            (now - cached.cached_at) >= BALANCE_CACHE_TTL_SECS as f64
+                        })
+            })
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+
+        if ids.is_empty() {
+            return;
+        }
+
+        fastrand::shuffle(&mut ids);
+        for id in ids.into_iter().take(BALANCE_REFRESH_BATCH_SIZE) {
+            match timeout(Duration::from_secs(30), self.fetch_balance(id)).await {
+                Ok(Ok(balance)) => {
+                    {
+                        let mut cache = self.balance_cache.lock();
+                        cache.insert(
+                            id,
+                            CachedBalance {
+                                cached_at: Utc::now().timestamp() as f64,
+                                data: balance,
+                            },
+                        );
+                    }
+                    self.save_balance_cache();
+                }
+                Ok(Err(error)) => tracing::debug!("后台刷新凭据 #{} 余额失败: {}", id, error),
+                Err(_) => tracing::debug!("后台刷新凭据 #{} 余额超时", id),
+            }
+
+            tokio::time::sleep(Duration::from_secs(fastrand::u64(2..=8))).await;
+        }
+    }
+
+    fn cached_balance_lookup(&self) -> HashMap<u64, CachedBalanceStatus> {
+        let now = Utc::now().timestamp() as f64;
+        let cache = self.balance_cache.lock();
+        cache
+            .iter()
+            .filter_map(|(id, cached)| {
+                let cached_at_secs = cached.cached_at as i64;
+                let cached_at = DateTime::<Utc>::from_timestamp(cached_at_secs, 0)?;
+                Some((
+                    *id,
+                    CachedBalanceStatus {
+                        cached_at: cached_at.to_rfc3339(),
+                        fresh: (now - cached.cached_at) < BALANCE_CACHE_TTL_SECS as f64,
+                        balance: cached.data.clone(),
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// 添加新凭据

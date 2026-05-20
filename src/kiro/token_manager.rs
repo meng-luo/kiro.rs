@@ -1530,9 +1530,18 @@ impl MultiTokenManager {
         request_id: &str,
         input_tokens: Option<i32>,
         output_tokens: Option<i32>,
+        cache_creation_input_tokens: Option<i32>,
+        cache_read_input_tokens: Option<i32>,
+        uncached_input_tokens: Option<i32>,
     ) {
-        self.diagnostics
-            .update_tokens(request_id, input_tokens, output_tokens);
+        self.diagnostics.update_tokens(
+            request_id,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            uncached_input_tokens,
+        );
     }
 
     pub fn query_diagnostics(&self, query: &DiagnosticsQuery) -> DiagnosticsRequestsResponse {

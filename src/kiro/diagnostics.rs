@@ -31,6 +31,9 @@ pub struct RequestDiagnosticUpdate {
     pub cooldown_until: Option<String>,
     pub input_tokens: Option<i32>,
     pub output_tokens: Option<i32>,
+    pub cache_creation_input_tokens: Option<i32>,
+    pub cache_read_input_tokens: Option<i32>,
+    pub uncached_input_tokens: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +59,9 @@ pub struct RequestDiagnosticEntry {
     pub cooldown_until: Option<String>,
     pub input_tokens: Option<i32>,
     pub output_tokens: Option<i32>,
+    pub cache_creation_input_tokens: Option<i32>,
+    pub cache_read_input_tokens: Option<i32>,
+    pub uncached_input_tokens: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +71,7 @@ pub struct DiagnosticsQuery {
     pub credential_id: Option<u64>,
     pub model: Option<String>,
     pub success: Option<bool>,
+    pub rate_limit_only: Option<bool>,
     pub rate_limit_kind: Option<String>,
     pub dispatch_path: Option<String>,
     pub limit: Option<usize>,
@@ -97,6 +104,9 @@ pub struct DiagnosticsSummaryResponse {
     pub average_duration_ms: u64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub uncached_input_tokens: i64,
     pub model_rank: Vec<DiagnosticsBucket>,
     pub credential_rank: Vec<DiagnosticsBucket>,
     pub error_rank: Vec<DiagnosticsBucket>,
@@ -159,6 +169,9 @@ impl DiagnosticsStore {
             cooldown_until: update.cooldown_until,
             input_tokens: update.input_tokens,
             output_tokens: update.output_tokens,
+            cache_creation_input_tokens: update.cache_creation_input_tokens,
+            cache_read_input_tokens: update.cache_read_input_tokens,
+            uncached_input_tokens: update.uncached_input_tokens,
         };
 
         {
@@ -201,6 +214,9 @@ impl DiagnosticsStore {
         request_id: &str,
         input_tokens: Option<i32>,
         output_tokens: Option<i32>,
+        cache_creation_input_tokens: Option<i32>,
+        cache_read_input_tokens: Option<i32>,
+        uncached_input_tokens: Option<i32>,
     ) {
         if !self.config.enabled {
             return;
@@ -219,6 +235,15 @@ impl DiagnosticsStore {
             }
             if output_tokens.is_some() {
                 entry.output_tokens = output_tokens;
+            }
+            if cache_creation_input_tokens.is_some() {
+                entry.cache_creation_input_tokens = cache_creation_input_tokens;
+            }
+            if cache_read_input_tokens.is_some() {
+                entry.cache_read_input_tokens = cache_read_input_tokens;
+            }
+            if uncached_input_tokens.is_some() {
+                entry.uncached_input_tokens = uncached_input_tokens;
             }
             updated = Some(entry.clone());
         }
@@ -266,6 +291,21 @@ impl DiagnosticsStore {
             .filter_map(|entry| entry.output_tokens)
             .map(i64::from)
             .sum();
+        let cache_creation_input_tokens = entries
+            .iter()
+            .filter_map(|entry| entry.cache_creation_input_tokens)
+            .map(i64::from)
+            .sum();
+        let cache_read_input_tokens = entries
+            .iter()
+            .filter_map(|entry| entry.cache_read_input_tokens)
+            .map(i64::from)
+            .sum();
+        let uncached_input_tokens = entries
+            .iter()
+            .filter_map(|entry| entry.uncached_input_tokens)
+            .map(i64::from)
+            .sum();
 
         DiagnosticsSummaryResponse {
             total_requests,
@@ -276,6 +316,9 @@ impl DiagnosticsStore {
             average_duration_ms,
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            uncached_input_tokens,
             model_rank: Self::rank(
                 entries
                     .iter()
@@ -389,6 +432,12 @@ impl DiagnosticsStore {
         if query
             .success
             .is_some_and(|success| entry.success != success)
+        {
+            return false;
+        }
+        if query
+            .rate_limit_only
+            .is_some_and(|only| only && entry.rate_limit_kind.is_none())
         {
             return false;
         }

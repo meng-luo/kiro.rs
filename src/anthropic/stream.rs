@@ -1259,6 +1259,24 @@ impl BufferedStreamContext {
             self.inner.output_tokens,
         )
     }
+
+    pub fn diagnostic_cache_usage(&self) -> CacheResult {
+        let input_tokens = self
+            .inner
+            .context_input_tokens
+            .unwrap_or(self.estimated_input_tokens);
+        normalize_cache_result(self.cache_result, input_tokens)
+    }
+}
+
+pub fn normalize_cache_result(cache_result: CacheResult, input_tokens: i32) -> CacheResult {
+    let mut result = cache_result;
+    if result.cache_creation_input_tokens > 0 && result.cache_read_input_tokens == 0 {
+        result.cache_creation_input_tokens = input_tokens.max(0);
+    }
+    let cached_tokens = result.cache_creation_input_tokens + result.cache_read_input_tokens;
+    result.uncached_input_tokens = (input_tokens - cached_tokens).max(0);
+    result
 }
 
 /// 简单的 token 估算

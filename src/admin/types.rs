@@ -107,6 +107,9 @@ pub struct CredentialStatusItem {
     pub email: Option<String>,
     /// 订阅等级
     pub subscription_title: Option<String>,
+    /// 最近缓存的余额信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_balance: Option<CachedBalanceStatus>,
     /// API 调用成功次数
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
@@ -165,6 +168,17 @@ pub struct CredentialStatusItem {
     pub last_soft_fallback_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedBalanceStatus {
+    /// 缓存时间（RFC3339）
+    pub cached_at: String,
+    /// 缓存是否仍在建议展示时间内
+    pub fresh: bool,
+    /// 缓存来源的余额数据
+    pub balance: BalanceResponse,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticsQueryRequest {
@@ -173,6 +187,7 @@ pub struct DiagnosticsQueryRequest {
     pub credential_id: Option<u64>,
     pub model: Option<String>,
     pub success: Option<bool>,
+    pub rate_limit_only: Option<bool>,
     pub rate_limit_kind: Option<String>,
     pub dispatch_path: Option<String>,
     pub limit: Option<usize>,

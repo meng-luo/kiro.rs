@@ -186,6 +186,7 @@ async fn main() {
                 endpoint_names.clone(),
                 prompt_cache.clone(),
             ));
+            admin_service.start_balance_refresh_task();
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 
