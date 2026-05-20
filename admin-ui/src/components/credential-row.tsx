@@ -33,10 +33,12 @@ import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent } from 
 interface CredentialRowProps {
   credential: CredentialStatusItem
   onViewBalance: (id: number) => void
+  onRefreshBalance?: (id: number) => void
   selected: boolean
   onToggleSelect: () => void
   balance: BalanceResponse | null
   loadingBalance: boolean
+  variant?: 'table' | 'card'
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
@@ -226,6 +228,24 @@ function balanceFreshText(credential: CredentialStatusItem, balance: BalanceResp
   return credential.cachedBalance.fresh ? '最近更新' : '待更新'
 }
 
+function cardTone(credential: CredentialStatusItem) {
+  if (credential.disabled) return 'border-gray-300 bg-gray-50/70 dark:bg-muted/20'
+  if (credential.dispatchState === 'blocked' || credential.lastRateLimitKind === 'suspicious_activity') {
+    return 'border-red-300 bg-red-50/70 dark:bg-red-950/10'
+  }
+  if (credential.dispatchState === 'cooldown' || credential.dispatchState === 'saturated') {
+    return 'border-yellow-300 bg-yellow-50/70 dark:bg-yellow-950/10'
+  }
+  return 'border-green-300 bg-green-50/60 dark:bg-green-950/10'
+}
+
+function progressTone(credential: CredentialStatusItem) {
+  if (credential.disabled || credential.dispatchState === 'blocked') return 'opacity-50 grayscale'
+  if (credential.dispatchState === 'saturated') return '[&>div]:bg-red-500'
+  if (credential.dispatchState === 'cooldown') return '[&>div]:bg-yellow-500'
+  return '[&>div]:bg-green-500'
+}
+
 function probeStatusText(credential: CredentialStatusItem) {
   if (credential.disabled) return '已停用'
   switch (credential.dispatchState) {
@@ -253,10 +273,12 @@ function CellText({ title, children, className }: { title?: string; children: st
 export function CredentialRow({
   credential,
   onViewBalance,
+  onRefreshBalance,
   selected,
   onToggleSelect,
   balance,
   loadingBalance,
+  variant = 'table',
 }: CredentialRowProps) {
   const [showSettingsDialog, setShowSettingsDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -269,6 +291,7 @@ export function CredentialRow({
   const [testPrompt, setTestPrompt] = useState('请回复一句简短的话，确认连接已可用。')
   const [testing, setTesting] = useState(false)
   const [testEvents, setTestEvents] = useState<CredentialTestEvent[]>([])
+  const [actionsOpen, setActionsOpen] = useState(false)
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
@@ -491,8 +514,100 @@ export function CredentialRow({
     }
   }
 
+  const actionMenu = (
+    <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-md border bg-popover p-1 text-sm shadow-lg">
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); onViewBalance(credential.id) }}>查看余额</button>
+      <button
+        className="block w-full rounded px-3 py-2 text-left hover:bg-muted"
+        onClick={() => {
+          setActionsOpen(false)
+          if (onRefreshBalance) onRefreshBalance(credential.id)
+          else onViewBalance(credential.id)
+        }}
+      >
+        刷新余额
+      </button>
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" disabled={!canRecover || recoverCredential.isPending} onClick={() => { setActionsOpen(false); handleRecover() }}>重置失败</button>
+      <div className="my-1 border-t" />
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowTestDialog(true) }}>测试连接</button>
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowSettingsDialog(true) }}>查看详情</button>
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowSettingsDialog(true) }}>编辑账号</button>
+      <div className="my-1 border-t" />
+      <button className="block w-full rounded px-3 py-2 text-left text-destructive hover:bg-destructive/10" onClick={() => { setActionsOpen(false); setShowDeleteDialog(true) }}>删除账号</button>
+    </div>
+  )
+
   return (
     <>
+      {variant === 'card' ? (
+        <div className={cn('rounded-md border p-4', cardTone(credential), selected && 'ring-2 ring-primary/30')}>
+          <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 flex-1 items-center gap-4">
+              <Checkbox checked={selected} onCheckedChange={onToggleSelect} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate font-medium" title={credential.email || `账号 #${credential.id}`}>
+                    {credential.email || `账号 #${credential.id}`}
+                  </span>
+                  <Badge variant="outline" className="max-w-[140px] truncate" title={subscriptionLabel(credential, visibleBalance)}>
+                    {loadingBalance ? '查询中...' : subscriptionLabel(credential, visibleBalance)}
+                  </Badge>
+                  {credential.isCurrent ? <Badge variant="success">当前</Badge> : null}
+                </div>
+                <div className="mt-1 truncate text-sm text-muted-foreground" title={`${credential.endpoint} · 最近使用：${formatLastUsed(credential.lastUsedAt)}`}>
+                  {credential.endpoint} · 最近使用：{formatLastUsed(credential.lastUsedAt)}
+                </div>
+              </div>
+              <Badge variant={status.variant} title={status.title} className="shrink-0">
+                {status.text}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <label className="flex items-center gap-2 text-sm">
+                <Switch checked={!credential.disabled} onCheckedChange={handleToggleDisabled} disabled={setDisabled.isPending} />
+                <span>启用</span>
+              </label>
+              <div className="relative">
+                <Button size="sm" variant="outline" onClick={() => setActionsOpen((value) => !value)}>
+                  操作
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+                {actionsOpen ? actionMenu : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 text-sm md:grid-cols-3">
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">{visibleBalance ? '余额' : '余额'}</div>
+              <div className={cn('font-medium', visibleBalance ? 'text-blue-600' : 'text-muted-foreground')}>
+                {loadingBalance
+                  ? '查询中...'
+                  : visibleBalance
+                    ? `${visibleBalance.remaining.toFixed(2)} / ${visibleBalance.usageLimit.toFixed(2)}`
+                    : '未查询'}
+              </div>
+              {visibleBalance ? (
+                <div className="mt-1 text-xs text-muted-foreground">{balanceFreshText(credential, balance)} · 已用 {visibleBalance.currentUsage.toFixed(2)}</div>
+              ) : null}
+            </div>
+            <div className="md:col-span-2">
+              <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>并发 {credential.currentConcurrent}/{credential.maxConcurrent}</span>
+                {rateLimit ? <span title={rateLimit.title}>{rateLimit.text}</span> : null}
+              </div>
+              <Progress value={progressValue} className={progressTone(credential)} />
+              <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                <span className="truncate" title={credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个活跃会话`}>
+                  粘性会话：{credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个`}
+                </span>
+                <span className="truncate" title={dispatchPathMeta.title}>最近调度：{dispatchPathMeta.text}</span>
+                <span className="truncate" title={authMethod?.title ?? ''}>接入类型：{authMethod?.text ?? balanceLabel(credential)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
       <tr className={cn(
         'border-b align-middle text-sm',
         credential.isCurrent ? 'bg-primary/5' : 'bg-background',
@@ -503,8 +618,8 @@ export function CredentialRow({
         </td>
         <td className="max-w-[220px] px-3 py-3">
           <div className="min-w-0 space-y-1">
-            <CellText className="font-medium" title={credential.email || `凭据 #${credential.id}`}>
-              {credential.email || `凭据 #${credential.id}`}
+            <CellText className="font-medium" title={credential.email || `账号 #${credential.id}`}>
+              {credential.email || `账号 #${credential.id}`}
             </CellText>
             <div className="flex items-center gap-2 overflow-hidden">
               {credential.isCurrent && <Badge variant="success" className="whitespace-nowrap">当前</Badge>}
@@ -606,13 +721,14 @@ export function CredentialRow({
           </div>
         </td>
       </tr>
+      )}
 
       <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>账号设置</DialogTitle>
-            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `凭据 #${credential.id}`} · ${credential.endpoint}`}>
-              {credential.email || `凭据 #${credential.id}`} · {credential.endpoint}
+            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `账号 #${credential.id}`} · ${credential.endpoint}`}>
+              {credential.email || `账号 #${credential.id}`} · {credential.endpoint}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 md:grid-cols-2">
@@ -680,8 +796,8 @@ export function CredentialRow({
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>测试接入</DialogTitle>
-            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `凭据 #${credential.id}`} · ${credential.endpoint}`}>
-              {credential.email || `凭据 #${credential.id}`} · {credential.endpoint}
+            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `账号 #${credential.id}`} · ${credential.endpoint}`}>
+              {credential.email || `账号 #${credential.id}`} · {credential.endpoint}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -692,7 +808,7 @@ export function CredentialRow({
                     <Activity className="h-5 w-5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="truncate font-medium">{credential.email || `凭据 #${credential.id}`}</div>
+                    <div className="truncate font-medium">{credential.email || `账号 #${credential.id}`}</div>
                     <div className="mt-1 flex gap-2 overflow-hidden text-xs text-muted-foreground">
                       <CellText>{authMethod?.text ?? '账号接入'}</CellText>
                       <CellText>{credential.endpoint}</CellText>

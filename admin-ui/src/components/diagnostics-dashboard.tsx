@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useDiagnosticsCli, useDiagnosticsRequests, useDiagnosticsSummary } from '@/hooks/use-credentials'
 import { cn } from '@/lib/utils'
-import type { DiagnosticsBucket, DiagnosticsFilters, RequestDiagnosticEntry } from '@/types/api'
+import type { DiagnosticsBucket, DiagnosticsFilters, DiagnosticsPerformanceItem, DiagnosticsTimeBucket, RequestDiagnosticEntry } from '@/types/api'
 
 function formatNumber(value?: number | null) {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
@@ -103,6 +103,74 @@ function RankList({ title, items }: { title: string; items: DiagnosticsBucket[] 
   )
 }
 
+function TrendBars({ items }: { items: DiagnosticsTimeBucket[] }) {
+  const max = Math.max(1, ...items.map((item) => item.totalRequests))
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">请求趋势</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {items.length === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无趋势数据</div>
+        ) : (
+          items.slice(-24).map((item) => (
+            <div key={item.key} className="grid grid-cols-[88px_minmax(0,1fr)_64px] items-center gap-3 text-sm">
+              <div className="truncate text-xs text-muted-foreground" title={item.key}>{item.key}</div>
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.max(4, item.totalRequests / max * 100)}%` }} />
+              </div>
+              <div className="text-right text-xs text-muted-foreground">{formatNumber(item.totalRequests)}</div>
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function PerformanceTable({ title, items }: { title: string; items: DiagnosticsPerformanceItem[] }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无数据</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[620px] text-sm">
+              <thead className="border-b text-xs text-muted-foreground">
+                <tr>
+                  <th className="py-2 text-left font-medium">名称</th>
+                  <th className="py-2 text-right font-medium">请求</th>
+                  <th className="py-2 text-right font-medium">成功率</th>
+                  <th className="py-2 text-right font-medium">平均耗时</th>
+                  <th className="py-2 text-right font-medium">限频</th>
+                  <th className="py-2 text-right font-medium">Token</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {items.map((item) => (
+                  <tr key={item.key}>
+                    <td className="max-w-[220px] truncate py-3" title={item.key}>{item.key}</td>
+                    <td className="py-3 text-right">{formatNumber(item.totalRequests)}</td>
+                    <td className="py-3 text-right">{item.totalRequests ? `${((item.successRequests / item.totalRequests) * 100).toFixed(1)}%` : '0%'}</td>
+                    <td className="py-3 text-right">{formatDuration(item.averageDurationMs)}</td>
+                    <td className="py-3 text-right">{formatNumber(item.rateLimitedRequests)}</td>
+                    <td className="py-3 text-right">{formatNumber(item.inputTokens + item.outputTokens)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function RequestRow({ item }: { item: RequestDiagnosticEntry }) {
   return (
     <tr className="border-b text-sm">
@@ -141,7 +209,7 @@ function RequestRow({ item }: { item: RequestDiagnosticEntry }) {
 }
 
 export function DiagnosticsDashboard() {
-  const [since, setSince] = useState('2h')
+  const [since, setSince] = useState('24h')
   const [credentialId, setCredentialId] = useState('')
   const [model, setModel] = useState('')
   const [rateLimitKind, setRateLimitKind] = useState('')
@@ -193,7 +261,19 @@ export function DiagnosticsDashboard() {
         <CardContent className="grid gap-3 p-4 md:grid-cols-3 lg:grid-cols-6">
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">时间范围</label>
-            <Input value={since} onChange={(e) => setSince(e.target.value)} placeholder="2h" />
+            <div className="flex gap-2">
+              {[
+                ['1小时', '1h'],
+                ['6小时', '6h'],
+                ['24小时', '24h'],
+                ['7天', '168h'],
+                ['30天', '720h'],
+              ].map(([label, value]) => (
+                <Button key={value} size="sm" variant={since === value ? 'default' : 'outline'} onClick={() => setSince(value)}>
+                  {label}
+                </Button>
+              ))}
+            </div>
           </div>
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">账号 ID</label>
@@ -245,6 +325,16 @@ export function DiagnosticsDashboard() {
         <RankList title="原始模型排行" items={data?.modelRank ?? []} />
         <RankList title="账号命中排行" items={data?.credentialRank ?? []} />
         <RankList title="错误排行" items={data?.errorRank ?? []} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <TrendBars items={data?.timeBuckets ?? []} />
+        <RankList title="耗时分布" items={data?.latencyBuckets ?? []} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <PerformanceTable title="账号性能分析" items={data?.credentialPerformance ?? []} />
+        <PerformanceTable title="模型性能对比" items={data?.modelPerformance ?? []} />
       </div>
 
       <Card>

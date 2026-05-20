@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, FileUp, Plus, RefreshCw, RotateCcw, Trash2, Upload } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { CheckCircle2, FileUp, Plus, RotateCcw, Trash2, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -10,12 +10,11 @@ import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
-import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { CredentialRow } from '@/components/credential-row'
 import { MetricCard } from '@/components/metric-card'
 import {
   useBatchDeleteCredentials,
-  useBatchRefreshCredentials,
+  useBatchRefreshBalances,
   useBatchResetCredentials,
   useBatchSetDisabled,
   useBatchUpdateCredentials,
@@ -24,12 +23,8 @@ import {
   useProxies,
 } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
-import { cn, extractErrorMessage } from '@/lib/utils'
-import type { BalanceResponse, CredentialStatusItem } from '@/types/api'
-
-function TableHead({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <th className={cn('bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground whitespace-nowrap', className)}>{children}</th>
-}
+import { extractErrorMessage } from '@/lib/utils'
+import type { BalanceResponse, BatchOperationResponse, CredentialStatusItem } from '@/types/api'
 
 export function AccountsPage() {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
@@ -38,10 +33,6 @@ export function AccountsPage() {
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
-  const [verifying, setVerifying] = useState(false)
-  const [verifyProgress, setVerifyProgress] = useState({ current: 0, total: 0 })
-  const [verifyResults, setVerifyResults] = useState<Map<number, VerifyResult>>(new Map())
   const [balanceMap, setBalanceMap] = useState<Map<number, BalanceResponse>>(new Map())
   const [loadingBalanceIds, setLoadingBalanceIds] = useState<Set<number>>(new Set())
   const [queryingInfo, setQueryingInfo] = useState(false)
@@ -52,14 +43,13 @@ export function AccountsPage() {
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkProxyMode, setBulkProxyMode] = useState('inherit')
   const [bulkProxyId, setBulkProxyId] = useState('')
-  const cancelVerifyRef = useRef(false)
 
   const { data, isLoading, error } = useCredentials()
   useCredentialsStream()
   const proxies = useProxies()
   const batchDelete = useBatchDeleteCredentials()
   const batchReset = useBatchResetCredentials()
-  const batchRefresh = useBatchRefreshCredentials()
+  const batchRefreshBalances = useBatchRefreshBalances()
   const batchDisabled = useBatchSetDisabled()
   const batchUpdate = useBatchUpdateCredentials()
 
@@ -110,18 +100,20 @@ export function AccountsPage() {
     })
   }
 
-  const runBatch = async (action: () => Promise<{ successCount: number; failCount: number }>, successText: string) => {
+  const runBatch = async <T extends BatchOperationResponse>(action: () => Promise<T>, successText: string): Promise<T | null> => {
     if (selectedIds.size === 0) {
       toast.error('请先选择账号')
-      return
+      return null
     }
     try {
       const result = await action()
       if (result.failCount === 0) toast.success(successText)
       else toast.warning(`完成：成功 ${result.successCount} 个，失败 ${result.failCount} 个`)
       setSelectedIds(new Set())
+      return result
     } catch (error) {
       toast.error(extractErrorMessage(error))
+      return null
     }
   }
 
@@ -130,32 +122,45 @@ export function AccountsPage() {
     runBatch(() => batchDelete.mutateAsync({ ids: selectedArray }), '已删除选中的账号')
   }
 
-  const handleBatchVerify = async () => {
-    if (selectedIds.size === 0) {
-      toast.error('请先选择账号')
-      return
+  const handleBatchRefreshBalances = async () => {
+    setLoadingBalanceIds((prev) => {
+      const next = new Set(prev)
+      selectedArray.forEach((id) => next.add(id))
+      return next
+    })
+    const result = await runBatch(
+      () => batchRefreshBalances.mutateAsync({ ids: selectedArray }),
+      '已刷新选中账号的余额',
+    )
+    if (result) {
+      setBalanceMap((prev) => {
+        const next = new Map(prev)
+        result.balances.forEach((balance) => next.set(balance.id, balance))
+        return next
+      })
     }
-    setVerifying(true)
-    cancelVerifyRef.current = false
-    setVerifyDialogOpen(true)
-    setVerifyProgress({ current: 0, total: selectedArray.length })
-    setVerifyResults(new Map(selectedArray.map((id) => [id, { id, status: 'pending' as const }])))
-    let successCount = 0
-    for (let i = 0; i < selectedArray.length; i++) {
-      if (cancelVerifyRef.current) break
-      const id = selectedArray[i]
-      setVerifyResults((prev) => new Map(prev).set(id, { id, status: 'verifying' }))
-      try {
-        const balance = await getCredentialBalance(id)
-        successCount += 1
-        setVerifyResults((prev) => new Map(prev).set(id, { id, status: 'success', usage: `${balance.currentUsage}/${balance.usageLimit}` }))
-      } catch (error) {
-        setVerifyResults((prev) => new Map(prev).set(id, { id, status: 'failed', error: extractErrorMessage(error) }))
-      }
-      setVerifyProgress({ current: i + 1, total: selectedArray.length })
+    setLoadingBalanceIds((prev) => {
+      const next = new Set(prev)
+      selectedArray.forEach((id) => next.delete(id))
+      return next
+    })
+  }
+
+  const refreshSingleBalance = async (id: number) => {
+    setLoadingBalanceIds((prev) => new Set(prev).add(id))
+    try {
+      const balance = await getCredentialBalance(id)
+      setBalanceMap((prev) => new Map(prev).set(id, balance))
+      toast.success('余额已刷新')
+    } catch (error) {
+      toast.error(extractErrorMessage(error))
+    } finally {
+      setLoadingBalanceIds((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
-    setVerifying(false)
-    if (!cancelVerifyRef.current) toast.success(`验活完成：成功 ${successCount}/${selectedArray.length}`)
   }
 
   const queryCurrentPageInfo = async () => {
@@ -234,18 +239,22 @@ export function AccountsPage() {
       </div>
 
       {selectedIds.size > 0 ? (
-        <div className="sticky top-3 z-10 rounded-md border bg-background/95 p-3 shadow-sm backdrop-blur">
+        <div className="rounded-md bg-blue-50 p-3 dark:bg-blue-950/20">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-            <div className="text-sm font-medium">已选择 {selectedIds.size} 个账号</div>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-medium text-blue-900 dark:text-blue-100">已选中 {selectedIds.size} 个账号</span>
+              <span className="text-blue-200">•</span>
+              <button className="text-xs font-medium text-blue-700 hover:text-blue-800" onClick={toggleSelectCurrentPage}>选择当前页</button>
+              <span className="text-blue-200">•</span>
+              <button className="text-xs font-medium text-blue-700 hover:text-blue-800" onClick={() => setSelectedIds(new Set())}>清空选择</button>
+            </div>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={handleBatchVerify}><CheckCircle2 className="h-4 w-4" />验活</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchRefresh.mutateAsync({ ids: selectedArray }), '已刷新选中的账号')}><RefreshCw className="h-4 w-4" />刷新 Token</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchReset.mutateAsync({ ids: selectedArray }), '已恢复选中的账号')}><RotateCcw className="h-4 w-4" />恢复</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: false }), '已启用选中的账号')}>启用</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已停用选中的账号')}>停用</Button>
-              <Button size="sm" variant="outline" onClick={() => setBulkEditOpen(true)}>绑定代理</Button>
               <Button size="sm" variant="destructive" onClick={handleBatchDelete}><Trash2 className="h-4 w-4" />删除</Button>
-              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>取消选择</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchReset.mutateAsync({ ids: selectedArray }), '已恢复选中的账号')}><RotateCcw className="h-4 w-4" />重置状态</Button>
+              <Button size="sm" variant="outline" onClick={handleBatchRefreshBalances}><CheckCircle2 className="h-4 w-4" />刷新余额</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: false }), '已启用选中的账号')}>启用调度</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已停用选中的账号')}>禁用调度</Button>
+              <Button size="sm" onClick={() => setBulkEditOpen(true)}>批量编辑</Button>
             </div>
           </div>
         </div>
@@ -278,35 +287,29 @@ export function AccountsPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="overflow-x-auto rounded-md border">
-            <table className="min-w-[1180px] w-full border-collapse">
-              <thead>
-                <tr>
-                  <TableHead className="w-12"><Checkbox checked={isCurrentPageAllSelected} onCheckedChange={toggleSelectCurrentPage} /></TableHead>
-                  <TableHead>账号</TableHead>
-                  <TableHead>订阅与余额</TableHead>
-                  <TableHead>并发</TableHead>
-                  <TableHead>最近调用</TableHead>
-                  <TableHead>限频</TableHead>
-                  <TableHead>粘性</TableHead>
-                  <TableHead>调度</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </tr>
-              </thead>
-              <tbody>
-                {currentCredentials.map((credential: CredentialStatusItem) => (
-                  <CredentialRow
-                    key={credential.id}
-                    credential={credential}
-                    onViewBalance={(id) => { setSelectedCredentialId(id); setBalanceDialogOpen(true) }}
-                    selected={selectedIds.has(credential.id)}
-                    onToggleSelect={() => toggleSelect(credential.id)}
-                    balance={balanceMap.get(credential.id) || null}
-                    loadingBalance={loadingBalanceIds.has(credential.id)}
-                  />
-                ))}
-              </tbody>
-            </table>
+          <div className="flex items-center border-b pb-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={isCurrentPageAllSelected} onCheckedChange={toggleSelectCurrentPage} />
+              <span>全选当前页</span>
+            </label>
+          </div>
+          <div className="space-y-2">
+            {currentCredentials.map((credential: CredentialStatusItem) => (
+              <CredentialRow
+                key={credential.id}
+                credential={credential}
+                onViewBalance={(id) => { setSelectedCredentialId(id); setBalanceDialogOpen(true) }}
+                onRefreshBalance={refreshSingleBalance}
+                selected={selectedIds.has(credential.id)}
+                onToggleSelect={() => toggleSelect(credential.id)}
+                balance={balanceMap.get(credential.id) || null}
+                loadingBalance={loadingBalanceIds.has(credential.id)}
+                variant="card"
+              />
+            ))}
+            {currentCredentials.length === 0 ? (
+              <div className="rounded-md border py-12 text-center text-sm text-muted-foreground">暂无账号</div>
+            ) : null}
           </div>
           <div className="flex items-center justify-between gap-3">
             <div className="text-sm text-muted-foreground">显示 {credentials.length === 0 ? 0 : startIndex + 1}-{endIndex} / {credentials.length}</div>
@@ -327,8 +330,6 @@ export function AccountsPage() {
       <AddCredentialDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
       <BatchImportDialog open={batchImportDialogOpen} onOpenChange={setBatchImportDialogOpen} />
       <KamImportDialog open={kamImportDialogOpen} onOpenChange={setKamImportDialogOpen} />
-      <BatchVerifyDialog open={verifyDialogOpen} onOpenChange={setVerifyDialogOpen} verifying={verifying} progress={verifyProgress} results={verifyResults} onCancel={() => { cancelVerifyRef.current = true; setVerifying(false) }} />
-
       <Dialog open={bulkEditOpen} onOpenChange={setBulkEditOpen}>
         <DialogContent>
           <DialogHeader>

@@ -34,6 +34,8 @@ export function MonitorPage() {
   const totalRequests = summary.data?.totalRequests ?? 0
   const successRate = percent(summary.data?.successRequests, totalRequests)
   const health = (data?.schedulableCount ?? 0) > 0 && alertAccounts.length === 0 ? '运行正常' : '需要关注'
+  const trend = summary.data?.timeBuckets ?? []
+  const maxTrend = Math.max(1, ...trend.map((item) => item.totalRequests))
 
   return (
     <div className="space-y-6">
@@ -117,6 +119,30 @@ export function MonitorPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="rounded-md">
+        <CardHeader>
+          <CardTitle className="text-base">24 小时请求趋势</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {trend.length === 0 ? (
+            <div className="rounded-md border py-10 text-center text-sm text-muted-foreground">暂无请求趋势</div>
+          ) : (
+            <div className="grid h-44 grid-cols-12 items-end gap-2">
+              {trend.slice(-12).map((item) => (
+                <div key={item.key} className="flex min-w-0 flex-col items-center gap-2">
+                  <div
+                    className="w-full rounded-t bg-blue-500"
+                    style={{ height: `${Math.max(8, item.totalRequests / maxTrend * 150)}px` }}
+                    title={`${item.key}：${item.totalRequests} 次`}
+                  />
+                  <div className="w-full truncate text-center text-[10px] text-muted-foreground" title={item.key}>{item.key.slice(-5)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

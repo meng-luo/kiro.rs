@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Check, Copy, Network, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { ChangeEvent, useEffect, useRef, useState } from 'react'
+import { Check, Copy, Download, FileUp, Network, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MetricCard } from '@/components/metric-card'
-import { useCreateProxy, useDeleteProxy, useProxies, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
+import { useBatchDeleteProxies, useBatchQualityCheckProxies, useBatchTestProxies, useCreateProxy, useDeleteProxy, useProxies, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { formatTime } from '@/lib/format'
 import type { ProxyListItem, ProxyUpsertRequest } from '@/types/api'
@@ -31,12 +31,22 @@ function status(proxy: ProxyListItem) {
   return <Badge variant="secondary">未测试</Badge>
 }
 
+function cardTone(proxy: ProxyListItem) {
+  if (proxy.disabled) return 'border-gray-300 bg-gray-50/70 dark:bg-muted/20'
+  if (proxy.lastTestStatus === 'failed') return 'border-red-300 bg-red-50/70 dark:bg-red-950/10'
+  if (proxy.qualityScore && proxy.qualityScore < 75) return 'border-yellow-300 bg-yellow-50/70 dark:bg-yellow-950/10'
+  return 'border-green-300 bg-green-50/60 dark:bg-green-950/10'
+}
+
 export function ProxiesPage() {
   const proxies = useProxies()
   const createProxy = useCreateProxy()
   const updateProxy = useUpdateProxy()
   const deleteProxy = useDeleteProxy()
   const testProxy = useTestProxy()
+  const batchTest = useBatchTestProxies()
+  const batchDelete = useBatchDeleteProxies()
+  const batchQuality = useBatchQualityCheckProxies()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<ProxyListItem | null>(null)
   const [form, setForm] = useState<ProxyUpsertRequest>(emptyForm)
@@ -44,6 +54,7 @@ export function ProxiesPage() {
   const [protocol, setProtocol] = useState('all')
   const [state, setState] = useState('all')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const importInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (!dialogOpen) return
@@ -86,7 +97,7 @@ export function ProxiesPage() {
     if (state === 'enabled' && proxy.disabled) return false
     if (state === 'disabled' && !proxy.disabled) return false
     if (state === 'failed' && proxy.lastTestStatus !== 'failed') return false
-    if (state === 'unknown' && proxy.lastTestStatus) return false
+    if (state === 'unknown' && proxy.lastTestStatus && proxy.lastTestStatus !== 'unknown') return false
     return true
   })
   const visibleIds = list.map((item) => item.id)
@@ -113,36 +124,85 @@ export function ProxiesPage() {
   const selectedArray = Array.from(selectedIds)
 
   const copyProxy = async (proxy: ProxyListItem) => {
-    await navigator.clipboard.writeText(`${proxy.protocol}://${proxy.host}:${proxy.port}`)
+    const auth = proxy.username ? `${proxy.username}@` : ''
+    await navigator.clipboard.writeText(`${proxy.protocol}://${auth}${proxy.host}:${proxy.port}`)
     toast.success('代理地址已复制')
   }
 
   const testSelected = async () => {
-    let success = 0
-    for (const id of selectedArray) {
-      try {
-        const item = await testProxy.mutateAsync(id)
-        if (item.lastTestStatus === 'ok') success += 1
-      } catch {
-        // 单个失败继续测试剩余代理
-      }
-    }
-    toast.success(`测试完成：${success}/${selectedArray.length} 个可用`)
+    const result = await batchTest.mutateAsync({ ids: selectedArray })
+    toast.success(`测试完成：${result.successCount}/${selectedArray.length} 个可用`)
   }
 
   const deleteSelected = async () => {
     if (!confirm(`确定删除 ${selectedArray.length} 个代理吗？已绑定账号的代理不会被删除。`)) return
-    let success = 0
-    for (const id of selectedArray) {
-      try {
-        await deleteProxy.mutateAsync(id)
-        success += 1
-      } catch {
-        // 单个失败继续处理剩余代理
-      }
-    }
+    const result = await batchDelete.mutateAsync({ ids: selectedArray })
     setSelectedIds(new Set())
-    toast.success(`已删除 ${success}/${selectedArray.length} 个代理`)
+    toast.success(`已删除 ${result.successCount}/${selectedArray.length} 个代理`)
+  }
+
+  const qualitySelected = async () => {
+    const result = await batchQuality.mutateAsync({ ids: selectedArray })
+    toast.success(`检测完成：${result.successCount}/${selectedArray.length} 个通过`)
+  }
+
+  const exportProxies = () => {
+    const payload = list.map((proxy) => ({
+      name: proxy.name,
+      protocol: proxy.protocol,
+      host: proxy.host,
+      port: proxy.port,
+      username: proxy.username ?? null,
+      disabled: proxy.disabled,
+    }))
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `kiro-proxies-${Date.now()}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const parseProxyImport = (text: string): ProxyUpsertRequest[] => {
+    const raw = JSON.parse(text)
+    const items = Array.isArray(raw) ? raw : raw?.proxies
+    if (!Array.isArray(items)) throw new Error('请选择代理列表 JSON 文件')
+    return items.map((item, index) => {
+      const name = String(item.name ?? `代理 ${index + 1}`).trim()
+      const protocol = String(item.protocol ?? 'http').trim().toLowerCase()
+      const host = String(item.host ?? '').trim()
+      const port = Number(item.port)
+      if (!name || !host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+        throw new Error(`第 ${index + 1} 条代理格式不正确`)
+      }
+      return {
+        name,
+        protocol,
+        host,
+        port,
+        username: item.username ? String(item.username).trim() : null,
+        password: item.password ? String(item.password) : null,
+        disabled: Boolean(item.disabled),
+      }
+    })
+  }
+
+  const importProxies = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      const payloads = parseProxyImport(await file.text())
+      let success = 0
+      for (const payload of payloads) {
+        await createProxy.mutateAsync(payload)
+        success += 1
+      }
+      toast.success(`已导入 ${success} 个代理`)
+    } catch (error) {
+      toast.error(extractErrorMessage(error))
+    }
   }
 
   return (
@@ -152,10 +212,16 @@ export function ProxiesPage() {
           <h1 className="text-2xl font-semibold tracking-tight">代理</h1>
           <p className="mt-1 text-sm text-muted-foreground">维护代理池，并为不同账号选择不同连接。</p>
         </div>
-        <Button onClick={() => { setEditing(null); setDialogOpen(true) }}>
-          <Plus className="h-4 w-4" />
-          添加代理
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => proxies.refetch()}><RefreshCw className="h-4 w-4" />刷新</Button>
+          <Button variant="outline" onClick={testSelected} disabled={selectedIds.size === 0 || batchTest.isPending}><RefreshCw className="h-4 w-4" />批量测试</Button>
+          <Button variant="outline" onClick={qualitySelected} disabled={selectedIds.size === 0 || batchQuality.isPending}><ShieldCheck className="h-4 w-4" />批量质检</Button>
+          <Button variant="destructive" onClick={deleteSelected} disabled={selectedIds.size === 0 || batchDelete.isPending}><Trash2 className="h-4 w-4" />批量删除</Button>
+          <input ref={importInputRef} type="file" accept="application/json,.json" className="hidden" onChange={importProxies} />
+          <Button variant="outline" onClick={() => importInputRef.current?.click()} disabled={createProxy.isPending}><FileUp className="h-4 w-4" />导入</Button>
+          <Button variant="outline" onClick={exportProxies} disabled={list.length === 0}><Download className="h-4 w-4" />导出</Button>
+          <Button onClick={() => { setEditing(null); setDialogOpen(true) }}><Plus className="h-4 w-4" />创建代理</Button>
+        </div>
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">
@@ -172,6 +238,7 @@ export function ProxiesPage() {
             <option value="http">http</option>
             <option value="https">https</option>
             <option value="socks5">socks5</option>
+            <option value="socks5h">socks5h</option>
           </select>
           <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={state} onChange={(event) => setState(event.target.value)}>
             <option value="all">全部状态</option>
@@ -188,19 +255,28 @@ export function ProxiesPage() {
       </Card>
 
       {selectedIds.size > 0 ? (
-        <div className="rounded-md border bg-background p-3 shadow-sm">
+        <div className="rounded-md bg-blue-50 p-3 dark:bg-blue-950/20">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div className="text-sm font-medium">已选择 {selectedIds.size} 个代理</div>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-medium text-blue-900 dark:text-blue-100">已选中 {selectedIds.size} 个代理</span>
+              <span className="text-blue-200">•</span>
+              <button className="text-xs font-medium text-blue-700 hover:text-blue-800" onClick={toggleVisible}>选择当前页</button>
+              <span className="text-blue-200">•</span>
+              <button className="text-xs font-medium text-blue-700 hover:text-blue-800" onClick={() => setSelectedIds(new Set())}>清空选择</button>
+            </div>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={testSelected} disabled={testProxy.isPending}>
-                <RefreshCw className="h-4 w-4" />
-                测试
-              </Button>
-              <Button size="sm" variant="destructive" onClick={deleteSelected} disabled={deleteProxy.isPending}>
+              <Button size="sm" variant="destructive" onClick={deleteSelected} disabled={batchDelete.isPending}>
                 <Trash2 className="h-4 w-4" />
                 删除
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>取消选择</Button>
+              <Button size="sm" variant="outline" onClick={testSelected} disabled={batchTest.isPending}>
+                <RefreshCw className="h-4 w-4" />
+                测试连接
+              </Button>
+              <Button size="sm" variant="outline" onClick={qualitySelected} disabled={batchQuality.isPending}>
+                <ShieldCheck className="h-4 w-4" />
+                质量检测
+              </Button>
             </div>
           </div>
         </div>
@@ -215,7 +291,7 @@ export function ProxiesPage() {
             <div className="rounded-md border py-12 text-center text-sm text-muted-foreground">还没有代理</div>
           ) : (
             list.map((proxy) => (
-              <div key={proxy.id} className="rounded-md border p-4">
+              <div key={proxy.id} className={`rounded-md border p-4 ${cardTone(proxy)}`}>
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex min-w-0 gap-3">
                     <Checkbox checked={selectedIds.has(proxy.id)} onCheckedChange={() => toggleSelect(proxy.id)} />
@@ -225,13 +301,39 @@ export function ProxiesPage() {
                       {status(proxy)}
                     </div>
                     <div className="mt-1 truncate text-sm text-muted-foreground">
-                      {proxy.protocol}://{proxy.host}:{proxy.port} · {proxy.accountCount} 个账号
+                      <code className="text-xs">{proxy.host}:{proxy.port}</code> · {proxy.accountCount} 个账号
                     </div>
                     <div className="mt-1 truncate text-xs text-muted-foreground">
                       {proxy.lastTestedAt ? `上次测试 ${formatTime(proxy.lastTestedAt)}` : '还没有测试记录'}
                       {proxy.lastLatencyMs ? ` · ${proxy.lastLatencyMs}ms` : ''}
                     </div>
                     {proxy.lastError ? <div className="mt-2 truncate text-xs text-destructive" title={proxy.lastError}>{proxy.lastError}</div> : null}
+                    </div>
+                  </div>
+                  <div className="grid min-w-[260px] gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+                    <div>
+                      <div>出口 IP</div>
+                      <div className="font-medium text-foreground">{proxy.exitIp || '未获取'}</div>
+                    </div>
+                    <div>
+                      <div>位置</div>
+                      <div className="font-medium text-foreground">{[proxy.country, proxy.city].filter(Boolean).join(' · ') || '未获取'}</div>
+                    </div>
+                    <div>
+                      <div>质量</div>
+                      <div className="font-medium text-foreground">{proxy.qualityScore ? `${proxy.qualityGrade || '-'} (${proxy.qualityScore})` : '未检测'}</div>
+                    </div>
+                    <div>
+                      <div>认证</div>
+                      <div className="font-medium text-foreground">{proxy.username ? `${proxy.username} / ******` : '无'}</div>
+                    </div>
+                    <div>
+                      <div>最近测试</div>
+                      <div className="font-medium text-foreground">{proxy.lastTestedAt ? formatTime(proxy.lastTestedAt) : '未测试'}</div>
+                    </div>
+                    <div>
+                      <div>状态</div>
+                      <div className="font-medium text-foreground">{proxy.qualityError || (proxy.lastTestStatus === 'ok' ? '正常' : proxy.lastTestStatus === 'failed' ? '连接失败' : '未测试')}</div>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -245,6 +347,13 @@ export function ProxiesPage() {
                     })}>
                       <RefreshCw className="h-4 w-4" />
                       测试
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => batchQuality.mutate({ ids: [proxy.id] }, {
+                      onSuccess: () => toast.success('质量检测完成'),
+                      onError: (error) => toast.error(extractErrorMessage(error)),
+                    })}>
+                      <ShieldCheck className="h-4 w-4" />
+                      质检
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => { setEditing(proxy); setDialogOpen(true) }}>编辑</Button>
                     <Button
@@ -281,6 +390,7 @@ export function ProxiesPage() {
                 <option value="http">http</option>
                 <option value="https">https</option>
                 <option value="socks5">socks5</option>
+                <option value="socks5h">socks5h</option>
               </select>
               <Input value={form.host} onChange={(event) => setForm({ ...form, host: event.target.value })} placeholder="地址" />
               <Input type="number" value={form.port} onChange={(event) => setForm({ ...form, port: Number(event.target.value) })} placeholder="端口" />
