@@ -4,7 +4,10 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Legend,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -16,8 +19,17 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useDiagnosticsCli, useDiagnosticsRequests, useDiagnosticsSummary } from '@/hooks/use-credentials'
+import { formatTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import type { DiagnosticsBucket, DiagnosticsFilters, DiagnosticsPerformanceItem, DiagnosticsTimeBucket, RequestDiagnosticEntry } from '@/types/api'
+import type { DiagnosticsBucket, DiagnosticsFilters, DiagnosticsPerformanceItem, DiagnosticsSummaryResponse, DiagnosticsTimeBucket, RequestDiagnosticEntry } from '@/types/api'
+
+const RESULT_COLORS = ['#22c55e', '#ef4444', '#f59e0b']
+const TOKEN_COLORS = {
+  uncached: '#3b82f6',
+  cacheRead: '#14b8a6',
+  cacheCreation: '#a855f7',
+  output: '#f97316',
+}
 
 function formatNumber(value?: number | null) {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
@@ -27,11 +39,6 @@ function formatDuration(ms?: number | null) {
   if (!ms) return '0 ms'
   if (ms < 1000) return `${ms} ms`
   return `${(ms / 1000).toFixed(2)} s`
-}
-
-function formatTime(value?: string | null) {
-  if (!value) return '-'
-  return new Date(value).toLocaleString()
 }
 
 function rateLimitLabel(kind?: string | null) {
@@ -204,6 +211,110 @@ function LatencyChart({ items }: { items: DiagnosticsBucket[] }) {
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip content={<ChartTooltip />} />
                 <Bar dataKey="count" name="请求" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ResultChart({ data }: { data?: DiagnosticsSummaryResponse }) {
+  const resultItems = [
+    { name: '成功', value: data?.successRequests ?? 0 },
+    { name: '失败', value: Math.max((data?.failedRequests ?? 0) - (data?.rateLimitedRequests ?? 0), 0) },
+    { name: '限频', value: data?.rateLimitedRequests ?? 0 },
+  ].filter((item) => item.value > 0)
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">请求结果</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {resultItems.length === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无结果数据</div>
+        ) : (
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={resultItems} dataKey="value" nameKey="name" innerRadius={54} outerRadius={88} paddingAngle={3}>
+                  {resultItems.map((item, index) => (
+                    <Cell key={item.name} fill={RESULT_COLORS[index % RESULT_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip content={<ChartTooltip />} />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function TokenChart({ data }: { data?: DiagnosticsSummaryResponse }) {
+  const tokenItems = [
+    {
+      key: 'Token',
+      uncached: data?.uncachedInputTokens ?? 0,
+      cacheRead: data?.cacheReadInputTokens ?? 0,
+      cacheCreation: data?.cacheCreationInputTokens ?? 0,
+      output: data?.outputTokens ?? 0,
+    },
+  ]
+  const total = tokenItems[0].uncached + tokenItems[0].cacheRead + tokenItems[0].cacheCreation + tokenItems[0].output
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Token 使用</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {total === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无 Token 数据</div>
+        ) : (
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={tokenItems} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip content={<ChartTooltip />} />
+                <Legend />
+                <Bar dataKey="uncached" name="输入" stackId="tokens" fill={TOKEN_COLORS.uncached} radius={[3, 3, 0, 0]} />
+                <Bar dataKey="cacheRead" name="缓存命中" stackId="tokens" fill={TOKEN_COLORS.cacheRead} />
+                <Bar dataKey="cacheCreation" name="缓存写入" stackId="tokens" fill={TOKEN_COLORS.cacheCreation} />
+                <Bar dataKey="output" name="输出" stackId="tokens" fill={TOKEN_COLORS.output} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ErrorRankChart({ items }: { items: DiagnosticsBucket[] }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">错误分布</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无错误数据</div>
+        ) : (
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={items.slice(0, 8)} layout="vertical" margin={{ top: 8, right: 18, left: 20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11 }} />
+                <YAxis type="category" dataKey="key" tick={{ fontSize: 11 }} width={112} />
+                <Tooltip content={<ChartTooltip />} />
+                <Bar dataKey="count" name="次数" fill="#ef4444" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -444,6 +555,12 @@ export function DiagnosticsDashboard() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <TrendBars items={data?.timeBuckets ?? []} />
         <LatencyChart items={data?.latencyBuckets ?? []} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        <ResultChart data={data} />
+        <TokenChart data={data} />
+        <ErrorRankChart items={data?.errorRank ?? []} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">

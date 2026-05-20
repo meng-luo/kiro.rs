@@ -58,6 +58,7 @@ import {
   useUpdateSystemVersion,
 } from '@/hooks/use-credentials'
 import { forceRefreshToken, getCredentialBalance } from '@/api/credentials'
+import { formatTime } from '@/lib/format'
 import { cn, extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem, SystemOperationJob } from '@/types/api'
 
@@ -1092,9 +1093,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   </div>
 
                   <div className="flex items-center gap-3 overflow-hidden text-xs text-muted-foreground">
-                    <span className="truncate">检查时间 {new Date(systemVersion.checkedAt).toLocaleString()}</span>
+                    <span className="truncate">检查时间 {formatTime(systemVersion.checkedAt)}</span>
                     {systemVersion.latestPublishedAt ? (
-                      <span className="truncate">发布时间 {new Date(systemVersion.latestPublishedAt).toLocaleString()}</span>
+                      <span className="truncate">发布时间 {formatTime(systemVersion.latestPublishedAt)}</span>
                     ) : null}
                   </div>
 
@@ -1141,13 +1142,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
                         <div className="rounded-md border bg-background px-3 py-3">
                           <div className="truncate text-xs text-muted-foreground">开始时间</div>
                           <div className="mt-1 truncate font-medium">
-                            {latestSystemJob.startedAt ? new Date(latestSystemJob.startedAt).toLocaleString() : '未开始'}
+                            {latestSystemJob.startedAt ? formatTime(latestSystemJob.startedAt) : '未开始'}
                           </div>
                         </div>
                         <div className="rounded-md border bg-background px-3 py-3">
                           <div className="truncate text-xs text-muted-foreground">结束时间</div>
                           <div className="mt-1 truncate font-medium">
-                            {latestSystemJob.finishedAt ? new Date(latestSystemJob.finishedAt).toLocaleString() : '执行中'}
+                            {latestSystemJob.finishedAt ? formatTime(latestSystemJob.finishedAt) : '执行中'}
                           </div>
                         </div>
                       </div>

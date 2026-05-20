@@ -14,6 +14,7 @@ import { KamImportDialog } from '@/components/kam-import-dialog'
 import { CredentialRow } from '@/components/credential-row'
 import { MetricCard } from '@/components/metric-card'
 import {
+  useAdminSettings,
   useBatchDeleteCredentials,
   useBatchRefreshBalances,
   useBatchResetCredentials,
@@ -22,6 +23,7 @@ import {
   useCredentials,
   useCredentialsStream,
   useProxies,
+  useSetAdminSettings,
 } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
@@ -54,6 +56,8 @@ export function AccountsPage() {
   const batchRefreshBalances = useBatchRefreshBalances()
   const batchDisabled = useBatchSetDisabled()
   const batchUpdate = useBatchUpdateCredentials()
+  const adminSettings = useAdminSettings()
+  const setAdminSettings = useSetAdminSettings()
 
   const credentials = useMemo(() => {
     const list = data?.credentials ?? []
@@ -72,6 +76,14 @@ export function AccountsPage() {
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages)
   }, [currentPage, totalPages])
+
+  useEffect(() => {
+    const nextPageSize = adminSettings.data?.accountsPageSize
+    if (nextPageSize) {
+      setPageSize((current) => (current === nextPageSize ? current : nextPageSize))
+      setCurrentPage(1)
+    }
+  }, [adminSettings.data?.accountsPageSize])
 
   useEffect(() => {
     const validIds = new Set((data?.credentials ?? []).map((credential) => credential.id))
@@ -212,6 +224,21 @@ export function AccountsPage() {
     setBulkEditOpen(false)
   }
 
+  const changePageSize = (value: number) => {
+    const previous = pageSize
+    setPageSize(value)
+    setCurrentPage(1)
+    setAdminSettings.mutate(
+      { accountsPageSize: value },
+      {
+        onError: (error) => {
+          setPageSize(previous)
+          toast.error(extractErrorMessage(error))
+        },
+      },
+    )
+  }
+
   if (isLoading) return <div className="rounded-md border py-16 text-center text-muted-foreground">正在加载账号</div>
   if (error) return <div className="rounded-md border py-16 text-center text-destructive">{extractErrorMessage(error)}</div>
 
@@ -322,7 +349,8 @@ export function AccountsPage() {
           <div className="flex items-center justify-between gap-3">
             <div className="text-sm text-muted-foreground">显示 {credentials.length === 0 ? 0 : startIndex + 1}-{endIndex} / {credentials.length}</div>
             <div className="flex items-center gap-2">
-              <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1) }}>
+              <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))}>
+                <option value={10}>10</option>
                 <option value={20}>20</option>
                 <option value={50}>50</option>
                 <option value={100}>100</option>

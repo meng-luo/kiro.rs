@@ -1,13 +1,15 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Download, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { useCredentials, useDiagnosticsRequest, useDiagnosticsRequests } from '@/hooks/use-credentials'
+import { useAdminSettings, useCredentials, useDiagnosticsRequest, useDiagnosticsRequests, useSetAdminSettings } from '@/hooks/use-credentials'
 import { formatDuration, formatNumber, formatTime } from '@/lib/format'
+import { extractErrorMessage } from '@/lib/utils'
 import type { DiagnosticsFilters, RequestDiagnosticEntry } from '@/types/api'
+import { toast } from 'sonner'
 
 const ranges = [
   { label: '1 小时', value: '1h' },
@@ -43,6 +45,8 @@ export function RecordsPage() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const credentials = useCredentials()
   const detail = useDiagnosticsRequest(detailId)
+  const adminSettings = useAdminSettings()
+  const setAdminSettings = useSetAdminSettings()
 
   const filters: DiagnosticsFilters = {
     since: range,
@@ -64,9 +68,32 @@ export function RecordsPage() {
 
   const resetCursor = () => setCursor(undefined)
 
+  useEffect(() => {
+    const nextPageSize = adminSettings.data?.recordsPageSize
+    if (nextPageSize) {
+      setPageSize((current) => (current === nextPageSize ? current : nextPageSize))
+      resetCursor()
+    }
+  }, [adminSettings.data?.recordsPageSize])
+
   const goToPage = (page: number) => {
     const next = Math.max(1, Math.min(totalPages, page))
     setCursor(next === 1 ? undefined : (next - 1) * pageSize)
+  }
+
+  const changePageSize = (value: number) => {
+    const previous = pageSize
+    setPageSize(value)
+    resetCursor()
+    setAdminSettings.mutate(
+      { recordsPageSize: value },
+      {
+        onError: (error) => {
+          setPageSize(previous)
+          toast.error(extractErrorMessage(error))
+        },
+      },
+    )
   }
 
   const exportCsv = () => {
@@ -196,7 +223,7 @@ export function RecordsPage() {
         </div>
         <div className="flex items-center gap-2 text-sm">
           <span className="text-muted-foreground">每页</span>
-          <select className="h-9 rounded-md border border-input bg-background px-2" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); resetCursor() }}>
+          <select className="h-9 rounded-md border border-input bg-background px-2" value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))}>
             <option value={10}>10</option>
             <option value={20}>20</option>
             <option value={50}>50</option>

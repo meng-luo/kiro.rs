@@ -12,7 +12,15 @@ export function formatTime(value?: string | null) {
   if (!value) return '未记录'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour12: false,
+  })
+}
+
+export function formatUnixTime(value?: number | null) {
+  if (!value) return '未记录'
+  return formatTime(new Date(value * 1000).toISOString())
 }
 
 export function formatRelativeTime(value?: string | null) {

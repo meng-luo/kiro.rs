@@ -33,7 +33,7 @@ use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::{AcquireOptions, MultiTokenManager};
-use crate::model::config::Config;
+use crate::model::config::{AdminUiConfig, Config};
 
 use super::error::AdminServiceError;
 use super::proxy_store::{ProxyItem, ProxyListItem, ProxyStore};
@@ -89,6 +89,12 @@ struct DockerVersionInfo {
     update_available: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AdminPageSettings {
+    accounts_page_size: usize,
+    records_page_size: usize,
+}
+
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedBalance {
@@ -116,6 +122,7 @@ pub struct AdminService {
     prompt_cache: Arc<PromptCacheManager>,
     proxy_store: ProxyStore,
     admin_theme: Mutex<String>,
+    admin_page_settings: Mutex<AdminPageSettings>,
 }
 
 impl AdminService {
@@ -154,6 +161,8 @@ impl AdminService {
                 Client::builder().build().expect("创建默认 HTTP 客户端失败")
             });
         let admin_theme = Self::normalize_admin_theme(&token_manager.config().admin_ui.theme);
+        let admin_page_settings =
+            Self::normalize_admin_page_settings(&token_manager.config().admin_ui);
         let mut system_jobs = HashMap::new();
         if let Some(job) = persisted_latest_job {
             system_jobs.insert(job.job_id.clone(), job);
@@ -173,6 +182,7 @@ impl AdminService {
             prompt_cache,
             proxy_store: ProxyStore::new(proxy_path),
             admin_theme: Mutex::new(admin_theme),
+            admin_page_settings: Mutex::new(admin_page_settings),
         }
     }
 
@@ -720,9 +730,12 @@ impl AdminService {
     }
 
     pub fn get_admin_settings(&self) -> AdminSettingsResponse {
+        let page_settings = self.current_admin_page_settings();
         AdminSettingsResponse {
             theme: self.current_admin_theme(),
             prompt_cache: self.get_prompt_cache_config(),
+            accounts_page_size: page_settings.accounts_page_size,
+            records_page_size: page_settings.records_page_size,
         }
     }
 
@@ -737,6 +750,10 @@ impl AdminService {
                 ));
             }
             self.persist_admin_theme(theme.to_string())?;
+        }
+
+        if req.accounts_page_size.is_some() || req.records_page_size.is_some() {
+            self.persist_admin_page_settings(req.accounts_page_size, req.records_page_size)?;
         }
 
         if req.redis_url.is_some() {
@@ -1268,10 +1285,38 @@ impl AdminService {
         self.admin_theme.lock().clone()
     }
 
+    fn current_admin_page_settings(&self) -> AdminPageSettings {
+        self.admin_page_settings.lock().clone()
+    }
+
     fn normalize_admin_theme(theme: &str) -> String {
         match theme {
             "light" | "dark" | "system" => theme.to_string(),
             _ => "system".to_string(),
+        }
+    }
+
+    fn normalize_admin_page_settings(config: &AdminUiConfig) -> AdminPageSettings {
+        AdminPageSettings {
+            accounts_page_size: Self::normalize_admin_page_size(config.accounts_page_size, 20),
+            records_page_size: Self::normalize_admin_page_size(config.records_page_size, 10),
+        }
+    }
+
+    fn normalize_admin_page_size(value: usize, fallback: usize) -> usize {
+        match value {
+            10 | 20 | 50 | 100 => value,
+            _ => fallback,
+        }
+    }
+
+    fn validate_admin_page_size(value: usize) -> Result<usize, AdminServiceError> {
+        if matches!(value, 10 | 20 | 50 | 100) {
+            Ok(value)
+        } else {
+            Err(AdminServiceError::InvalidCredential(
+                "每页数量只能是 10、20、50 或 100".to_string(),
+            ))
         }
     }
 
@@ -1296,6 +1341,48 @@ impl AdminService {
             .with_context(|| format!("保存主题设置失败: {}", config_path.display()))
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
         *self.admin_theme.lock() = theme;
+        Ok(())
+    }
+
+    fn persist_admin_page_settings(
+        &self,
+        accounts_page_size: Option<usize>,
+        records_page_size: Option<usize>,
+    ) -> Result<(), AdminServiceError> {
+        use anyhow::Context;
+
+        let current = self.current_admin_page_settings();
+        let next_accounts_page_size = accounts_page_size
+            .map(Self::validate_admin_page_size)
+            .transpose()?
+            .unwrap_or(current.accounts_page_size);
+        let next_records_page_size = records_page_size
+            .map(Self::validate_admin_page_size)
+            .transpose()?
+            .unwrap_or(current.records_page_size);
+
+        let config_path = self
+            .token_manager
+            .config()
+            .config_path()
+            .ok_or_else(|| {
+                AdminServiceError::InternalError("配置文件路径未知，无法保存分页设置".to_string())
+            })?
+            .to_path_buf();
+
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        config.admin_ui.accounts_page_size = next_accounts_page_size;
+        config.admin_ui.records_page_size = next_records_page_size;
+        config
+            .save()
+            .with_context(|| format!("保存分页设置失败: {}", config_path.display()))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        *self.admin_page_settings.lock() = AdminPageSettings {
+            accounts_page_size: next_accounts_page_size,
+            records_page_size: next_records_page_size,
+        };
         Ok(())
     }
 

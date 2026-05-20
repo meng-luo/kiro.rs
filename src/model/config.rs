@@ -130,12 +130,18 @@ impl Default for RateLimitCooldownConfig {
 pub struct AdminUiConfig {
     #[serde(default = "default_admin_theme")]
     pub theme: String,
+    #[serde(default = "default_accounts_page_size")]
+    pub accounts_page_size: usize,
+    #[serde(default = "default_records_page_size")]
+    pub records_page_size: usize,
 }
 
 impl Default for AdminUiConfig {
     fn default() -> Self {
         Self {
             theme: default_admin_theme(),
+            accounts_page_size: default_accounts_page_size(),
+            records_page_size: default_records_page_size(),
         }
     }
 }
@@ -301,6 +307,14 @@ fn default_extract_thinking() -> bool {
 
 fn default_admin_theme() -> String {
     "system".to_string()
+}
+
+fn default_accounts_page_size() -> usize {
+    20
+}
+
+fn default_records_page_size() -> usize {
+    10
 }
 
 fn default_endpoint() -> String {

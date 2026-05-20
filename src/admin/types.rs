@@ -284,6 +284,8 @@ pub struct PromptCacheConfigRequest {
 pub struct AdminSettingsResponse {
     pub theme: String,
     pub prompt_cache: PromptCacheConfigResponse,
+    pub accounts_page_size: usize,
+    pub records_page_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -293,6 +295,10 @@ pub struct AdminSettingsRequest {
     pub theme: Option<String>,
     #[serde(default)]
     pub redis_url: Option<String>,
+    #[serde(default)]
+    pub accounts_page_size: Option<usize>,
+    #[serde(default)]
+    pub records_page_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

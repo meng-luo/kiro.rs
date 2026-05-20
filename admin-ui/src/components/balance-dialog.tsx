@@ -6,6 +6,7 @@ import {
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
 import { useCredentialBalance } from '@/hooks/use-credentials'
+import { formatUnixTime } from '@/lib/format'
 import { parseError } from '@/lib/utils'
 
 interface BalanceDialogProps {
@@ -19,7 +20,7 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
 
   const formatDate = (timestamp: number | null) => {
     if (!timestamp) return '未知'
-    return new Date(timestamp * 1000).toLocaleString('zh-CN')
+    return formatUnixTime(timestamp)
   }
 
   const formatNumber = (num: number) => {

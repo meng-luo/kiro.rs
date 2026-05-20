@@ -54,11 +54,15 @@ export type AdminTheme = 'light' | 'dark' | 'system'
 export interface AdminSettingsResponse {
   theme: AdminTheme
   promptCache: PromptCacheConfigResponse
+  accountsPageSize: number
+  recordsPageSize: number
 }
 
 export interface AdminSettingsRequest {
   theme?: AdminTheme
   redisUrl?: string | null
+  accountsPageSize?: number
+  recordsPageSize?: number
 }
 
 // 单个凭据状态
