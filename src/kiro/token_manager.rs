@@ -19,7 +19,7 @@ use std::time::{Duration as StdDuration, Instant};
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::diagnostics::{
     DiagnosticsQuery, DiagnosticsRequestsResponse, DiagnosticsStore, DiagnosticsSummaryResponse,
-    RequestDiagnosticUpdate,
+    RequestDiagnosticEntry, RequestDiagnosticUpdate,
 };
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -1546,6 +1546,10 @@ impl MultiTokenManager {
 
     pub fn query_diagnostics(&self, query: &DiagnosticsQuery) -> DiagnosticsRequestsResponse {
         self.diagnostics.query(query)
+    }
+
+    pub fn get_diagnostic(&self, request_id: &str) -> Option<RequestDiagnosticEntry> {
+        self.diagnostics.get(request_id)
     }
 
     pub fn diagnostics_summary(&self, query: &DiagnosticsQuery) -> DiagnosticsSummaryResponse {

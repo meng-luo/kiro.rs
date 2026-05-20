@@ -187,6 +187,7 @@ pub struct DiagnosticsQueryRequest {
     pub credential_id: Option<u64>,
     pub model: Option<String>,
     pub success: Option<bool>,
+    pub keyword: Option<String>,
     pub rate_limit_only: Option<bool>,
     pub rate_limit_kind: Option<String>,
     pub dispatch_path: Option<String>,
@@ -198,6 +199,15 @@ pub struct DiagnosticsQueryRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticsCliResponse {
     pub command: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchBalanceResponse {
+    pub success_count: usize,
+    pub fail_count: usize,
+    pub balances: Vec<BalanceResponse>,
+    pub messages: Vec<String>,
 }
 
 // ============ 操作请求 ============

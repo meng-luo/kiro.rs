@@ -22,6 +22,7 @@ use crate::anthropic::cache::PromptCacheManager;
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::diagnostics::{
     DiagnosticsQuery, DiagnosticsRequestsResponse, DiagnosticsSummaryResponse,
+    RequestDiagnosticEntry,
 };
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::events::Event;
@@ -38,12 +39,13 @@ use super::error::AdminServiceError;
 use super::proxy_store::{ProxyItem, ProxyListItem, ProxyStore};
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AdminSettingsRequest, AdminSettingsResponse,
-    BalanceResponse, BatchCredentialUpdateRequest, BatchDisabledRequest, BatchIdsRequest,
-    BatchOperationResponse, CachedBalanceStatus, CredentialStatusItem, CredentialTestRequest,
-    CredentialsStatusResponse, DiagnosticsCliResponse, DiagnosticsQueryRequest,
-    LoadBalancingModeResponse, PromptCacheConfigRequest, PromptCacheConfigResponse,
-    ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest, SetMaxConcurrentRequest,
-    SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
+    BalanceResponse, BatchBalanceResponse, BatchCredentialUpdateRequest, BatchDisabledRequest,
+    BatchIdsRequest, BatchOperationResponse, CachedBalanceStatus, CredentialStatusItem,
+    CredentialTestRequest, CredentialsStatusResponse, DiagnosticsCliResponse,
+    DiagnosticsQueryRequest, LoadBalancingModeResponse, PromptCacheConfigRequest,
+    PromptCacheConfigResponse, ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest,
+    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest,
+    SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -288,6 +290,17 @@ impl AdminService {
         self.token_manager.query_diagnostics(&query)
     }
 
+    pub fn diagnostic_request(
+        &self,
+        request_id: &str,
+    ) -> Result<RequestDiagnosticEntry, AdminServiceError> {
+        self.token_manager
+            .get_diagnostic(request_id)
+            .ok_or_else(|| {
+                AdminServiceError::InvalidCredential(format!("请求记录不存在: {}", request_id))
+            })
+    }
+
     pub fn diagnostics_cli(&self, query: DiagnosticsQueryRequest) -> DiagnosticsCliResponse {
         let mut parts = Vec::new();
         Self::push_query_part(&mut parts, "since", query.since.as_deref());
@@ -307,6 +320,7 @@ impl AdminService {
             "success",
             query.success.as_ref().map(|v| v.to_string()).as_deref(),
         );
+        Self::push_query_part(&mut parts, "keyword", query.keyword.as_deref());
         Self::push_query_part(
             &mut parts,
             "rateLimitKind",
@@ -354,6 +368,7 @@ impl AdminService {
             credential_id: query.credential_id,
             model: query.model.filter(|value| !value.trim().is_empty()),
             success: query.success,
+            keyword: query.keyword.filter(|value| !value.trim().is_empty()),
             rate_limit_only: query.rate_limit_only,
             rate_limit_kind: query
                 .rate_limit_kind
@@ -779,6 +794,13 @@ impl AdminService {
             last_test_status: None,
             last_latency_ms: None,
             last_error: None,
+            quality_checked_at: None,
+            quality_score: None,
+            quality_grade: None,
+            exit_ip: None,
+            country: None,
+            city: None,
+            quality_error: None,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -894,6 +916,171 @@ impl AdminService {
         Ok(result)
     }
 
+    pub async fn batch_test_proxies(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_proxy_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.test_proxy(id).await {
+                Ok(item) => {
+                    if item.last_test_status.as_deref() == Some("ok") {
+                        response.success_count += 1;
+                    } else {
+                        response.fail_count += 1;
+                        response.messages.push(format!(
+                            "#{}: {}",
+                            id,
+                            item.last_error.unwrap_or_else(|| "测试未通过".to_string())
+                        ));
+                    }
+                }
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub fn batch_delete_proxies(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_proxy_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.delete_proxy(id) {
+                Ok(_) => response.success_count += 1,
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    pub async fn batch_quality_check_proxies(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchOperationResponse, AdminServiceError> {
+        self.validate_proxy_ids(&req.ids)?;
+        let mut response = BatchOperationResponse::default();
+        for id in req.ids {
+            match self.quality_check_proxy(id).await {
+                Ok(item) => {
+                    if item.quality_error.is_none() {
+                        response.success_count += 1;
+                    } else {
+                        response.fail_count += 1;
+                        response.messages.push(format!(
+                            "#{}: {}",
+                            id,
+                            item.quality_error
+                                .unwrap_or_else(|| "质量检测失败".to_string())
+                        ));
+                    }
+                }
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    async fn quality_check_proxy(&self, id: u64) -> Result<ProxyListItem, AdminServiceError> {
+        let mut data = self
+            .proxy_store
+            .load()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        let proxy = data
+            .proxies
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| AdminServiceError::InvalidCredential(format!("代理不存在: {}", id)))?;
+
+        let started = std::time::Instant::now();
+        let proxy_config = Self::proxy_config_from_item(proxy);
+        let client = build_client(
+            Some(&proxy_config),
+            20,
+            self.token_manager.config().tls_backend,
+        )
+        .map_err(|error| AdminServiceError::InternalError(error.to_string()))?;
+
+        let payload = match client.get("https://ipapi.co/json/").send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => response.json::<serde_json::Value>().await,
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+
+        proxy.quality_checked_at = Some(ProxyItem::now_timestamp());
+        proxy.last_latency_ms =
+            Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+        match payload {
+            Ok(value) => {
+                let latency = proxy.last_latency_ms.unwrap_or(0);
+                let score = if latency <= 80 {
+                    95
+                } else if latency <= 150 {
+                    85
+                } else if latency <= 300 {
+                    72
+                } else {
+                    55
+                };
+                proxy.quality_score = Some(score);
+                proxy.quality_grade = Some(
+                    if score >= 90 {
+                        "A"
+                    } else if score >= 80 {
+                        "B"
+                    } else if score >= 70 {
+                        "C"
+                    } else {
+                        "D"
+                    }
+                    .to_string(),
+                );
+                proxy.exit_ip = value.get("ip").and_then(|v| v.as_str()).map(str::to_string);
+                proxy.country = value
+                    .get("country_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                proxy.city = value
+                    .get("city")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                proxy.quality_error = None;
+                proxy.last_test_status = Some("ok".to_string());
+                proxy.last_error = None;
+            }
+            Err(error) => {
+                proxy.quality_score = None;
+                proxy.quality_grade = None;
+                proxy.exit_ip = None;
+                proxy.country = None;
+                proxy.city = None;
+                proxy.quality_error = Some(error.to_string());
+                proxy.last_test_status = Some("failed".to_string());
+                proxy.last_error = Some(error.to_string());
+            }
+        }
+        proxy.updated_at = ProxyItem::now_timestamp();
+        let result = Self::proxy_list_item(proxy, self.proxy_account_ids(id).len());
+        self.proxy_store
+            .save(&data)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(result)
+    }
+
     pub fn proxy_accounts(&self, id: u64) -> Vec<CredentialStatusItem> {
         self.get_all_credentials()
             .credentials
@@ -953,6 +1140,43 @@ impl AdminService {
                 }
             }
         }
+        Ok(response)
+    }
+
+    pub async fn batch_balance(
+        &self,
+        req: BatchIdsRequest,
+    ) -> Result<BatchBalanceResponse, AdminServiceError> {
+        self.validate_batch_ids(&req.ids)?;
+        let mut response = BatchBalanceResponse {
+            success_count: 0,
+            fail_count: 0,
+            balances: Vec::new(),
+            messages: Vec::new(),
+        };
+        for id in req.ids {
+            match self.fetch_balance(id).await {
+                Ok(balance) => {
+                    {
+                        let mut cache = self.balance_cache.lock();
+                        cache.insert(
+                            id,
+                            CachedBalance {
+                                cached_at: Utc::now().timestamp() as f64,
+                                data: balance.clone(),
+                            },
+                        );
+                    }
+                    response.success_count += 1;
+                    response.balances.push(balance);
+                }
+                Err(error) => {
+                    response.fail_count += 1;
+                    response.messages.push(format!("#{}: {}", id, error));
+                }
+            }
+        }
+        self.save_balance_cache();
         Ok(response)
     }
 
@@ -1112,6 +1336,13 @@ impl AdminService {
             last_test_status: proxy.last_test_status.clone(),
             last_latency_ms: proxy.last_latency_ms,
             last_error: proxy.last_error.clone(),
+            quality_checked_at: proxy.quality_checked_at.clone(),
+            quality_score: proxy.quality_score,
+            quality_grade: proxy.quality_grade.clone(),
+            exit_ip: proxy.exit_ip.clone(),
+            country: proxy.country.clone(),
+            city: proxy.city.clone(),
+            quality_error: proxy.quality_error.clone(),
             account_count,
             created_at: proxy.created_at.clone(),
             updated_at: proxy.updated_at.clone(),
@@ -1147,6 +1378,20 @@ impl AdminService {
         if ids.len() > 500 {
             return Err(AdminServiceError::InvalidCredential(
                 "一次最多处理 500 个账号".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_proxy_ids(&self, ids: &[u64]) -> Result<(), AdminServiceError> {
+        if ids.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "请选择至少一个代理".to_string(),
+            ));
+        }
+        if ids.len() > 200 {
+            return Err(AdminServiceError::InvalidCredential(
+                "一次最多处理 200 个代理".to_string(),
             ));
         }
         Ok(())

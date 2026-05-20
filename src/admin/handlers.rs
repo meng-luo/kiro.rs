@@ -89,6 +89,18 @@ pub async fn get_diagnostics_requests(
     Json(state.service.diagnostics_requests(query))
 }
 
+/// GET /api/admin/diagnostics/requests/:request_id
+/// 获取单条请求记录详情
+pub async fn get_diagnostics_request(
+    State(state): State<AdminState>,
+    Path(request_id): Path<String>,
+) -> impl IntoResponse {
+    match state.service.diagnostic_request(&request_id) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/diagnostics/cli
 /// 根据当前筛选条件生成可复制的 CLI 命令
 pub async fn get_diagnostics_cli(
@@ -257,6 +269,17 @@ pub async fn batch_refresh_credentials(
     Json(payload): Json<BatchIdsRequest>,
 ) -> impl IntoResponse {
     match state.service.batch_refresh(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/batch/balance
+pub async fn batch_refresh_balances(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_balance(payload).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
@@ -434,6 +457,39 @@ pub async fn delete_proxy(
 /// POST /api/admin/proxies/:id/test
 pub async fn test_proxy(State(state): State<AdminState>, Path(id): Path<u64>) -> impl IntoResponse {
     match state.service.test_proxy(id).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies/batch/test
+pub async fn batch_test_proxies(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_test_proxies(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies/batch/delete
+pub async fn batch_delete_proxies(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_delete_proxies(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies/batch/quality
+pub async fn batch_quality_check_proxies(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchIdsRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_quality_check_proxies(payload).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

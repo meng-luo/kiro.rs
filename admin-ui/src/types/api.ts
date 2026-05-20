@@ -139,6 +139,32 @@ export interface DiagnosticsSummaryResponse {
   modelRank: DiagnosticsBucket[]
   credentialRank: DiagnosticsBucket[]
   errorRank: DiagnosticsBucket[]
+  timeBuckets: DiagnosticsTimeBucket[]
+  latencyBuckets: DiagnosticsBucket[]
+  credentialPerformance: DiagnosticsPerformanceItem[]
+  modelPerformance: DiagnosticsPerformanceItem[]
+}
+
+export interface DiagnosticsTimeBucket {
+  key: string
+  totalRequests: number
+  successRequests: number
+  failedRequests: number
+  rateLimitedRequests: number
+  averageDurationMs: number
+  inputTokens: number
+  outputTokens: number
+}
+
+export interface DiagnosticsPerformanceItem {
+  key: string
+  totalRequests: number
+  successRequests: number
+  failedRequests: number
+  rateLimitedRequests: number
+  averageDurationMs: number
+  inputTokens: number
+  outputTokens: number
 }
 
 export interface RequestDiagnosticEntry {
@@ -179,6 +205,7 @@ export interface DiagnosticsFilters {
   credentialId?: number
   model?: string
   success?: boolean
+  keyword?: string
   rateLimitOnly?: boolean
   rateLimitKind?: string
   dispatchPath?: string
@@ -203,6 +230,13 @@ export interface ProxyListItem {
   lastTestStatus?: 'ok' | 'failed' | 'unknown' | string | null
   lastLatencyMs?: number | null
   lastError?: string | null
+  qualityCheckedAt?: string | null
+  qualityScore?: number | null
+  qualityGrade?: string | null
+  exitIp?: string | null
+  country?: string | null
+  city?: string | null
+  qualityError?: string | null
   accountCount: number
   createdAt: string
   updatedAt: string
@@ -243,6 +277,13 @@ export interface BatchCredentialUpdateRequest extends BatchIdsRequest {
 export interface BatchOperationResponse {
   successCount: number
   failCount: number
+  messages: string[]
+}
+
+export interface BatchBalanceResponse {
+  successCount: number
+  failCount: number
+  balances: BalanceResponse[]
   messages: string[]
 }
 

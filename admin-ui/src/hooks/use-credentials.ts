@@ -13,6 +13,7 @@ import {
   addCredential,
   deleteCredential,
   getDiagnosticsCli,
+  getDiagnosticsRequest,
   getDiagnosticsRequests,
   getDiagnosticsSummary,
   getLoadBalancingMode,
@@ -26,10 +27,14 @@ import {
   updateProxy,
   deleteProxy,
   testProxy,
+  batchTestProxies,
+  batchDeleteProxies,
+  batchQualityCheckProxies,
   getProxyAccounts,
   batchSetCredentialDisabled,
   batchResetCredentials,
   batchRefreshCredentials,
+  batchRefreshBalances,
   batchDeleteCredentials,
   batchUpdateCredentials,
   getSystemVersion,
@@ -117,6 +122,14 @@ export function useDiagnosticsCli(filters: DiagnosticsFilters) {
   return useQuery({
     queryKey: ['diagnostics-cli', filters],
     queryFn: () => getDiagnosticsCli(filters),
+  })
+}
+
+export function useDiagnosticsRequest(requestId: string | null) {
+  return useQuery({
+    queryKey: ['diagnostics-request', requestId],
+    queryFn: () => getDiagnosticsRequest(requestId!),
+    enabled: !!requestId,
   })
 }
 
@@ -323,6 +336,37 @@ export function useTestProxy() {
   })
 }
 
+export function useBatchTestProxies() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: BatchIdsRequest) => batchTestProxies(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+    },
+  })
+}
+
+export function useBatchDeleteProxies() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: BatchIdsRequest) => batchDeleteProxies(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useBatchQualityCheckProxies() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: BatchIdsRequest) => batchQualityCheckProxies(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+    },
+  })
+}
+
 export function useProxyAccounts(id: number | null) {
   return useQuery({
     queryKey: ['proxyAccounts', id],
@@ -355,6 +399,16 @@ export function useBatchRefreshCredentials() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: BatchIdsRequest) => batchRefreshCredentials(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useBatchRefreshBalances() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: BatchIdsRequest) => batchRefreshBalances(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

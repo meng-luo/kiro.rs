@@ -14,6 +14,7 @@ import type {
   DiagnosticsFilters,
   DiagnosticsRequestsResponse,
   DiagnosticsSummaryResponse,
+  RequestDiagnosticEntry,
   SystemVersionResponse,
   SystemOperationJob,
   SystemUpdateRequest,
@@ -29,6 +30,7 @@ import type {
   BatchDisabledRequest,
   BatchCredentialUpdateRequest,
   BatchOperationResponse,
+  BatchBalanceResponse,
   CredentialStatusItem,
 } from '@/types/api'
 
@@ -109,6 +111,11 @@ export async function getDiagnosticsSummary(filters: DiagnosticsFilters): Promis
 export async function getDiagnosticsRequests(filters: DiagnosticsFilters): Promise<DiagnosticsRequestsResponse> {
   const params = diagnosticsParams(filters)
   const { data } = await api.get<DiagnosticsRequestsResponse>(`/diagnostics/requests?${params.toString()}`)
+  return data
+}
+
+export async function getDiagnosticsRequest(requestId: string): Promise<RequestDiagnosticEntry> {
+  const { data } = await api.get<RequestDiagnosticEntry>(`/diagnostics/requests/${encodeURIComponent(requestId)}`)
   return data
 }
 
@@ -248,6 +255,21 @@ export async function testProxy(id: number): Promise<ProxyListItem> {
   return data
 }
 
+export async function batchTestProxies(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/proxies/batch/test', payload)
+  return data
+}
+
+export async function batchDeleteProxies(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/proxies/batch/delete', payload)
+  return data
+}
+
+export async function batchQualityCheckProxies(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
+  const { data } = await api.post<BatchOperationResponse>('/proxies/batch/quality', payload)
+  return data
+}
+
 export async function getProxyAccounts(id: number): Promise<CredentialStatusItem[]> {
   const { data } = await api.get<CredentialStatusItem[]>(`/proxies/${id}/accounts`)
   return data
@@ -267,6 +289,11 @@ export async function batchResetCredentials(payload: BatchIdsRequest): Promise<B
 
 export async function batchRefreshCredentials(payload: BatchIdsRequest): Promise<BatchOperationResponse> {
   const { data } = await api.post<BatchOperationResponse>('/credentials/batch/refresh', payload)
+  return data
+}
+
+export async function batchRefreshBalances(payload: BatchIdsRequest): Promise<BatchBalanceResponse> {
+  const { data } = await api.post<BatchBalanceResponse>('/credentials/batch/balance', payload)
   return data
 }
 

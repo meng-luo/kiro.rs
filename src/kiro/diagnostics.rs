@@ -71,6 +71,7 @@ pub struct DiagnosticsQuery {
     pub credential_id: Option<u64>,
     pub model: Option<String>,
     pub success: Option<bool>,
+    pub keyword: Option<String>,
     pub rate_limit_only: Option<bool>,
     pub rate_limit_kind: Option<String>,
     pub dispatch_path: Option<String>,
@@ -95,6 +96,32 @@ pub struct DiagnosticsBucket {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiagnosticsTimeBucket {
+    pub key: String,
+    pub total_requests: u64,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub rate_limited_requests: u64,
+    pub average_duration_ms: u64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsPerformanceItem {
+    pub key: String,
+    pub total_requests: u64,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub rate_limited_requests: u64,
+    pub average_duration_ms: u64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticsSummaryResponse {
     pub total_requests: u64,
     pub success_requests: u64,
@@ -110,6 +137,10 @@ pub struct DiagnosticsSummaryResponse {
     pub model_rank: Vec<DiagnosticsBucket>,
     pub credential_rank: Vec<DiagnosticsBucket>,
     pub error_rank: Vec<DiagnosticsBucket>,
+    pub time_buckets: Vec<DiagnosticsTimeBucket>,
+    pub latency_buckets: Vec<DiagnosticsBucket>,
+    pub credential_performance: Vec<DiagnosticsPerformanceItem>,
+    pub model_performance: Vec<DiagnosticsPerformanceItem>,
 }
 
 struct DiagnosticsStoreInner {
@@ -207,6 +238,16 @@ impl DiagnosticsStore {
             next_cursor,
             total,
         }
+    }
+
+    pub fn get(&self, request_id: &str) -> Option<RequestDiagnosticEntry> {
+        let inner = self.inner.lock();
+        inner
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.request_id == request_id)
+            .cloned()
     }
 
     pub fn update_tokens(
@@ -335,6 +376,20 @@ impl DiagnosticsStore {
                     .clone()
                     .or_else(|| entry.upstream_status.map(|status| status.to_string()))
             })),
+            time_buckets: Self::time_buckets(&entries),
+            latency_buckets: Self::latency_buckets(&entries),
+            credential_performance: Self::performance(
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.credential_id.map(|id| (format!("#{}", id), *entry))),
+            ),
+            model_performance: Self::performance(entries.iter().filter_map(|entry| {
+                entry
+                    .original_model
+                    .clone()
+                    .or_else(|| entry.mapped_model.clone())
+                    .map(|model| (model, *entry))
+            })),
         }
     }
 
@@ -435,6 +490,29 @@ impl DiagnosticsStore {
         {
             return false;
         }
+        if let Some(keyword) = &query.keyword {
+            let keyword = keyword.to_lowercase();
+            let haystack = [
+                Some(entry.request_id.as_str()),
+                entry.original_model.as_deref(),
+                entry.mapped_model.as_deref(),
+                entry.upstream_error_code.as_deref(),
+                entry.upstream_message_short.as_deref(),
+                entry.rate_limit_kind.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+            let credential_match = entry
+                .credential_id
+                .map(|id| id.to_string().contains(&keyword))
+                .unwrap_or(false);
+            if !credential_match && !haystack.contains(&keyword) {
+                return false;
+            }
+        }
         if query
             .rate_limit_only
             .is_some_and(|only| only && entry.rate_limit_kind.is_none())
@@ -470,6 +548,129 @@ impl DiagnosticsStore {
             .map(|(key, count)| DiagnosticsBucket { key, count })
             .collect::<Vec<_>>();
         items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+        items.truncate(10);
+        items
+    }
+
+    fn time_buckets(entries: &[&RequestDiagnosticEntry]) -> Vec<DiagnosticsTimeBucket> {
+        let mut buckets = HashMap::<String, Vec<&RequestDiagnosticEntry>>::new();
+        for entry in entries {
+            let key = Self::entry_started_at(entry)
+                .map(|started| started.format("%m-%d %H:00").to_string())
+                .unwrap_or_else(|| "未知时间".to_string());
+            buckets.entry(key).or_default().push(*entry);
+        }
+        let mut items = buckets
+            .into_iter()
+            .map(|(key, entries)| {
+                let total_requests = entries.len() as u64;
+                let success_requests = entries.iter().filter(|entry| entry.success).count() as u64;
+                let failed_requests = total_requests.saturating_sub(success_requests);
+                let rate_limited_requests = entries
+                    .iter()
+                    .filter(|entry| entry.rate_limit_kind.is_some())
+                    .count() as u64;
+                let total_duration: u64 = entries.iter().map(|entry| entry.duration_ms).sum();
+                DiagnosticsTimeBucket {
+                    key,
+                    total_requests,
+                    success_requests,
+                    failed_requests,
+                    rate_limited_requests,
+                    average_duration_ms: if total_requests > 0 {
+                        total_duration / total_requests
+                    } else {
+                        0
+                    },
+                    input_tokens: entries
+                        .iter()
+                        .filter_map(|entry| entry.input_tokens)
+                        .map(i64::from)
+                        .sum(),
+                    output_tokens: entries
+                        .iter()
+                        .filter_map(|entry| entry.output_tokens)
+                        .map(i64::from)
+                        .sum(),
+                }
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| a.key.cmp(&b.key));
+        items
+    }
+
+    fn latency_buckets(entries: &[&RequestDiagnosticEntry]) -> Vec<DiagnosticsBucket> {
+        let labels = ["<500ms", "0.5-1s", "1-3s", "3-10s", ">10s"];
+        let mut counts = HashMap::<String, u64>::new();
+        for label in labels {
+            counts.insert(label.to_string(), 0);
+        }
+        for entry in entries {
+            let key = match entry.duration_ms {
+                0..=499 => "<500ms",
+                500..=999 => "0.5-1s",
+                1000..=2999 => "1-3s",
+                3000..=9999 => "3-10s",
+                _ => ">10s",
+            };
+            *counts.entry(key.to_string()).or_default() += 1;
+        }
+        labels
+            .into_iter()
+            .map(|key| DiagnosticsBucket {
+                key: key.to_string(),
+                count: counts.remove(key).unwrap_or(0),
+            })
+            .collect()
+    }
+
+    fn performance<'a>(
+        values: impl Iterator<Item = (String, &'a RequestDiagnosticEntry)>,
+    ) -> Vec<DiagnosticsPerformanceItem> {
+        let mut grouped = HashMap::<String, Vec<&RequestDiagnosticEntry>>::new();
+        for (key, entry) in values {
+            grouped.entry(key).or_default().push(entry);
+        }
+        let mut items = grouped
+            .into_iter()
+            .map(|(key, entries)| {
+                let total_requests = entries.len() as u64;
+                let success_requests = entries.iter().filter(|entry| entry.success).count() as u64;
+                let failed_requests = total_requests.saturating_sub(success_requests);
+                let rate_limited_requests = entries
+                    .iter()
+                    .filter(|entry| entry.rate_limit_kind.is_some())
+                    .count() as u64;
+                let total_duration: u64 = entries.iter().map(|entry| entry.duration_ms).sum();
+                DiagnosticsPerformanceItem {
+                    key,
+                    total_requests,
+                    success_requests,
+                    failed_requests,
+                    rate_limited_requests,
+                    average_duration_ms: if total_requests > 0 {
+                        total_duration / total_requests
+                    } else {
+                        0
+                    },
+                    input_tokens: entries
+                        .iter()
+                        .filter_map(|entry| entry.input_tokens)
+                        .map(i64::from)
+                        .sum(),
+                    output_tokens: entries
+                        .iter()
+                        .filter_map(|entry| entry.output_tokens)
+                        .map(i64::from)
+                        .sum(),
+                }
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| {
+            b.total_requests
+                .cmp(&a.total_requests)
+                .then_with(|| a.key.cmp(&b.key))
+        });
         items.truncate(10);
         items
     }

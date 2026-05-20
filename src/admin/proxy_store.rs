@@ -26,6 +26,20 @@ pub struct ProxyItem {
     pub last_latency_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_checked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_grade: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -45,6 +59,13 @@ pub struct ProxyListItem {
     pub last_test_status: Option<String>,
     pub last_latency_ms: Option<u64>,
     pub last_error: Option<String>,
+    pub quality_checked_at: Option<String>,
+    pub quality_score: Option<u8>,
+    pub quality_grade: Option<String>,
+    pub exit_ip: Option<String>,
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub quality_error: Option<String>,
     pub account_count: usize,
     pub created_at: String,
     pub updated_at: String,
