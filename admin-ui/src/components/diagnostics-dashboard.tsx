@@ -1,5 +1,15 @@
 import { useMemo, useState } from 'react'
 import { BarChart3, CheckCircle2, Clipboard, Clock3, RefreshCw, ShieldAlert, XCircle } from 'lucide-react'
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -103,26 +113,130 @@ function RankList({ title, items }: { title: string; items: DiagnosticsBucket[] 
   )
 }
 
+function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number | string; color?: string; payload?: Record<string, unknown> }>; label?: string }) {
+  if (!active || !payload?.length) return null
+  const row = payload[0]?.payload ?? {}
+  const total = typeof row.totalRequests === 'number' ? row.totalRequests : undefined
+  const averageDurationMs = typeof row.averageDurationMs === 'number' ? row.averageDurationMs : undefined
+  const inputTokens = typeof row.inputTokens === 'number' ? row.inputTokens : undefined
+  const outputTokens = typeof row.outputTokens === 'number' ? row.outputTokens : undefined
+  return (
+    <div className="rounded-md border bg-popover p-3 text-xs shadow-lg">
+      <div className="mb-2 font-medium">{label}</div>
+      <div className="space-y-1">
+        {total !== undefined ? (
+          <div className="flex min-w-36 items-center justify-between gap-4">
+            <span className="text-muted-foreground">总请求</span>
+            <span className="font-medium">{formatNumber(total)}</span>
+          </div>
+        ) : null}
+        {payload.map((item) => (
+          <div key={item.name} className="flex min-w-36 items-center justify-between gap-4">
+            <span className="flex items-center gap-2 text-muted-foreground">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />
+              {item.name}
+            </span>
+            <span className="font-medium">{typeof item.value === 'number' ? formatNumber(item.value) : item.value}</span>
+          </div>
+        ))}
+        {averageDurationMs !== undefined ? (
+          <div className="flex min-w-36 items-center justify-between gap-4">
+            <span className="text-muted-foreground">平均耗时</span>
+            <span className="font-medium">{formatDuration(averageDurationMs)}</span>
+          </div>
+        ) : null}
+        {inputTokens !== undefined || outputTokens !== undefined ? (
+          <div className="flex min-w-36 items-center justify-between gap-4">
+            <span className="text-muted-foreground">Token</span>
+            <span className="font-medium">{formatNumber((inputTokens ?? 0) + (outputTokens ?? 0))}</span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function TrendBars({ items }: { items: DiagnosticsTimeBucket[] }) {
-  const max = Math.max(1, ...items.map((item) => item.totalRequests))
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base">请求趋势</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent>
         {items.length === 0 ? (
           <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无趋势数据</div>
         ) : (
-          items.slice(-24).map((item) => (
-            <div key={item.key} className="grid grid-cols-[88px_minmax(0,1fr)_64px] items-center gap-3 text-sm">
-              <div className="truncate text-xs text-muted-foreground" title={item.key}>{item.key}</div>
-              <div className="h-2 overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.max(4, item.totalRequests / max * 100)}%` }} />
-              </div>
-              <div className="text-right text-xs text-muted-foreground">{formatNumber(item.totalRequests)}</div>
-            </div>
-          ))
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={items.slice(-24)} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip content={<ChartTooltip />} />
+                <Legend />
+                <Bar dataKey="successRequests" name="成功" stackId="requests" fill="#22c55e" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="failedRequests" name="失败" stackId="requests" fill="#ef4444" />
+                <Bar dataKey="rateLimitedRequests" name="限频" fill="#f59e0b" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function LatencyChart({ items }: { items: DiagnosticsBucket[] }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">耗时分布</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无耗时数据</div>
+        ) : (
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={items} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip content={<ChartTooltip />} />
+                <Bar dataKey="count" name="请求" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function PerformanceChart({ title, items }: { title: string; items: DiagnosticsPerformanceItem[] }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无数据</div>
+        ) : (
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={items.slice(0, 8)} layout="vertical" margin={{ top: 8, right: 18, left: 20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11 }} />
+                <YAxis type="category" dataKey="key" tick={{ fontSize: 11 }} width={96} />
+                <Tooltip content={<ChartTooltip />} />
+                <Legend />
+                <Bar dataKey="successRequests" name="成功" stackId="requests" fill="#22c55e" radius={[0, 4, 4, 0]} />
+                <Bar dataKey="failedRequests" name="失败" stackId="requests" fill="#ef4444" />
+                <Bar dataKey="rateLimitedRequests" name="限频" fill="#f59e0b" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         )}
       </CardContent>
     </Card>
@@ -329,12 +443,17 @@ export function DiagnosticsDashboard() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <TrendBars items={data?.timeBuckets ?? []} />
-        <RankList title="耗时分布" items={data?.latencyBuckets ?? []} />
+        <LatencyChart items={data?.latencyBuckets ?? []} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <PerformanceTable title="账号性能分析" items={data?.credentialPerformance ?? []} />
-        <PerformanceTable title="模型性能对比" items={data?.modelPerformance ?? []} />
+        <PerformanceChart title="账号性能分析" items={data?.credentialPerformance ?? []} />
+        <PerformanceChart title="模型性能对比" items={data?.modelPerformance ?? []} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <PerformanceTable title="账号明细" items={data?.credentialPerformance ?? []} />
+        <PerformanceTable title="模型明细" items={data?.modelPerformance ?? []} />
       </div>
 
       <Card>

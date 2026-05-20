@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
@@ -43,6 +44,7 @@ export function AccountsPage() {
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkProxyMode, setBulkProxyMode] = useState('inherit')
   const [bulkProxyId, setBulkProxyId] = useState('')
+  const [bulkMaxConcurrent, setBulkMaxConcurrent] = useState('')
 
   const { data, isLoading, error } = useCredentials()
   useCredentialsStream()
@@ -130,7 +132,7 @@ export function AccountsPage() {
     })
     const result = await runBatch(
       () => batchRefreshBalances.mutateAsync({ ids: selectedArray }),
-      '已刷新选中账号的余额',
+      '已刷新选中账号的用量',
     )
     if (result) {
       setBalanceMap((prev) => {
@@ -151,7 +153,7 @@ export function AccountsPage() {
     try {
       const balance = await getCredentialBalance(id)
       setBalanceMap((prev) => new Map(prev).set(id, balance))
-      toast.success('余额已刷新')
+      toast.success('用量已刷新')
     } catch (error) {
       toast.error(extractErrorMessage(error))
     } finally {
@@ -193,11 +195,17 @@ export function AccountsPage() {
   }
 
   const saveBulkEdit = () => {
+    const maxConcurrent = bulkMaxConcurrent.trim() ? Number(bulkMaxConcurrent) : undefined
+    if (maxConcurrent !== undefined && (!Number.isInteger(maxConcurrent) || maxConcurrent <= 0)) {
+      toast.error('并发上限必须是大于 0 的整数')
+      return
+    }
     runBatch(
       () => batchUpdate.mutateAsync({
         ids: selectedArray,
         proxyMode: bulkProxyMode,
         proxyId: bulkProxyMode === 'proxy' ? Number(bulkProxyId) : null,
+        maxConcurrent,
       }),
       '已更新选中的账号',
     )
@@ -235,7 +243,7 @@ export function AccountsPage() {
         <MetricCard label="启用账号" value={data?.enabledCount ?? 0} />
         <MetricCard label="可用账号" value={data?.schedulableCount ?? 0} />
         <MetricCard label="需要处理" value={alertCount} />
-        <MetricCard label="有余额记录" value={cachedBalanceCount} hint={lowBalanceCount > 0 ? `${lowBalanceCount} 个使用较高` : undefined} />
+        <MetricCard label="有用量记录" value={cachedBalanceCount} hint={lowBalanceCount > 0 ? `${lowBalanceCount} 个使用较高` : undefined} />
       </div>
 
       {selectedIds.size > 0 ? (
@@ -251,7 +259,7 @@ export function AccountsPage() {
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="destructive" onClick={handleBatchDelete}><Trash2 className="h-4 w-4" />删除</Button>
               <Button size="sm" variant="outline" onClick={() => runBatch(() => batchReset.mutateAsync({ ids: selectedArray }), '已恢复选中的账号')}><RotateCcw className="h-4 w-4" />重置状态</Button>
-              <Button size="sm" variant="outline" onClick={handleBatchRefreshBalances}><CheckCircle2 className="h-4 w-4" />刷新余额</Button>
+              <Button size="sm" variant="outline" onClick={handleBatchRefreshBalances}><CheckCircle2 className="h-4 w-4" />刷新用量</Button>
               <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: false }), '已启用选中的账号')}>启用调度</Button>
               <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已停用选中的账号')}>禁用调度</Button>
               <Button size="sm" onClick={() => setBulkEditOpen(true)}>批量编辑</Button>
@@ -271,7 +279,7 @@ export function AccountsPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" onClick={toggleSelectCurrentPage}>{isCurrentPageAllSelected ? '取消当前页' : '选择当前页'}</Button>
-              <Button size="sm" variant="outline" onClick={queryCurrentPageInfo} disabled={queryingInfo}>{queryingInfo ? `查询 ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询余额'}</Button>
+              <Button size="sm" variant="outline" onClick={queryCurrentPageInfo} disabled={queryingInfo}>{queryingInfo ? `查询 ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询用量'}</Button>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -333,7 +341,7 @@ export function AccountsPage() {
       <Dialog open={bulkEditOpen} onOpenChange={setBulkEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>绑定代理</DialogTitle>
+            <DialogTitle>批量编辑</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={bulkProxyMode} onChange={(event) => setBulkProxyMode(event.target.value)}>
@@ -349,6 +357,10 @@ export function AccountsPage() {
                 ))}
               </select>
             ) : null}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">并发上限</label>
+              <Input type="number" min="1" value={bulkMaxConcurrent} onChange={(event) => setBulkMaxConcurrent(event.target.value)} placeholder="留空则不修改" />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBulkEditOpen(false)}>取消</Button>

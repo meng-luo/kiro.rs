@@ -1,4 +1,5 @@
 import { AlertTriangle, CheckCircle2, Clock3, Gauge, RefreshCw, Users } from 'lucide-react'
+import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -23,6 +24,49 @@ function stateText(state: string, disabled: boolean) {
   }
 }
 
+function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number | string; color?: string; payload?: Record<string, unknown> }>; label?: string }) {
+  if (!active || !payload?.length) return null
+  const row = payload[0]?.payload ?? {}
+  const total = typeof row.totalRequests === 'number' ? row.totalRequests : undefined
+  const averageDurationMs = typeof row.averageDurationMs === 'number' ? row.averageDurationMs : undefined
+  const inputTokens = typeof row.inputTokens === 'number' ? row.inputTokens : undefined
+  const outputTokens = typeof row.outputTokens === 'number' ? row.outputTokens : undefined
+  return (
+    <div className="rounded-md border bg-popover p-3 text-xs shadow-lg">
+      <div className="mb-2 font-medium">{label}</div>
+      <div className="space-y-1">
+        {total !== undefined ? (
+          <div className="flex min-w-32 items-center justify-between gap-4">
+            <span className="text-muted-foreground">总请求</span>
+            <span className="font-medium">{formatNumber(total)}</span>
+          </div>
+        ) : null}
+        {payload.map((item) => (
+          <div key={item.name} className="flex min-w-32 items-center justify-between gap-4">
+            <span className="flex items-center gap-2 text-muted-foreground">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />
+              {item.name}
+            </span>
+            <span className="font-medium">{typeof item.value === 'number' ? formatNumber(item.value) : item.value}</span>
+          </div>
+        ))}
+        {averageDurationMs !== undefined ? (
+          <div className="flex min-w-32 items-center justify-between gap-4">
+            <span className="text-muted-foreground">平均耗时</span>
+            <span className="font-medium">{formatDuration(averageDurationMs)}</span>
+          </div>
+        ) : null}
+        {inputTokens !== undefined || outputTokens !== undefined ? (
+          <div className="flex min-w-32 items-center justify-between gap-4">
+            <span className="text-muted-foreground">Token</span>
+            <span className="font-medium">{formatNumber((inputTokens ?? 0) + (outputTokens ?? 0))}</span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 export function MonitorPage() {
   const { data, isLoading, refetch } = useCredentials()
   useCredentialsStream()
@@ -35,7 +79,6 @@ export function MonitorPage() {
   const successRate = percent(summary.data?.successRequests, totalRequests)
   const health = (data?.schedulableCount ?? 0) > 0 && alertAccounts.length === 0 ? '运行正常' : '需要关注'
   const trend = summary.data?.timeBuckets ?? []
-  const maxTrend = Math.max(1, ...trend.map((item) => item.totalRequests))
 
   return (
     <div className="space-y-6">
@@ -128,17 +171,19 @@ export function MonitorPage() {
           {trend.length === 0 ? (
             <div className="rounded-md border py-10 text-center text-sm text-muted-foreground">暂无请求趋势</div>
           ) : (
-            <div className="grid h-44 grid-cols-12 items-end gap-2">
-              {trend.slice(-12).map((item) => (
-                <div key={item.key} className="flex min-w-0 flex-col items-center gap-2">
-                  <div
-                    className="w-full rounded-t bg-blue-500"
-                    style={{ height: `${Math.max(8, item.totalRequests / maxTrend * 150)}px` }}
-                    title={`${item.key}：${item.totalRequests} 次`}
-                  />
-                  <div className="w-full truncate text-center text-[10px] text-muted-foreground" title={item.key}>{item.key.slice(-5)}</div>
-                </div>
-              ))}
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={trend.slice(-12)} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <Tooltip content={<ChartTooltip />} />
+                  <Legend />
+                  <Bar dataKey="successRequests" name="成功" stackId="requests" fill="#22c55e" radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="failedRequests" name="失败" stackId="requests" fill="#ef4444" />
+                  <Bar dataKey="rateLimitedRequests" name="限频" fill="#f59e0b" />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
           )}
         </CardContent>

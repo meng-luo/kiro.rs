@@ -46,6 +46,7 @@ import {
 } from '@/api/credentials'
 import type {
   AddCredentialRequest,
+  AdminSettingsResponse,
   AdminSettingsRequest,
   BatchCredentialUpdateRequest,
   BatchDisabledRequest,
@@ -279,7 +280,8 @@ export function useSetAdminSettings() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: AdminSettingsRequest) => setAdminSettings(payload),
-    onSuccess: () => {
+    onSuccess: (response: AdminSettingsResponse) => {
+      queryClient.setQueryData(['adminSettings'], response)
       queryClient.invalidateQueries({ queryKey: ['adminSettings'] })
       queryClient.invalidateQueries({ queryKey: ['promptCacheConfig'] })
     },

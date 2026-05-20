@@ -228,6 +228,10 @@ function balanceFreshText(credential: CredentialStatusItem, balance: BalanceResp
   return credential.cachedBalance.fresh ? '最近更新' : '待更新'
 }
 
+function connectionLabel(credential: CredentialStatusItem) {
+  return credential.proxyName || (credential.proxyMode === 'direct' ? '直连' : credential.hasProxy ? '独立代理' : '默认连接')
+}
+
 function cardTone(credential: CredentialStatusItem) {
   if (credential.disabled) return 'border-gray-300 bg-gray-50/70 dark:bg-muted/20'
   if (credential.dispatchState === 'blocked' || credential.lastRateLimitKind === 'suspicious_activity') {
@@ -354,7 +358,7 @@ export function CredentialRow({
       },
       {
         label: '连接方式',
-        value: credential.proxyName || (credential.proxyMode === 'direct' ? '直连' : credential.hasProxy ? '独立代理' : '默认连接'),
+        value: connectionLabel(credential),
         title: '这个账号发起请求时会使用的连接方式。',
       },
       {
@@ -368,8 +372,8 @@ export function CredentialRow({
         title: '最后一次承接请求的时间。',
       },
       {
-        label: '剩余额度',
-        value: loadingBalance ? '查询中...' : visibleBalance ? `${visibleBalance.remaining.toFixed(2)} / ${visibleBalance.usageLimit.toFixed(2)}` : '未查询',
+        label: '已用额度',
+        value: loadingBalance ? '查询中...' : visibleBalance ? visibleBalance.currentUsage.toFixed(2) : '未查询',
         title: '仅用于辅助观察，不决定调度。',
       },
     ]
@@ -422,6 +426,21 @@ export function CredentialRow({
         proxyId: proxyModeValue === 'proxy' ? Number(proxyIdValue) : null,
       },
       {
+        onError: (err) => toast.error(`连接方式保存失败: ${(err as Error).message}`),
+      },
+    )
+  }
+
+  const handleQuickProxyChange = (value: string) => {
+    const [mode, proxyId] = value.split(':')
+    updateCredential.mutate(
+      {
+        ids: [credential.id],
+        proxyMode: mode,
+        proxyId: mode === 'proxy' ? Number(proxyId) : null,
+      },
+      {
+        onSuccess: () => toast.success('连接方式已更新'),
         onError: (err) => toast.error(`连接方式保存失败: ${(err as Error).message}`),
       },
     )
@@ -516,7 +535,7 @@ export function CredentialRow({
 
   const actionMenu = (
     <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-md border bg-popover p-1 text-sm shadow-lg">
-      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); onViewBalance(credential.id) }}>查看余额</button>
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); onViewBalance(credential.id) }}>查看用量</button>
       <button
         className="block w-full rounded px-3 py-2 text-left hover:bg-muted"
         onClick={() => {
@@ -525,7 +544,7 @@ export function CredentialRow({
           else onViewBalance(credential.id)
         }}
       >
-        刷新余额
+        刷新用量
       </button>
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" disabled={!canRecover || recoverCredential.isPending} onClick={() => { setActionsOpen(false); handleRecover() }}>重置失败</button>
       <div className="my-1 border-t" />
@@ -579,16 +598,16 @@ export function CredentialRow({
 
           <div className="grid gap-3 text-sm md:grid-cols-3">
             <div>
-              <div className="mb-1 text-xs text-muted-foreground">{visibleBalance ? '余额' : '余额'}</div>
+              <div className="mb-1 text-xs text-muted-foreground">已用</div>
               <div className={cn('font-medium', visibleBalance ? 'text-blue-600' : 'text-muted-foreground')}>
                 {loadingBalance
                   ? '查询中...'
                   : visibleBalance
-                    ? `${visibleBalance.remaining.toFixed(2)} / ${visibleBalance.usageLimit.toFixed(2)}`
+                    ? visibleBalance.currentUsage.toFixed(2)
                     : '未查询'}
               </div>
               {visibleBalance ? (
-                <div className="mt-1 text-xs text-muted-foreground">{balanceFreshText(credential, balance)} · 已用 {visibleBalance.currentUsage.toFixed(2)}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{balanceFreshText(credential, balance)}</div>
               ) : null}
             </div>
             <div className="md:col-span-2">
@@ -597,13 +616,26 @@ export function CredentialRow({
                 {rateLimit ? <span title={rateLimit.title}>{rateLimit.text}</span> : null}
               </div>
               <Progress value={progressValue} className={progressTone(credential)} />
-              <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+              <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-4">
                 <span className="truncate" title={credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个活跃会话`}>
                   粘性会话：{credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个`}
                 </span>
                 <span className="truncate" title={dispatchPathMeta.title}>最近调度：{dispatchPathMeta.text}</span>
                 <span className="truncate" title={authMethod?.title ?? ''}>接入类型：{authMethod?.text ?? balanceLabel(credential)}</span>
+                <span className="truncate" title={connectionLabel(credential)}>连接：{connectionLabel(credential)}</span>
               </div>
+              <select
+                className="mt-3 h-9 w-full rounded-md border border-input bg-background px-3 text-xs"
+                value={credential.proxyMode === 'proxy' && credential.proxyId ? `proxy:${credential.proxyId}` : credential.proxyMode === 'direct' ? 'direct:' : 'inherit:'}
+                onChange={(event) => handleQuickProxyChange(event.target.value)}
+                disabled={updateCredential.isPending}
+              >
+                <option value="inherit:">使用默认连接</option>
+                <option value="direct:">直连</option>
+                {(proxies.data?.proxies ?? []).filter((item) => !item.disabled).map((item) => (
+                  <option key={item.id} value={`proxy:${item.id}`}>{item.name} · {item.host}:{item.port}</option>
+                ))}
+              </select>
             </div>
           </div>
         </div>
@@ -696,7 +728,7 @@ export function CredentialRow({
             <Button size="icon" variant="ghost" onClick={() => setShowTestDialog(true)} title="测试这个账号此刻是否真的还能调用">
               <PlugZap className="h-4 w-4" />
             </Button>
-            <Button size="icon" variant="ghost" onClick={() => onViewBalance(credential.id)} title="查看余额">
+            <Button size="icon" variant="ghost" onClick={() => onViewBalance(credential.id)} title="查看用量">
               <Wallet className="h-4 w-4" />
             </Button>
             <Button size="icon" variant="ghost" onClick={() => setShowSettingsDialog(true)} title="修改账号设置">
