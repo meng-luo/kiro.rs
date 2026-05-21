@@ -147,6 +147,7 @@ export interface DiagnosticsSummaryResponse {
   credentialRank: DiagnosticsBucket[]
   errorRank: DiagnosticsBucket[]
   timeBuckets: DiagnosticsTimeBucket[]
+  credentialTimeBuckets: DiagnosticsCredentialTimeBucket[]
   latencyBuckets: DiagnosticsBucket[]
   credentialPerformance: DiagnosticsPerformanceItem[]
   modelPerformance: DiagnosticsPerformanceItem[]
@@ -161,6 +162,13 @@ export interface DiagnosticsTimeBucket {
   averageDurationMs: number
   inputTokens: number
   outputTokens: number
+  cacheReadInputTokens: number
+}
+
+export interface DiagnosticsCredentialTimeBucket {
+  key: string
+  credentialId: number
+  totalRequests: number
 }
 
 export interface DiagnosticsPerformanceItem {

@@ -28,6 +28,18 @@ function stateText(state: string, disabled: boolean) {
 
 const MODEL_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316']
 
+function formatBucketTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
 function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name?: string; value?: number | string; color?: string; payload?: Record<string, unknown> }>; label?: string }) {
   if (!active || !payload?.length) return null
   const row = payload[0]?.payload ?? {}
@@ -108,8 +120,9 @@ export function MonitorPage() {
   // 处理时间桶数据
   const trend = (summary.data?.timeBuckets ?? []).map((bucket) => ({
     ...bucket,
-    cacheReadTokens: bucket.inputTokens > 0 ? Math.round(bucket.inputTokens * 0.3) : 0, // 临时估算，后端需要补充此字段
-    cacheHitRate: bucket.inputTokens > 0 ? (Math.round(bucket.inputTokens * 0.3) / bucket.inputTokens) * 100 : 0,
+    label: formatBucketTime(bucket.key),
+    cacheReadTokens: bucket.cacheReadInputTokens,
+    cacheHitRate: bucket.inputTokens > 0 ? (bucket.cacheReadInputTokens / bucket.inputTokens) * 100 : 0,
   }))
 
   // 模型分布数据
@@ -123,14 +136,19 @@ export function MonitorPage() {
 
   // 账号使用趋势数据（Top 8）
   const credentialPerformance = (summary.data?.credentialPerformance ?? []).slice(0, 8)
-  const accountTrendData = trend.map((bucket) => {
-    const result: Record<string, string | number> = { key: bucket.key }
-    credentialPerformance.forEach((cred) => {
-      // 简化处理：按比例分配到时间桶（实际应该后端提供按时间+账号的二维数据）
-      result[cred.key] = Math.round((cred.totalRequests / trend.length) * (Math.random() * 0.5 + 0.75))
-    })
-    return result
+  const credentialKeys = new Set(credentialPerformance.map((item) => item.key))
+  const credentialTrendMap = new Map<string, Record<string, string | number>>()
+  trend.forEach((bucket) => {
+    credentialTrendMap.set(bucket.key, { key: bucket.key, label: bucket.label })
   })
+  ;(summary.data?.credentialTimeBuckets ?? []).forEach((bucket) => {
+    const key = `#${bucket.credentialId}`
+    if (!credentialKeys.has(key)) return
+    const row = credentialTrendMap.get(bucket.key) ?? { key: bucket.key, label: formatBucketTime(bucket.key) }
+    row[key] = bucket.totalRequests
+    credentialTrendMap.set(bucket.key, row)
+  })
+  const accountTrendData = Array.from(credentialTrendMap.values()).sort((a, b) => String(a.key).localeCompare(String(b.key)))
 
   return (
     <div className="space-y-6">
@@ -290,7 +308,7 @@ export function MonitorPage() {
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                   <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                   <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
                   <Tooltip content={<ChartTooltip />} />
@@ -318,7 +336,7 @@ export function MonitorPage() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={accountTrendData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                   <YAxis tick={{ fontSize: 11 }} />
                   <Tooltip />
                   <Legend />
@@ -331,6 +349,7 @@ export function MonitorPage() {
                       stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
                       strokeWidth={2}
                       dot={false}
+                      connectNulls
                     />
                   ))}
                 </LineChart>

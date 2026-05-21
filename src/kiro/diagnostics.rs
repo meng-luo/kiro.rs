@@ -105,6 +105,15 @@ pub struct DiagnosticsTimeBucket {
     pub average_duration_ms: u64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsCredentialTimeBucket {
+    pub key: String,
+    pub credential_id: u64,
+    pub total_requests: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +150,7 @@ pub struct DiagnosticsSummaryResponse {
     pub credential_rank: Vec<DiagnosticsBucket>,
     pub error_rank: Vec<DiagnosticsBucket>,
     pub time_buckets: Vec<DiagnosticsTimeBucket>,
+    pub credential_time_buckets: Vec<DiagnosticsCredentialTimeBucket>,
     pub latency_buckets: Vec<DiagnosticsBucket>,
     pub credential_performance: Vec<DiagnosticsPerformanceItem>,
     pub model_performance: Vec<DiagnosticsPerformanceItem>,
@@ -388,6 +398,7 @@ impl DiagnosticsStore {
                     .or_else(|| entry.upstream_status.map(|status| status.to_string()))
             })),
             time_buckets: Self::time_buckets(&entries),
+            credential_time_buckets: Self::credential_time_buckets(&entries),
             latency_buckets: Self::latency_buckets(&entries),
             credential_performance: Self::performance(
                 entries
@@ -588,9 +599,7 @@ impl DiagnosticsStore {
     fn time_buckets(entries: &[&RequestDiagnosticEntry]) -> Vec<DiagnosticsTimeBucket> {
         let mut buckets = HashMap::<String, Vec<&RequestDiagnosticEntry>>::new();
         for entry in entries {
-            let key = Self::entry_started_at(entry)
-                .map(|started| started.format("%m-%d %H:00").to_string())
-                .unwrap_or_else(|| "未知时间".to_string());
+            let key = Self::bucket_key(entry);
             buckets.entry(key).or_default().push(*entry);
         }
         let mut items = buckets
@@ -625,10 +634,53 @@ impl DiagnosticsStore {
                         .filter_map(|entry| entry.output_tokens)
                         .map(i64::from)
                         .sum(),
+                    cache_read_input_tokens: entries
+                        .iter()
+                        .filter_map(|entry| entry.cache_read_input_tokens)
+                        .map(i64::from)
+                        .sum(),
                 }
             })
             .collect::<Vec<_>>();
         items.sort_by(|a, b| a.key.cmp(&b.key));
+        items
+    }
+
+    fn bucket_key(entry: &RequestDiagnosticEntry) -> String {
+        Self::entry_started_at(entry)
+            .and_then(|started| {
+                let hour_start = started.timestamp().div_euclid(3600) * 3600;
+                DateTime::<Utc>::from_timestamp(hour_start, 0).map(|dt| dt.to_rfc3339())
+            })
+            .unwrap_or_else(|| "未知时间".to_string())
+    }
+
+    fn credential_time_buckets(
+        entries: &[&RequestDiagnosticEntry],
+    ) -> Vec<DiagnosticsCredentialTimeBucket> {
+        let mut counts = HashMap::<(String, u64), u64>::new();
+        for entry in entries {
+            if let Some(credential_id) = entry.credential_id {
+                *counts
+                    .entry((Self::bucket_key(entry), credential_id))
+                    .or_default() += 1;
+            }
+        }
+        let mut items = counts
+            .into_iter()
+            .map(
+                |((key, credential_id), total_requests)| DiagnosticsCredentialTimeBucket {
+                    key,
+                    credential_id,
+                    total_requests,
+                },
+            )
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| {
+            a.key
+                .cmp(&b.key)
+                .then_with(|| a.credential_id.cmp(&b.credential_id))
+        });
         items
     }
 
