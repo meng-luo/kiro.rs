@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { MetricCard } from '@/components/metric-card'
 import { useCredentials, useCredentialsStream, useDiagnosticsSummary } from '@/hooks/use-credentials'
-import { formatDuration, formatNumber, formatRelativeTime, percent } from '@/lib/format'
+import { formatDateTimeParts, formatDuration, formatNumber, formatRelativeTime, percent } from '@/lib/format'
 import { extractErrorMessage } from '@/lib/utils'
 
 function stateText(state: string, disabled: boolean) {
@@ -29,14 +29,11 @@ function stateText(state: string, disabled: boolean) {
 const MODEL_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316']
 
 function formatBucketTime(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', {
+  return formatDateTimeParts(value, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
   })
 }
 

@@ -24,6 +24,47 @@ const emptyForm: ProxyUpsertRequest = {
   disabled: false,
 }
 
+const proxyProtocols = ['http', 'https', 'socks5', 'socks5h']
+
+function normalizeProxyProtocol(value: string) {
+  const protocol = value.replace(/:$/, '').trim().toLowerCase()
+  return proxyProtocols.includes(protocol) ? protocol : null
+}
+
+function parseProxyAddress(value: string): Partial<ProxyUpsertRequest> | null {
+  const raw = value.trim()
+  if (!raw) return null
+
+  const parseUrl = (source: string): Partial<ProxyUpsertRequest> | null => {
+    try {
+      const url = new URL(source)
+      const protocol = normalizeProxyProtocol(url.protocol)
+      const port = Number(url.port)
+      if (!protocol || !url.hostname || !Number.isInteger(port) || port <= 0 || port > 65535) return null
+      return {
+        protocol,
+        host: url.hostname,
+        port,
+        username: url.username ? decodeURIComponent(url.username) : '',
+        password: url.password ? decodeURIComponent(url.password) : '',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  if (raw.includes('://')) return parseUrl(raw)
+  if (raw.includes('@')) return parseUrl(`http://${raw}`)
+
+  const parts = raw.split(':').map((part) => part.trim())
+  if (parts.length !== 2 && parts.length !== 4) return null
+
+  const [host, portText, username = '', password = ''] = parts
+  const port = Number(portText)
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
+  return { protocol: 'http', host, port, username, password }
+}
+
 function status(proxy: ProxyListItem) {
   if (proxy.disabled) return <Badge variant="outline">已停用</Badge>
   if (proxy.lastTestStatus === 'ok') return <Badge variant="success">可用</Badge>
@@ -50,6 +91,7 @@ export function ProxiesPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<ProxyListItem | null>(null)
   const [form, setForm] = useState<ProxyUpsertRequest>(emptyForm)
+  const [quickProxy, setQuickProxy] = useState('')
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState('all')
   const [state, setState] = useState('all')
@@ -59,6 +101,7 @@ export function ProxiesPage() {
   useEffect(() => {
     if (!dialogOpen) return
     if (editing) {
+      setQuickProxy('')
       setForm({
         name: editing.name,
         protocol: editing.protocol,
@@ -69,9 +112,21 @@ export function ProxiesPage() {
         disabled: editing.disabled,
       })
     } else {
+      setQuickProxy('')
       setForm(emptyForm)
     }
   }, [dialogOpen, editing])
+
+  const applyQuickProxy = (value: string) => {
+    setQuickProxy(value)
+    const parsed = parseProxyAddress(value)
+    if (!parsed) return
+    setForm((prev) => ({
+      ...prev,
+      ...parsed,
+      name: prev.name.trim() || parsed.host || prev.name,
+    }))
+  }
 
   const save = () => {
     const payload = {
@@ -384,6 +439,14 @@ export function ProxiesPage() {
             <DialogTitle>{editing ? '编辑代理' : '添加代理'}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4">
+            <div className="space-y-2">
+              <Input
+                value={quickProxy}
+                onChange={(event) => applyQuickProxy(event.target.value)}
+                placeholder="粘贴代理地址，例如 76.9.106.231:5782:用户名:密码"
+              />
+              <p className="text-xs text-muted-foreground">粘贴后会自动填入下方信息，也支持 http://user:pass@host:port</p>
+            </div>
             <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="名称" />
             <div className="grid gap-3 sm:grid-cols-[120px_minmax(0,1fr)_120px]">
               <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={form.protocol} onChange={(event) => setForm({ ...form, protocol: event.target.value })}>

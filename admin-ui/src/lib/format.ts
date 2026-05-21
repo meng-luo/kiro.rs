@@ -1,3 +1,5 @@
+export const DISPLAY_TIME_ZONE = 'Asia/Shanghai'
+
 export function formatNumber(value?: number | null) {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
 }
@@ -13,8 +15,18 @@ export function formatTime(value?: string | null) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString('zh-CN', {
-    timeZone: 'Asia/Shanghai',
+    timeZone: DISPLAY_TIME_ZONE,
     hour12: false,
+  })
+}
+
+export function formatDateTimeParts(value: string, options: Intl.DateTimeFormatOptions) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    timeZone: DISPLAY_TIME_ZONE,
+    hour12: false,
+    ...options,
   })
 }
 

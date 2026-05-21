@@ -68,6 +68,51 @@ function formatCooldown(ms?: number): string {
   return `${seconds} 秒`
 }
 
+function isRiskCooldown(credential: CredentialStatusItem) {
+  return credential.dispatchState === 'cooldown' && credential.lastRateLimitKind === 'suspicious_activity'
+}
+
+function riskCooldownTone(ms?: number) {
+  if (!ms || ms <= 0) {
+    return {
+      card: 'border-red-200 bg-red-50/30 dark:border-red-950/40 dark:bg-red-950/5',
+      badge: 'border-red-200 bg-red-50 text-red-600 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300',
+      text: 'text-red-500',
+      bar: '[&>div]:bg-red-300',
+    }
+  }
+  if (ms >= 20 * 60_000) {
+    return {
+      card: 'border-red-400 bg-red-100/80 dark:border-red-900/80 dark:bg-red-950/25',
+      badge: 'border-red-500 bg-red-600 text-white',
+      text: 'text-red-700 dark:text-red-300',
+      bar: '[&>div]:bg-red-600',
+    }
+  }
+  if (ms >= 10 * 60_000) {
+    return {
+      card: 'border-red-300 bg-red-50/80 dark:border-red-900/70 dark:bg-red-950/20',
+      badge: 'border-red-400 bg-red-500 text-white',
+      text: 'text-red-600 dark:text-red-300',
+      bar: '[&>div]:bg-red-500',
+    }
+  }
+  if (ms >= 3 * 60_000) {
+    return {
+      card: 'border-red-200 bg-red-50/60 dark:border-red-900/60 dark:bg-red-950/15',
+      badge: 'border-red-300 bg-red-100 text-red-700 dark:border-red-900/60 dark:bg-red-950/25 dark:text-red-300',
+      text: 'text-red-500 dark:text-red-300',
+      bar: '[&>div]:bg-red-400',
+    }
+  }
+  return {
+    card: 'border-red-200 bg-red-50/30 dark:border-red-950/40 dark:bg-red-950/5',
+    badge: 'border-red-200 bg-red-50 text-red-600 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300',
+    text: 'text-red-400 dark:text-red-300',
+    bar: '[&>div]:bg-red-300',
+  }
+}
+
 function statusMeta(credential: CredentialStatusItem): {
   text: string
   variant: 'success' | 'warning' | 'outline' | 'destructive'
@@ -234,6 +279,7 @@ function connectionLabel(credential: CredentialStatusItem) {
 
 function cardTone(credential: CredentialStatusItem) {
   if (credential.disabled) return 'border-gray-300 bg-gray-50/70 dark:bg-muted/20'
+  if (isRiskCooldown(credential)) return riskCooldownTone(credential.cooldownRemainingMs).card
   if (credential.dispatchState === 'blocked' || credential.lastRateLimitKind === 'suspicious_activity') {
     return 'border-red-300 bg-red-50/70 dark:bg-red-950/10'
   }
@@ -246,6 +292,7 @@ function cardTone(credential: CredentialStatusItem) {
 function progressTone(credential: CredentialStatusItem) {
   if (credential.disabled || credential.dispatchState === 'blocked') return 'opacity-50 grayscale'
   if (credential.dispatchState === 'saturated') return '[&>div]:bg-red-500'
+  if (isRiskCooldown(credential)) return riskCooldownTone(credential.cooldownRemainingMs).bar
   if (credential.dispatchState === 'cooldown') return '[&>div]:bg-yellow-500'
   return '[&>div]:bg-green-500'
 }
@@ -316,6 +363,9 @@ export function CredentialRow({
     ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
     : 0
   const visibleBalance = displayBalance(credential, balance)
+  const riskCooldown = isRiskCooldown(credential)
+  const cooldownText = credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : '无需等待'
+  const riskTone = riskCooldown ? riskCooldownTone(credential.cooldownRemainingMs) : null
 
   useEffect(() => {
     setPriorityValue(String(credential.priority))
@@ -333,7 +383,7 @@ export function CredentialRow({
       },
       {
         label: '冷却剩余',
-        value: credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : '无需等待',
+        value: cooldownText,
         title: '冷却结束后会自动恢复参与调度。',
       },
       {
@@ -378,7 +428,7 @@ export function CredentialRow({
       },
     ]
     return items
-  }, [authMethod?.text, authMethod?.title, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title, visibleBalance])
+  }, [authMethod?.text, authMethod?.title, cooldownText, credential, dispatchPathMeta.text, dispatchPathMeta.title, loadingBalance, rateLimit?.text, rateLimit?.title, status.text, status.title, visibleBalance])
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -577,8 +627,8 @@ export function CredentialRow({
                   {credential.endpoint} · 最近使用：{formatLastUsed(credential.lastUsedAt)}
                 </div>
               </div>
-              <Badge variant={status.variant} title={status.title} className="shrink-0">
-                {status.text}
+              <Badge variant={riskCooldown ? 'outline' : status.variant} title={status.title} className={cn('shrink-0', riskTone?.badge)}>
+                {riskCooldown ? `${status.text} ${cooldownText}` : status.text}
               </Badge>
             </div>
             <div className="flex items-center justify-end gap-2">
@@ -613,7 +663,11 @@ export function CredentialRow({
             <div className="md:col-span-2">
               <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 <span>并发 {credential.currentConcurrent}/{credential.maxConcurrent}</span>
-                {rateLimit ? <span title={rateLimit.title}>{rateLimit.text}</span> : null}
+                {rateLimit ? (
+                  <span title={rateLimit.title} className={cn(riskTone?.text)}>
+                    {riskCooldown ? `${rateLimit.text}，剩余 ${cooldownText}` : rateLimit.text}
+                  </span>
+                ) : null}
               </div>
               <Progress value={progressValue} className={progressTone(credential)} />
               <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-4">
@@ -643,6 +697,7 @@ export function CredentialRow({
       <tr className={cn(
         'border-b align-middle text-sm',
         credential.isCurrent ? 'bg-primary/5' : 'bg-background',
+        riskTone?.card,
         selected ? 'bg-muted/20' : ''
       )}>
         <td className="w-12 px-3 py-3">
@@ -695,15 +750,15 @@ export function CredentialRow({
         <td className="max-w-[140px] px-3 py-3">
           <div className="space-y-1">
             {rateLimit ? (
-              <Badge variant={rateLimit.variant} className="max-w-full truncate whitespace-nowrap" title={rateLimit.title}>
+              <Badge variant={riskCooldown ? 'outline' : rateLimit.variant} className={cn('max-w-full truncate whitespace-nowrap', riskTone?.badge)} title={rateLimit.title}>
                 {rateLimit.text}
               </Badge>
             ) : (
               <CellText>无</CellText>
             )}
             {credential.cooldownRemainingMs ? (
-              <CellText className="text-xs text-muted-foreground" title="冷却结束后会自动恢复">
-                {formatCooldown(credential.cooldownRemainingMs)}
+              <CellText className={cn('text-xs', riskTone?.text ?? 'text-muted-foreground')} title="冷却结束后会自动恢复">
+                {riskCooldown ? `剩余 ${cooldownText}` : cooldownText}
               </CellText>
             ) : null}
           </div>
