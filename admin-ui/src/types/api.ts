@@ -135,6 +135,9 @@ export interface DiagnosticsSummaryResponse {
   rateLimitedRequests: number
   suspiciousRequests: number
   averageDurationMs: number
+  p50DurationMs: number
+  p90DurationMs: number
+  p99DurationMs: number
   inputTokens: number
   outputTokens: number
   cacheCreationInputTokens: number

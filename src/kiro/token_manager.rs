@@ -13,6 +13,7 @@ use tokio::sync::Mutex as TokioMutex;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -641,18 +642,33 @@ impl AcquireOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DispatchLease {
     pub id: u64,
     released: bool,
+    entries: Arc<Mutex<Vec<CredentialEntry>>>,
 }
 
 impl DispatchLease {
-    pub fn new(id: u64) -> Self {
+    fn new(id: u64, entries: Arc<Mutex<Vec<CredentialEntry>>>) -> Self {
         Self {
             id,
             released: false,
+            entries,
         }
+    }
+}
+
+impl Drop for DispatchLease {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == self.id) {
+            entry.inflight = entry.inflight.saturating_sub(1);
+        }
+        self.released = true;
     }
 }
 
@@ -664,7 +680,7 @@ pub struct MultiTokenManager {
     config: Config,
     proxy: Option<ProxyConfig>,
     /// 凭据条目列表
-    entries: Mutex<Vec<CredentialEntry>>,
+    entries: Arc<Mutex<Vec<CredentialEntry>>>,
     /// 当前活动凭据 ID
     current_id: Mutex<u64>,
     /// Token 刷新锁，确保同一时间只有一个刷新操作
@@ -837,7 +853,7 @@ impl MultiTokenManager {
         let manager = Self {
             config,
             proxy,
-            entries: Mutex::new(entries),
+            entries: Arc::new(Mutex::new(entries)),
             current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
             credentials_path,
@@ -1301,7 +1317,7 @@ impl MultiTokenManager {
                     if let Some(session_key) = options.session_key.as_deref() {
                         self.bind_session(session_key, id);
                     }
-                    ctx.lease = Some(DispatchLease::new(id));
+                    ctx.lease = Some(DispatchLease::new(id, Arc::clone(&self.entries)));
                     ctx.dispatch_path = selection.dispatch_path;
                     ctx.used_soft_fallback = selection.used_soft_fallback;
                     ctx.account_state_at_start = selection.account_state_at_start;
@@ -1672,11 +1688,15 @@ impl MultiTokenManager {
         if lease.released {
             return;
         }
+        self.release_slot_by_id(lease.id);
+        lease.released = true;
+    }
+
+    fn release_slot_by_id(&self, id: u64) {
         let mut entries = self.entries.lock();
-        if let Some(entry) = entries.iter_mut().find(|e| e.id == lease.id) {
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             entry.inflight = entry.inflight.saturating_sub(1);
         }
-        lease.released = true;
     }
 
     fn apply_cooldown(&self, id: u64, kind: RateLimitKind) -> bool {

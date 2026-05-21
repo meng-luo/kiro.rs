@@ -1,35 +1,42 @@
-import { useMemo, useState } from 'react'
-import { BarChart3, CheckCircle2, Clipboard, Clock3, RefreshCw, ShieldAlert, XCircle } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Legend,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
+  AlertTriangle, BarChart3, CheckCircle2, Clipboard, Clock3, Copy, Filter,
+  Gauge, RefreshCw, Search, ShieldAlert, Timer, X, XCircle, Zap,
+} from 'lucide-react'
+import {
+  Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { useDiagnosticsCli, useDiagnosticsRequests, useDiagnosticsSummary } from '@/hooks/use-credentials'
+import { Switch } from '@/components/ui/switch'
+import {
+  useDiagnosticsCli, useDiagnosticsRequest, useDiagnosticsRequests,
+  useDiagnosticsSummary,
+} from '@/hooks/use-credentials'
 import { formatTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import type { DiagnosticsBucket, DiagnosticsFilters, DiagnosticsPerformanceItem, DiagnosticsSummaryResponse, DiagnosticsTimeBucket, RequestDiagnosticEntry } from '@/types/api'
+import type {
+  DiagnosticsBucket, DiagnosticsFilters, DiagnosticsPerformanceItem,
+  DiagnosticsSummaryResponse, DiagnosticsTimeBucket, RequestDiagnosticEntry,
+} from '@/types/api'
 
 const RESULT_COLORS = ['#22c55e', '#ef4444', '#f59e0b']
 const TOKEN_COLORS = {
-  uncached: '#3b82f6',
-  cacheRead: '#14b8a6',
-  cacheCreation: '#a855f7',
-  output: '#f97316',
+  uncached: '#3b82f6', cacheRead: '#14b8a6',
+  cacheCreation: '#a855f7', output: '#f97316',
 }
+const SINCE_PRESETS: Array<[string, string]> = [
+  ['1小时', '1h'], ['6小时', '6h'], ['24小时', '24h'],
+  ['7天', '168h'], ['30天', '720h'],
+]
+const PAGE_SIZE = 50
 
 function formatNumber(value?: number | null) {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
@@ -41,46 +48,44 @@ function formatDuration(ms?: number | null) {
   return `${(ms / 1000).toFixed(2)} s`
 }
 
+function formatPercent(value: number, fractionDigits = 1) {
+  if (!Number.isFinite(value)) return '0%'
+  return `${value.toFixed(fractionDigits)}%`
+}
+
 function rateLimitLabel(kind?: string | null) {
   switch (kind) {
-    case 'normal_429':
-      return '普通限频'
-    case 'suspicious_activity':
-      return '风控限频'
-    case 'refresh_429':
-      return '刷新限频'
-    default:
-      return kind || '无'
+    case 'normal_429': return '普通限频'
+    case 'suspicious_activity': return '风控限频'
+    case 'refresh_429': return '刷新限频'
+    default: return kind || '无'
   }
 }
 
 function dispatchLabel(path?: string | null) {
   switch (path) {
-    case 'sticky':
-      return '会话粘性'
-    case 'balanced':
-      return '均衡分配'
-    case 'soft_fallback':
-      return '备用账号'
-    case 'preferred':
-      return '指定账号'
-    default:
-      return path || '-'
+    case 'sticky': return '会话粘性'
+    case 'balanced': return '均衡分配'
+    case 'soft_fallback': return '备用账号'
+    case 'preferred': return '指定账号'
+    default: return path || '-'
   }
 }
 
+function copyText(text: string, hint = '已复制') {
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => toast.success(hint)).catch(() => toast.error('复制失败'))
+}
+
 function StatCard({
-  icon: Icon,
-  label,
-  value,
-  hint,
-  tone,
+  icon: Icon, label, value, hint, tone, extra,
 }: {
   icon: typeof BarChart3
   label: string
   value: string
   hint: string
   tone: string
+  extra?: React.ReactNode
 }) {
   return (
     <Card className="overflow-hidden">
@@ -88,17 +93,25 @@ function StatCard({
         <div className={cn('rounded-xl p-3', tone)}>
           <Icon className="h-5 w-5" />
         </div>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="truncate text-xs text-muted-foreground">{label}</div>
           <div className="mt-1 truncate text-2xl font-semibold">{value}</div>
           <div className="mt-1 truncate text-xs text-muted-foreground">{hint}</div>
         </div>
+        {extra}
       </CardContent>
     </Card>
   )
 }
 
-function RankList({ title, items }: { title: string; items: DiagnosticsBucket[] }) {
+function RankList({
+  title, items, onPick, formatter,
+}: {
+  title: string
+  items: DiagnosticsBucket[]
+  onPick?: (key: string) => void
+  formatter?: (key: string) => string
+}) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -109,10 +122,20 @@ function RankList({ title, items }: { title: string; items: DiagnosticsBucket[] 
           <div className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">暂无数据</div>
         ) : (
           items.map((item) => (
-            <div key={item.key} className="flex items-center justify-between gap-3 rounded-md bg-muted/30 px-3 py-2">
-              <span className="min-w-0 truncate text-sm" title={item.key}>{item.key}</span>
+            <button
+              key={item.key}
+              type="button"
+              onClick={onPick ? () => onPick(item.key) : undefined}
+              className={cn(
+                'flex w-full items-center justify-between gap-3 rounded-md bg-muted/30 px-3 py-2 text-left',
+                onPick && 'cursor-pointer transition hover:bg-muted/60',
+              )}
+            >
+              <span className="min-w-0 truncate text-sm" title={item.key}>
+                {formatter ? formatter(item.key) : item.key}
+              </span>
               <Badge variant="outline">{formatNumber(item.count)}</Badge>
-            </div>
+            </button>
           ))
         )}
       </CardContent>
@@ -164,20 +187,21 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
 }
 
 function TrendBars({ items }: { items: DiagnosticsTimeBucket[] }) {
+  const data = useMemo(() => items, [items])
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base">请求趋势</CardTitle>
       </CardHeader>
       <CardContent>
-        {items.length === 0 ? (
+        {data.length === 0 ? (
           <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无趋势数据</div>
         ) : (
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={items.slice(-24)} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+              <BarChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="key" tick={{ fontSize: 11 }} />
+                <XAxis dataKey="key" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip content={<ChartTooltip />} />
                 <Legend />
@@ -297,52 +321,46 @@ function TokenChart({ data }: { data?: DiagnosticsSummaryResponse }) {
   )
 }
 
-function ErrorRankChart({ items }: { items: DiagnosticsBucket[] }) {
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">错误分布</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {items.length === 0 ? (
-          <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无错误数据</div>
-        ) : (
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={items.slice(0, 8)} layout="vertical" margin={{ top: 8, right: 18, left: 20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} />
-                <YAxis type="category" dataKey="key" tick={{ fontSize: 11 }} width={112} />
-                <Tooltip content={<ChartTooltip />} />
-                <Bar dataKey="count" name="次数" fill="#ef4444" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-function PerformanceChart({ title, items }: { title: string; items: DiagnosticsPerformanceItem[] }) {
+function PerformanceChart({
+  title, items, onPick, formatter,
+}: {
+  title: string
+  items: DiagnosticsPerformanceItem[]
+  onPick?: (key: string) => void
+  formatter?: (key: string) => string
+}) {
+  const display = items.slice(0, 8).map((item) => ({
+    ...item,
+    label: formatter ? formatter(item.key) : item.key,
+  }))
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base">{title}</CardTitle>
       </CardHeader>
       <CardContent>
-        {items.length === 0 ? (
+        {display.length === 0 ? (
           <div className="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">暂无数据</div>
         ) : (
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={items.slice(0, 8)} layout="vertical" margin={{ top: 8, right: 18, left: 20, bottom: 0 }}>
+              <BarChart
+                data={display}
+                layout="vertical"
+                margin={{ top: 8, right: 18, left: 20, bottom: 0 }}
+                onClick={(state) => {
+                  if (!onPick) return
+                  const payload = (state as { activePayload?: Array<{ payload?: DiagnosticsPerformanceItem }> } | undefined)?.activePayload
+                  const item = payload?.[0]?.payload
+                  if (item?.key) onPick(item.key)
+                }}
+              >
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} />
                 <XAxis type="number" tick={{ fontSize: 11 }} />
-                <YAxis type="category" dataKey="key" tick={{ fontSize: 11 }} width={96} />
+                <YAxis type="category" dataKey="label" tick={{ fontSize: 11 }} width={120} />
                 <Tooltip content={<ChartTooltip />} />
                 <Legend />
-                <Bar dataKey="successRequests" name="成功" stackId="requests" fill="#22c55e" radius={[0, 4, 4, 0]} />
+                <Bar dataKey="successRequests" name="成功" stackId="requests" fill="#22c55e" radius={[0, 4, 4, 0]} cursor={onPick ? 'pointer' : 'default'} />
                 <Bar dataKey="failedRequests" name="失败" stackId="requests" fill="#ef4444" />
                 <Bar dataKey="rateLimitedRequests" name="限频" fill="#f59e0b" />
               </BarChart>
@@ -354,7 +372,14 @@ function PerformanceChart({ title, items }: { title: string; items: DiagnosticsP
   )
 }
 
-function PerformanceTable({ title, items }: { title: string; items: DiagnosticsPerformanceItem[] }) {
+function PerformanceTable({
+  title, items, onPick, formatter,
+}: {
+  title: string
+  items: DiagnosticsPerformanceItem[]
+  onPick?: (key: string) => void
+  formatter?: (key: string) => string
+}) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -377,16 +402,29 @@ function PerformanceTable({ title, items }: { title: string; items: DiagnosticsP
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {items.map((item) => (
-                  <tr key={item.key}>
-                    <td className="max-w-[220px] truncate py-3" title={item.key}>{item.key}</td>
-                    <td className="py-3 text-right">{formatNumber(item.totalRequests)}</td>
-                    <td className="py-3 text-right">{item.totalRequests ? `${((item.successRequests / item.totalRequests) * 100).toFixed(1)}%` : '0%'}</td>
-                    <td className="py-3 text-right">{formatDuration(item.averageDurationMs)}</td>
-                    <td className="py-3 text-right">{formatNumber(item.rateLimitedRequests)}</td>
-                    <td className="py-3 text-right">{formatNumber(item.inputTokens + item.outputTokens)}</td>
-                  </tr>
-                ))}
+                {items.map((item) => {
+                  const successRate = item.totalRequests
+                    ? (item.successRequests / item.totalRequests) * 100
+                    : 0
+                  return (
+                    <tr
+                      key={item.key}
+                      className={cn(onPick && 'cursor-pointer transition hover:bg-muted/40')}
+                      onClick={onPick ? () => onPick(item.key) : undefined}
+                    >
+                      <td className="max-w-[220px] truncate py-3" title={item.key}>
+                        {formatter ? formatter(item.key) : item.key}
+                      </td>
+                      <td className="py-3 text-right">{formatNumber(item.totalRequests)}</td>
+                      <td className={cn('py-3 text-right', successRate < 90 && successRate > 0 && 'text-amber-600 dark:text-amber-400', successRate < 70 && 'text-rose-600 dark:text-rose-400')}>
+                        {item.totalRequests ? formatPercent(successRate) : '-'}
+                      </td>
+                      <td className="py-3 text-right">{formatDuration(item.averageDurationMs)}</td>
+                      <td className="py-3 text-right">{formatNumber(item.rateLimitedRequests)}</td>
+                      <td className="py-3 text-right">{formatNumber(item.inputTokens + item.outputTokens)}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -396,9 +434,136 @@ function PerformanceTable({ title, items }: { title: string; items: DiagnosticsP
   )
 }
 
-function RequestRow({ item }: { item: RequestDiagnosticEntry }) {
+function DetailRow({ label, value, copyable, mono }: { label: string; value?: React.ReactNode; copyable?: string; mono?: boolean }) {
+  const empty = value === null || value === undefined || value === ''
   return (
-    <tr className="border-b text-sm">
+    <div className="grid grid-cols-[120px_minmax(0,1fr)_auto] items-start gap-3 py-2 text-sm">
+      <div className="text-muted-foreground">{label}</div>
+      <div className={cn('min-w-0 break-all', mono && 'font-mono text-xs', empty && 'text-muted-foreground')}>
+        {empty ? '-' : value}
+      </div>
+      {copyable ? (
+        <button
+          type="button"
+          onClick={() => copyText(copyable, '已复制')}
+          className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+          aria-label="复制"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </button>
+      ) : <div />}
+    </div>
+  )
+}
+
+function RequestDetailDialog({
+  requestId, onClose,
+}: {
+  requestId: string | null
+  onClose: () => void
+}) {
+  const detail = useDiagnosticsRequest(requestId)
+  const entry = detail.data
+  const totalToken =
+    (entry?.inputTokens ?? 0) + (entry?.outputTokens ?? 0)
+  return (
+    <Dialog open={!!requestId} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            请求详情
+            {entry ? (
+              <Badge variant={entry.success ? 'success' : 'destructive'}>
+                {entry.success ? '成功' : '失败'}
+              </Badge>
+            ) : null}
+          </DialogTitle>
+        </DialogHeader>
+        {detail.isLoading ? (
+          <div className="py-8 text-center text-sm text-muted-foreground">正在加载</div>
+        ) : !entry ? (
+          <div className="py-8 text-center text-sm text-muted-foreground">未找到该请求</div>
+        ) : (
+          <div className="divide-y">
+            <DetailRow label="请求 ID" value={entry.requestId} copyable={entry.requestId} mono />
+            <DetailRow label="开始时间" value={formatTime(entry.startedAt)} />
+            <DetailRow label="结束时间" value={formatTime(entry.finishedAt)} />
+            <DetailRow label="耗时" value={formatDuration(entry.durationMs)} />
+            <DetailRow label="原始模型" value={entry.originalModel} />
+            <DetailRow label="映射模型" value={entry.mappedModel} />
+            <DetailRow
+              label="账号"
+              value={entry.credentialId ? `#${entry.credentialId}` : null}
+            />
+            <DetailRow
+              label="调度路径"
+              value={
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant={entry.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'}>
+                    {dispatchLabel(entry.dispatchPath)}
+                  </Badge>
+                  {entry.stickyHit ? <Badge variant="success">粘性命中</Badge> : null}
+                  {entry.stickyDetached ? <Badge variant="destructive">已脱粘</Badge> : null}
+                </div>
+              }
+            />
+            <DetailRow label="会话哈希" value={entry.sessionHash} copyable={entry.sessionHash ?? undefined} mono />
+            <DetailRow label="上游状态" value={entry.upstreamStatus} />
+            <DetailRow label="错误码" value={entry.upstreamErrorCode} />
+            <DetailRow label="错误消息" value={entry.upstreamMessageShort} copyable={entry.upstreamMessageShort ?? undefined} />
+            <DetailRow
+              label="限频类型"
+              value={
+                entry.rateLimitKind ? (
+                  <Badge variant="warning">{rateLimitLabel(entry.rateLimitKind)}</Badge>
+                ) : null
+              }
+            />
+            <DetailRow label="冷却时长" value={entry.cooldownMs ? formatDuration(entry.cooldownMs) : null} />
+            <DetailRow label="冷却结束" value={entry.cooldownUntil ? formatTime(entry.cooldownUntil) : null} />
+            <DetailRow
+              label="Token"
+              value={
+                <div className="space-y-1">
+                  <div>合计 <span className="font-medium">{formatNumber(totalToken)}</span></div>
+                  <div className="text-xs text-muted-foreground">
+                    输入 {formatNumber(entry.inputTokens)} ·
+                    输出 {formatNumber(entry.outputTokens)} ·
+                    缓存命中 {formatNumber(entry.cacheReadInputTokens)} ·
+                    缓存写入 {formatNumber(entry.cacheCreationInputTokens)} ·
+                    未命中 {formatNumber(entry.uncachedInputTokens)}
+                  </div>
+                </div>
+              }
+            />
+            <div className="pt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => copyText(JSON.stringify(entry, null, 2), '已复制 JSON')}
+              >
+                <Clipboard className="h-4 w-4" />
+                复制 JSON
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function RequestRow({
+  item, onPick,
+}: {
+  item: RequestDiagnosticEntry
+  onPick: (id: string) => void
+}) {
+  return (
+    <tr
+      className="cursor-pointer border-b text-sm transition hover:bg-muted/40"
+      onClick={() => onPick(item.requestId)}
+    >
       <td className="max-w-[190px] px-3 py-3">
         <div className="truncate font-mono text-xs" title={item.requestId}>{item.requestId}</div>
         <div className="mt-1 truncate text-xs text-muted-foreground">{formatTime(item.startedAt)}</div>
@@ -420,7 +585,7 @@ function RequestRow({ item }: { item: RequestDiagnosticEntry }) {
       <td className="px-3 py-3">
         <Badge variant={item.success ? 'success' : 'destructive'}>{item.success ? '成功' : '失败'}</Badge>
       </td>
-      <td className="max-w-[220px] px-3 py-3">
+      <td className="max-w-[260px] px-3 py-3">
         <div className="truncate" title={item.upstreamMessageShort ?? ''}>
           {item.rateLimitKind ? rateLimitLabel(item.rateLimitKind) : item.upstreamErrorCode || item.upstreamStatus || '-'}
         </div>
@@ -433,28 +598,108 @@ function RequestRow({ item }: { item: RequestDiagnosticEntry }) {
   )
 }
 
+interface UiFilters {
+  since: string
+  until: string
+  credentialId: string
+  model: string
+  rateLimitKind: string
+  rateLimitOnly: boolean
+  dispatchPath: string
+  success: string
+  keyword: string
+}
+
+const DEFAULT_FILTERS: UiFilters = {
+  since: '24h',
+  until: '',
+  credentialId: '',
+  model: '',
+  rateLimitKind: '',
+  rateLimitOnly: false,
+  dispatchPath: '',
+  success: '',
+  keyword: '',
+}
+
+function buildFilters(ui: UiFilters, limit: number, cursor?: number): DiagnosticsFilters {
+  return {
+    since: ui.since || undefined,
+    until: ui.until.trim() || undefined,
+    credentialId: ui.credentialId ? Number(ui.credentialId) : undefined,
+    model: ui.model.trim() || undefined,
+    rateLimitKind: ui.rateLimitKind || undefined,
+    rateLimitOnly: ui.rateLimitOnly || undefined,
+    dispatchPath: ui.dispatchPath || undefined,
+    success: ui.success === '' ? undefined : ui.success === 'true',
+    keyword: ui.keyword.trim() || undefined,
+    limit,
+    cursor,
+  }
+}
+
+function activeFilterChips(ui: UiFilters): Array<{ key: keyof UiFilters; label: string }> {
+  const chips: Array<{ key: keyof UiFilters; label: string }> = []
+  if (ui.credentialId) chips.push({ key: 'credentialId', label: `账号 #${ui.credentialId}` })
+  if (ui.model) chips.push({ key: 'model', label: `模型 ${ui.model}` })
+  if (ui.rateLimitKind) chips.push({ key: 'rateLimitKind', label: rateLimitLabel(ui.rateLimitKind) })
+  if (ui.rateLimitOnly) chips.push({ key: 'rateLimitOnly', label: '只看限频' })
+  if (ui.dispatchPath) chips.push({ key: 'dispatchPath', label: dispatchLabel(ui.dispatchPath) })
+  if (ui.success !== '') chips.push({ key: 'success', label: ui.success === 'true' ? '只看成功' : '只看失败' })
+  if (ui.keyword) chips.push({ key: 'keyword', label: `关键字: ${ui.keyword}` })
+  if (ui.until) chips.push({ key: 'until', label: `至: ${ui.until}` })
+  return chips
+}
+
 export function DiagnosticsDashboard() {
-  const [since, setSince] = useState('24h')
-  const [credentialId, setCredentialId] = useState('')
-  const [model, setModel] = useState('')
-  const [rateLimitKind, setRateLimitKind] = useState('')
-  const [dispatchPath, setDispatchPath] = useState('')
-  const [success, setSuccess] = useState('')
+  const [ui, setUi] = useState<UiFilters>(DEFAULT_FILTERS)
+  const [keywordInput, setKeywordInput] = useState('')
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [pageSize, setPageSize] = useState(PAGE_SIZE)
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
 
-  const filters = useMemo<DiagnosticsFilters>(() => ({
-    since,
-    credentialId: credentialId ? Number(credentialId) : undefined,
-    model: model.trim() || undefined,
-    rateLimitKind: rateLimitKind || undefined,
-    dispatchPath: dispatchPath || undefined,
-    success: success === '' ? undefined : success === 'true',
-    limit: 100,
-  }), [credentialId, dispatchPath, model, rateLimitKind, since, success])
+  // keyword 防抖
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setUi((prev) => (prev.keyword === keywordInput.trim() ? prev : { ...prev, keyword: keywordInput.trim() }))
+    }, 300)
+    return () => window.clearTimeout(handle)
+  }, [keywordInput])
 
-  const summary = useDiagnosticsSummary(filters)
-  const requests = useDiagnosticsRequests(filters)
-  const cli = useDiagnosticsCli(filters)
+  const summaryFilters = useMemo(() => buildFilters(ui, pageSize), [ui, pageSize])
+  const requestsFilters = useMemo(() => buildFilters(ui, pageSize), [ui, pageSize])
+
+  const summary = useDiagnosticsSummary(summaryFilters)
+  const requests = useDiagnosticsRequests(requestsFilters)
+  const cli = useDiagnosticsCli(summaryFilters)
   const data = summary.data
+
+  // 自动刷新
+  useEffect(() => {
+    if (!autoRefresh) return
+    const handle = window.setInterval(() => {
+      summary.refetch()
+      requests.refetch()
+    }, 30000)
+    return () => window.clearInterval(handle)
+  }, [autoRefresh, summary, requests])
+
+  const updateFilter = <K extends keyof UiFilters>(key: K, value: UiFilters[K]) => {
+    setUi((prev) => ({ ...prev, [key]: value }))
+    setPageSize(PAGE_SIZE)
+  }
+
+  const resetFilter = (key: keyof UiFilters) => {
+    setUi((prev) => ({ ...prev, [key]: (key === 'rateLimitOnly' ? false : '') as UiFilters[typeof key] }))
+    if (key === 'keyword') setKeywordInput('')
+    setPageSize(PAGE_SIZE)
+  }
+
+  const resetAll = () => {
+    setUi(DEFAULT_FILTERS)
+    setKeywordInput('')
+    setPageSize(PAGE_SIZE)
+  }
 
   const copyCli = async () => {
     if (!cli.data?.command) return
@@ -462,19 +707,56 @@ export function DiagnosticsDashboard() {
     toast.success('已复制诊断命令')
   }
 
+  const total = requests.data?.total ?? 0
+  const loaded = requests.data?.items.length ?? 0
+  const canLoadMore = loaded < total
+
+  const totalRequests = data?.totalRequests ?? 0
+  const successRate = totalRequests
+    ? ((data?.successRequests ?? 0) / totalRequests) * 100
+    : 0
+  const tokenInputTotal =
+    (data?.uncachedInputTokens ?? 0) +
+    (data?.cacheReadInputTokens ?? 0) +
+    (data?.cacheCreationInputTokens ?? 0)
+  const cacheHitRate = tokenInputTotal
+    ? ((data?.cacheReadInputTokens ?? 0) / tokenInputTotal) * 100
+    : 0
+  const rateLimitedShare = totalRequests
+    ? ((data?.rateLimitedRequests ?? 0) / totalRequests) * 100
+    : 0
+  const suspiciousShare = totalRequests
+    ? ((data?.suspiciousRequests ?? 0) / totalRequests) * 100
+    : 0
+  const tokenTotal = tokenInputTotal + (data?.outputTokens ?? 0)
+
+  const chips = activeFilterChips(ui)
+
   return (
     <div className="space-y-6">
-      <Card className="border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white dark:border-slate-800">
-        <CardContent className="p-6">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <div className="text-sm text-slate-300">请求统计</div>
-              <div className="mt-2 text-3xl font-semibold tracking-tight">按请求结果查看账号健康</div>
-              <div className="mt-2 max-w-2xl text-sm text-slate-300">
-                这里展示真实请求、原始模型、账号命中和限频结果。筛选后可以直接复制命令用于 CLI 排查。
-              </div>
+      <Card>
+        <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-1 items-center gap-3">
+            <div className="relative flex-1 max-w-xl">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={keywordInput}
+                onChange={(e) => setKeywordInput(e.target.value)}
+                placeholder="搜索 requestId / 错误码 / 错误消息 / 模型 / 账号 ID"
+                className="pl-9"
+              />
             </div>
-            <Button variant="secondary" onClick={copyCli} disabled={!cli.data?.command}>
+            <Button variant="outline" size="sm" onClick={() => { summary.refetch(); requests.refetch(); cli.refetch() }}>
+              <RefreshCw className={cn('h-4 w-4', summary.isFetching && 'animate-spin')} />
+              刷新
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+              <span className="text-muted-foreground">{autoRefresh ? '自动刷新' : '已暂停'}</span>
+            </label>
+            <Button variant="secondary" size="sm" onClick={copyCli} disabled={!cli.data?.command}>
               <Clipboard className="h-4 w-4" />
               复制 CLI
             </Button>
@@ -483,73 +765,192 @@ export function DiagnosticsDashboard() {
       </Card>
 
       <Card>
-        <CardContent className="grid gap-3 p-4 md:grid-cols-3 lg:grid-cols-6">
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">时间范围</label>
-            <div className="flex gap-2">
-              {[
-                ['1小时', '1h'],
-                ['6小时', '6h'],
-                ['24小时', '24h'],
-                ['7天', '168h'],
-                ['30天', '720h'],
-              ].map(([label, value]) => (
-                <Button key={value} size="sm" variant={since === value ? 'default' : 'outline'} onClick={() => setSince(value)}>
-                  {label}
-                </Button>
-              ))}
+        <CardContent className="space-y-4 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">时间范围</span>
+            {SINCE_PRESETS.map(([label, value]) => (
+              <Button key={value} size="sm" variant={ui.since === value ? 'default' : 'outline'} onClick={() => updateFilter('since', value)}>
+                {label}
+              </Button>
+            ))}
+            <Input
+              value={ui.since}
+              onChange={(e) => updateFilter('since', e.target.value)}
+              placeholder="自定义 since (如 2h / RFC3339)"
+              className="h-9 w-56"
+            />
+            <Input
+              value={ui.until}
+              onChange={(e) => updateFilter('until', e.target.value)}
+              placeholder="自定义 until (留空=至今)"
+              className="h-9 w-56"
+            />
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">账号 ID</label>
+              <Input value={ui.credentialId} onChange={(e) => updateFilter('credentialId', e.target.value)} placeholder="例如 1" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">原始模型</label>
+              <Input value={ui.model} onChange={(e) => updateFilter('model', e.target.value)} placeholder="claude-sonnet..." />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">限频结果</label>
+              <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={ui.rateLimitKind} onChange={(e) => updateFilter('rateLimitKind', e.target.value)}>
+                <option value="">全部</option>
+                <option value="normal_429">普通限频</option>
+                <option value="suspicious_activity">风控限频</option>
+                <option value="refresh_429">刷新限频</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">调度方式</label>
+              <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={ui.dispatchPath} onChange={(e) => updateFilter('dispatchPath', e.target.value)}>
+                <option value="">全部</option>
+                <option value="sticky">会话粘性</option>
+                <option value="balanced">均衡分配</option>
+                <option value="soft_fallback">备用账号</option>
+                <option value="preferred">指定账号</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">请求结果</label>
+              <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={ui.success} onChange={(e) => updateFilter('success', e.target.value)}>
+                <option value="">全部</option>
+                <option value="true">成功</option>
+                <option value="false">失败</option>
+              </select>
             </div>
           </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">账号 ID</label>
-            <Input value={credentialId} onChange={(e) => setCredentialId(e.target.value)} placeholder="例如 1" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">原始模型</label>
-            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet..." />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">限频结果</label>
-            <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={rateLimitKind} onChange={(e) => setRateLimitKind(e.target.value)}>
-              <option value="">全部</option>
-              <option value="normal_429">普通限频</option>
-              <option value="suspicious_activity">风控限频</option>
-              <option value="refresh_429">刷新限频</option>
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">调度方式</label>
-            <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={dispatchPath} onChange={(e) => setDispatchPath(e.target.value)}>
-              <option value="">全部</option>
-              <option value="sticky">会话粘性</option>
-              <option value="balanced">均衡分配</option>
-              <option value="soft_fallback">备用账号</option>
-              <option value="preferred">指定账号</option>
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">请求结果</label>
-            <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={success} onChange={(e) => setSuccess(e.target.value)}>
-              <option value="">全部</option>
-              <option value="true">成功</option>
-              <option value="false">失败</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={ui.rateLimitOnly} onCheckedChange={(checked) => updateFilter('rateLimitOnly', checked)} />
+              <span className="text-muted-foreground">只看限频</span>
+            </label>
+            {chips.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1">
+                <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+                {chips.map((chip) => (
+                  <Badge key={chip.key} variant="secondary" className="gap-1 pr-1">
+                    {chip.label}
+                    <button
+                      type="button"
+                      onClick={() => resetFilter(chip.key)}
+                      className="rounded-full p-0.5 transition hover:bg-muted-foreground/20"
+                      aria-label="移除"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+                <Button size="sm" variant="ghost" onClick={resetAll}>
+                  清空
+                </Button>
+              </div>
+            ) : null}
           </div>
         </CardContent>
       </Card>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <StatCard icon={BarChart3} label="请求数" value={formatNumber(data?.totalRequests)} hint={`${formatNumber(data?.successRequests)} 次成功`} tone="bg-blue-100 text-blue-700" />
-        <StatCard icon={XCircle} label="失败数" value={formatNumber(data?.failedRequests)} hint="按上游结果统计" tone="bg-rose-100 text-rose-700" />
-        <StatCard icon={ShieldAlert} label="风控限频" value={formatNumber(data?.suspiciousRequests)} hint={`${formatNumber(data?.rateLimitedRequests)} 次总限频`} tone="bg-amber-100 text-amber-700" />
-        <StatCard icon={Clock3} label="平均耗时" value={formatDuration(data?.averageDurationMs)} hint="从发起到上游返回" tone="bg-emerald-100 text-emerald-700" />
-        <StatCard icon={CheckCircle2} label="Token" value={formatNumber((data?.inputTokens ?? 0) + (data?.outputTokens ?? 0))} hint={`${formatNumber(data?.cacheReadInputTokens ?? 0)} 命中缓存`} tone="bg-sky-100 text-sky-700" />
+        <StatCard
+          icon={BarChart3}
+          label="请求数"
+          value={formatNumber(totalRequests)}
+          hint={`成功率 ${formatPercent(successRate)}`}
+          tone="bg-blue-100 text-blue-700"
+        />
+        <StatCard
+          icon={XCircle}
+          label="失败 / 限频"
+          value={`${formatNumber(data?.failedRequests)} / ${formatNumber(data?.rateLimitedRequests)}`}
+          hint={`限频占比 ${formatPercent(rateLimitedShare)}`}
+          tone="bg-rose-100 text-rose-700"
+        />
+        <StatCard
+          icon={ShieldAlert}
+          label="风控限频"
+          value={formatNumber(data?.suspiciousRequests)}
+          hint={`占比 ${formatPercent(suspiciousShare)}`}
+          tone="bg-amber-100 text-amber-700"
+        />
+        <StatCard
+          icon={Clock3}
+          label="平均耗时"
+          value={formatDuration(data?.averageDurationMs)}
+          hint={`p50 ${formatDuration(data?.p50DurationMs)} · p90 ${formatDuration(data?.p90DurationMs)} · p99 ${formatDuration(data?.p99DurationMs)}`}
+          tone="bg-emerald-100 text-emerald-700"
+        />
+        <StatCard
+          icon={CheckCircle2}
+          label="Token"
+          value={formatNumber(tokenTotal)}
+          hint={`缓存命中率 ${formatPercent(cacheHitRate)}`}
+          tone="bg-sky-100 text-sky-700"
+        />
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          icon={Zap}
+          label="成功率"
+          value={formatPercent(successRate)}
+          hint={`成功 ${formatNumber(data?.successRequests)}`}
+          tone="bg-emerald-100 text-emerald-700"
+        />
+        <StatCard
+          icon={Gauge}
+          label="缓存命中率"
+          value={formatPercent(cacheHitRate)}
+          hint={`命中 ${formatNumber(data?.cacheReadInputTokens)} / 输入合计 ${formatNumber(tokenInputTotal)}`}
+          tone="bg-teal-100 text-teal-700"
+        />
+        <StatCard
+          icon={Timer}
+          label="p90 / p99 耗时"
+          value={`${formatDuration(data?.p90DurationMs)} / ${formatDuration(data?.p99DurationMs)}`}
+          hint={`p50 ${formatDuration(data?.p50DurationMs)}`}
+          tone="bg-indigo-100 text-indigo-700"
+        />
+        <StatCard
+          icon={AlertTriangle}
+          label="限频 / 风控占比"
+          value={`${formatPercent(rateLimitedShare)} / ${formatPercent(suspiciousShare)}`}
+          hint="一键切换至 '只看限频' 排查"
+          tone="bg-amber-100 text-amber-700"
+          extra={
+            <Button size="sm" variant="ghost" onClick={() => updateFilter('rateLimitOnly', !ui.rateLimitOnly)}>
+              {ui.rateLimitOnly ? '已开启' : '只看限频'}
+            </Button>
+          }
+        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
-        <RankList title="原始模型排行" items={data?.modelRank ?? []} />
-        <RankList title="账号命中排行" items={data?.credentialRank ?? []} />
-        <RankList title="错误排行" items={data?.errorRank ?? []} />
+        <RankList
+          title="原始模型排行"
+          items={data?.modelRank ?? []}
+          onPick={(key) => updateFilter('model', key)}
+        />
+        <RankList
+          title="账号命中排行"
+          items={data?.credentialRank ?? []}
+          onPick={(key) => updateFilter('credentialId', key.replace(/^#/, ''))}
+        />
+        <RankList
+          title="错误排行"
+          items={data?.errorRank ?? []}
+          formatter={(key) => rateLimitLabel(key)}
+          onPick={(key) => {
+            if (['normal_429', 'suspicious_activity', 'refresh_429'].includes(key)) {
+              updateFilter('rateLimitKind', key)
+            } else {
+              updateFilter('success', 'false')
+              setKeywordInput(key)
+            }
+          }}
+        />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -557,31 +958,47 @@ export function DiagnosticsDashboard() {
         <LatencyChart items={data?.latencyBuckets ?? []} />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-4 xl:grid-cols-2">
         <ResultChart data={data} />
         <TokenChart data={data} />
-        <ErrorRankChart items={data?.errorRank ?? []} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <PerformanceChart title="账号性能分析" items={data?.credentialPerformance ?? []} />
-        <PerformanceChart title="模型性能对比" items={data?.modelPerformance ?? []} />
+        <PerformanceChart
+          title="账号性能分析"
+          items={data?.credentialPerformance ?? []}
+          onPick={(key) => updateFilter('credentialId', key.replace(/^#/, ''))}
+        />
+        <PerformanceChart
+          title="模型性能对比"
+          items={data?.modelPerformance ?? []}
+          onPick={(key) => updateFilter('model', key)}
+        />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <PerformanceTable title="账号明细" items={data?.credentialPerformance ?? []} />
-        <PerformanceTable title="模型明细" items={data?.modelPerformance ?? []} />
+        <PerformanceTable
+          title="账号明细"
+          items={data?.credentialPerformance ?? []}
+          onPick={(key) => updateFilter('credentialId', key.replace(/^#/, ''))}
+        />
+        <PerformanceTable
+          title="模型明细"
+          items={data?.modelPerformance ?? []}
+          onPick={(key) => updateFilter('model', key)}
+        />
       </div>
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-3">
-          <CardTitle className="text-base">请求明细</CardTitle>
-          <Button variant="outline" size="sm" onClick={() => { summary.refetch(); requests.refetch(); cli.refetch() }}>
-            <RefreshCw className="h-4 w-4" />
-            刷新
-          </Button>
+          <CardTitle className="text-base">
+            请求明细
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              共 {formatNumber(total)} 条，已加载 {formatNumber(loaded)} 条
+            </span>
+          </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           {requests.isLoading ? (
             <div className="rounded-md border py-10 text-center text-muted-foreground">正在加载请求记录</div>
           ) : requests.data?.items.length ? (
@@ -599,15 +1016,42 @@ export function DiagnosticsDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {requests.data.items.map((item) => <RequestRow key={item.requestId} item={item} />)}
+                  {requests.data.items.map((item) => (
+                    <RequestRow key={item.requestId} item={item} onPick={setActiveRequestId} />
+                  ))}
                 </tbody>
               </table>
             </div>
           ) : (
             <div className="rounded-md border py-10 text-center text-muted-foreground">当前筛选下暂无请求记录</div>
           )}
+          {canLoadMore ? (
+            <div className="flex justify-center">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageSize((prev) => Math.min(prev + PAGE_SIZE, 500))}
+                disabled={requests.isFetching}
+              >
+                {requests.isFetching ? '加载中…' : `加载更多（剩余 ${formatNumber(total - loaded)} 条）`}
+              </Button>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
+
+      <RequestDetailDialog
+        requestId={activeRequestId}
+        onClose={() => setActiveRequestId(null)}
+      />
     </div>
   )
 }
+
+
+
+
+
+
+
+

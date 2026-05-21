@@ -34,6 +34,17 @@ import type {
   CredentialStatusItem,
 } from '@/types/api'
 
+let authRedirecting = false
+
+function handleUnauthorized() {
+  if (authRedirecting) return
+  authRedirecting = true
+  storage.removeApiKey()
+  window.setTimeout(() => {
+    window.location.reload()
+  }, 0)
+}
+
 // 创建 axios 实例
 const api = axios.create({
   baseURL: '/api/admin',
@@ -50,6 +61,16 @@ api.interceptors.request.use((config) => {
   }
   return config
 })
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      handleUnauthorized()
+    }
+    return Promise.reject(error)
+  }
+)
 
 // 获取所有凭据状态
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
@@ -70,6 +91,9 @@ export async function streamCredentials(
   })
 
   if (!response.ok || !response.body) {
+    if (response.status === 401) {
+      handleUnauthorized()
+    }
     throw new Error(`账号列表推送连接失败: HTTP ${response.status}`)
   }
 
@@ -355,7 +379,7 @@ export async function testCredential(
   payload: CredentialTestRequest
 ): Promise<Response> {
   const apiKey = storage.getApiKey()
-  return fetch(`/api/admin/credentials/${id}/test`, {
+  const response = await fetch(`/api/admin/credentials/${id}/test`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -363,4 +387,8 @@ export async function testCredential(
     },
     body: JSON.stringify(payload),
   })
+  if (response.status === 401) {
+    handleUnauthorized()
+  }
+  return response
 }

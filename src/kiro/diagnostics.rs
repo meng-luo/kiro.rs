@@ -129,6 +129,9 @@ pub struct DiagnosticsSummaryResponse {
     pub rate_limited_requests: u64,
     pub suspicious_requests: u64,
     pub average_duration_ms: u64,
+    pub p50_duration_ms: u64,
+    pub p90_duration_ms: u64,
+    pub p99_duration_ms: u64,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_creation_input_tokens: i64,
@@ -322,6 +325,11 @@ impl DiagnosticsStore {
         } else {
             0
         };
+        let mut durations: Vec<u64> = entries.iter().map(|entry| entry.duration_ms).collect();
+        durations.sort_unstable();
+        let p50_duration_ms = Self::percentile(&durations, 50);
+        let p90_duration_ms = Self::percentile(&durations, 90);
+        let p99_duration_ms = Self::percentile(&durations, 99);
         let input_tokens = entries
             .iter()
             .filter_map(|entry| entry.input_tokens)
@@ -355,6 +363,9 @@ impl DiagnosticsStore {
             rate_limited_requests,
             suspicious_requests,
             average_duration_ms,
+            p50_duration_ms,
+            p90_duration_ms,
+            p99_duration_ms,
             input_tokens,
             output_tokens,
             cache_creation_input_tokens,
@@ -550,6 +561,28 @@ impl DiagnosticsStore {
         items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
         items.truncate(10);
         items
+    }
+
+    fn percentile(sorted: &[u64], pct: u64) -> u64 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let pct = pct.min(100);
+        // 线性插值法：rank = (pct/100) * (n-1)
+        let n = sorted.len();
+        if n == 1 {
+            return sorted[0];
+        }
+        let rank = pct as f64 * (n - 1) as f64 / 100.0;
+        let lower = rank.floor() as usize;
+        let upper = rank.ceil() as usize;
+        if lower == upper {
+            return sorted[lower];
+        }
+        let weight = rank - lower as f64;
+        let lo = sorted[lower] as f64;
+        let hi = sorted[upper] as f64;
+        (lo + (hi - lo) * weight).round() as u64
     }
 
     fn time_buckets(entries: &[&RequestDiagnosticEntry]) -> Vec<DiagnosticsTimeBucket> {
