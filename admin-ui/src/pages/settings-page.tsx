@@ -184,7 +184,7 @@ export function SettingsPage() {
             <div className="grid gap-3 md:grid-cols-3">
               {(scheduler.data?.models ?? []).slice(0, 6).map((item) => (
                 <div key={item.model} className="rounded-md border p-3">
-                  <div className="truncate text-xs text-muted-foreground" title={item.model}>{item.model}</div>
+                  <div className="truncate text-xs text-muted-foreground" title={item.upstreamModel}>{item.upstreamModel}</div>
                   <div className="mt-1 font-medium">{item.inflight}/{item.window}</div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     {item.backoffRemainingMs > 0 ? `等待 ${(item.backoffRemainingMs / 1000).toFixed(1)} 秒` : '可继续接收'}

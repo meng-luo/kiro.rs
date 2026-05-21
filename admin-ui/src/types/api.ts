@@ -96,6 +96,7 @@ export interface SchedulerConfig {
 
 export interface SchedulerModelState {
   model: string
+  upstreamModel: string
   window: number
   inflight: number
   successStreak: number

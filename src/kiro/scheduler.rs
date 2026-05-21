@@ -10,7 +10,10 @@ use crate::model::config::{SchedulerConfig, SchedulerModelOverrideConfig};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulerModelStateSnapshot {
+    /// 调度内部使用的模型 key。
     pub model: String,
+    /// 发往 Kiro 上游的模型 ID，用于管理台展示。
+    pub upstream_model: String,
     pub window: u32,
     pub inflight: u32,
     pub success_streak: u32,
@@ -120,6 +123,7 @@ impl Scheduler {
             .iter()
             .map(|(model, state)| SchedulerModelStateSnapshot {
                 model: model.clone(),
+                upstream_model: model.clone(),
                 window: state.window,
                 inflight: state.inflight,
                 success_streak: state.success_streak,
