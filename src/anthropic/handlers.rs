@@ -15,10 +15,10 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
-use futures::{Stream, StreamExt, stream};
+use futures::{FutureExt, Stream, StreamExt, future, stream};
 use serde_json::json;
 use std::time::Duration;
-use tokio::time::interval;
+use tokio::time::{interval, sleep};
 use uuid::Uuid;
 
 use super::converter::{ConversionError, convert_request};
@@ -411,13 +411,13 @@ async fn handle_stream_request(
     cache_result: super::cache::CacheResult,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let provider_response = match provider
-        .call_api_stream_with_metadata(request_body, Some(model), Some(input_tokens))
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => return map_provider_error(e),
-    };
+    let provider_response =
+        match call_stream_with_optional_hedge(provider.clone(), request_body, model, input_tokens)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => return map_provider_error(e),
+        };
 
     // 创建流处理上下文
     let mut ctx =
@@ -457,7 +457,14 @@ fn create_sse_stream(
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let response = provider_response.response;
     let lease = provider_response.lease;
+    let model_lease = provider_response.model_lease;
     let request_id = provider_response.request_id.clone();
+    tracing::debug!(
+        request_id = %request_id,
+        hedged = provider_response.hedged,
+        dispatch_path = %provider_response.dispatch_path,
+        "开始转发流式响应"
+    );
     // 先发送初始事件
     let initial_stream = stream::iter(
         initial_events
@@ -469,8 +476,8 @@ fn create_sse_stream(
     let body_stream = response.bytes_stream();
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), lease, provider, request_id),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, mut lease, provider, request_id)| async move {
+        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), lease, model_lease, provider, request_id),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, mut lease, mut model_lease, provider, request_id)| async move {
             if finished {
                 return None;
             }
@@ -507,7 +514,7 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, lease, provider, request_id)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, lease, model_lease, provider, request_id)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
@@ -515,6 +522,9 @@ fn create_sse_stream(
                             let final_input_tokens = ctx.context_input_tokens.unwrap_or(ctx.input_tokens);
                             let cache_usage = normalize_cache_result(ctx.cache_result, final_input_tokens);
                             provider.token_manager().release_slot(&mut lease);
+                            if let Some(lease) = model_lease.as_mut() {
+                                lease.release();
+                            }
                             let final_events = ctx.generate_final_events();
                             provider.token_manager().update_diagnostic_tokens(
                                 &request_id,
@@ -528,13 +538,16 @@ fn create_sse_stream(
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, provider, request_id)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, model_lease, provider, request_id)))
                         }
                         None => {
                             // 流结束，发送最终事件
                             let final_input_tokens = ctx.context_input_tokens.unwrap_or(ctx.input_tokens);
                             let cache_usage = normalize_cache_result(ctx.cache_result, final_input_tokens);
                             provider.token_manager().release_slot(&mut lease);
+                            if let Some(lease) = model_lease.as_mut() {
+                                lease.release();
+                            }
                             let final_events = ctx.generate_final_events();
                             provider.token_manager().update_diagnostic_tokens(
                                 &request_id,
@@ -548,7 +561,7 @@ fn create_sse_stream(
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, provider, request_id)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, model_lease, provider, request_id)))
                         }
                     }
                 }
@@ -556,7 +569,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, lease, provider, request_id)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, lease, model_lease, provider, request_id)))
                 }
             }
         },
@@ -564,6 +577,68 @@ fn create_sse_stream(
     .flatten();
 
     initial_stream.chain(processing_stream)
+}
+
+async fn call_stream_with_optional_hedge(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    request_body: &str,
+    model: &str,
+    input_tokens: i32,
+) -> anyhow::Result<crate::kiro::provider::ProviderResponse> {
+    let scheduler = provider.scheduler_snapshot().config;
+    if !scheduler.enabled || !scheduler.hedge_enabled || scheduler.hedge_max_extra_per_request == 0
+    {
+        return provider
+            .call_api_stream_with_metadata(request_body, Some(model), Some(input_tokens))
+            .await;
+    }
+
+    let request_body_primary = request_body.to_string();
+    let request_body_hedge = request_body.to_string();
+    let model_primary = model.to_string();
+    let model_hedge = model.to_string();
+
+    let primary_provider = provider.clone();
+    let primary = async move {
+        primary_provider
+            .call_api_stream_with_metadata(
+                &request_body_primary,
+                Some(&model_primary),
+                Some(input_tokens),
+            )
+            .await
+    }
+    .boxed();
+    let hedge = async move {
+        sleep(Duration::from_millis(scheduler.hedge_delay_ms.max(1))).await;
+        provider
+            .call_api_stream_hedged_with_metadata(
+                &request_body_hedge,
+                Some(&model_hedge),
+                Some(input_tokens),
+            )
+            .await
+    }
+    .boxed();
+
+    match future::select(primary, hedge).await {
+        future::Either::Left((Ok(response), pending)) => {
+            drop(pending);
+            Ok(response)
+        }
+        future::Either::Left((Err(primary_error), hedge)) => match hedge.await {
+            Ok(response) => Ok(response),
+            Err(_) => Err(primary_error),
+        },
+        future::Either::Right((Ok(response), pending)) => {
+            drop(pending);
+            Ok(response)
+        }
+        future::Either::Right((Err(hedge_error), primary)) => match primary.await {
+            Ok(response) => Ok(response),
+            Err(_) => Err(hedge_error),
+        },
+    }
 }
 
 use super::converter::get_context_window_size;
@@ -587,12 +662,16 @@ async fn handle_non_stream_request(
         Err(e) => return map_provider_error(e),
     };
     let mut lease = provider_response.lease;
+    let mut model_lease = provider_response.model_lease;
 
     // 读取响应体
     let body_bytes = match provider_response.response.bytes().await {
         Ok(bytes) => bytes,
         Err(e) => {
             provider.token_manager().release_slot(&mut lease);
+            if let Some(lease) = model_lease.as_mut() {
+                lease.release();
+            }
             tracing::error!("读取响应体失败: {}", e);
             return (
                 StatusCode::BAD_GATEWAY,
@@ -605,6 +684,9 @@ async fn handle_non_stream_request(
         }
     };
     provider.token_manager().release_slot(&mut lease);
+    if let Some(lease) = model_lease.as_mut() {
+        lease.release();
+    }
 
     // 解析事件流
     let mut decoder = EventStreamDecoder::new();
@@ -989,9 +1071,13 @@ async fn handle_stream_request_buffered(
     cache_result: super::cache::CacheResult,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let provider_response = match provider
-        .call_api_stream_with_metadata(request_body, Some(model), Some(estimated_input_tokens))
-        .await
+    let provider_response = match call_stream_with_optional_hedge(
+        provider.clone(),
+        request_body,
+        model,
+        estimated_input_tokens,
+    )
+    .await
     {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
@@ -1033,6 +1119,7 @@ fn create_buffered_sse_stream(
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let response = provider_response.response;
     let lease = provider_response.lease;
+    let model_lease = provider_response.model_lease;
     let request_id = provider_response.request_id.clone();
     let body_stream = response.bytes_stream();
 
@@ -1044,10 +1131,11 @@ fn create_buffered_sse_stream(
             false,
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
             lease,
+            model_lease,
             provider,
             request_id,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, mut lease, provider, request_id)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, mut lease, mut model_lease, provider, request_id)| async move {
             if finished {
                 return None;
             }
@@ -1062,7 +1150,7 @@ fn create_buffered_sse_stream(
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
                         let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, lease, provider, request_id)));
+                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, lease, model_lease, provider, request_id)));
                     }
 
                     // 然后处理数据流
@@ -1104,11 +1192,14 @@ fn create_buffered_sse_stream(
                                     Some(cache_usage.uncached_input_tokens),
                                 );
                                 provider.token_manager().release_slot(&mut lease);
+                                if let Some(lease) = model_lease.as_mut() {
+                                    lease.release();
+                                }
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, provider, request_id)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, model_lease, provider, request_id)));
                             }
                             None => {
                                 // 流结束，完成处理并返回所有事件（已更正 input_tokens）
@@ -1124,11 +1215,14 @@ fn create_buffered_sse_stream(
                                     Some(cache_usage.uncached_input_tokens),
                                 );
                                 provider.token_manager().release_slot(&mut lease);
+                                if let Some(lease) = model_lease.as_mut() {
+                                    lease.release();
+                                }
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, provider, request_id)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, lease, model_lease, provider, request_id)));
                             }
                         }
                     }

@@ -23,6 +23,8 @@ import type {
   PromptCacheConfigRequest,
   AdminSettingsResponse,
   AdminSettingsRequest,
+  SchedulerConfig,
+  SchedulerConfigResponse,
   ProxyListResponse,
   ProxyListItem,
   ProxyUpsertRequest,
@@ -251,6 +253,16 @@ export async function setAdminSettings(
   payload: AdminSettingsRequest
 ): Promise<AdminSettingsResponse> {
   const { data } = await api.put<AdminSettingsResponse>('/settings', payload)
+  return data
+}
+
+export async function getSchedulerConfig(): Promise<SchedulerConfigResponse> {
+  const { data } = await api.get<SchedulerConfigResponse>('/config/scheduler')
+  return data
+}
+
+export async function setSchedulerConfig(payload: SchedulerConfig): Promise<SchedulerConfigResponse> {
+  const { data } = await api.put<SchedulerConfigResponse>('/config/scheduler', payload)
   return data
 }
 

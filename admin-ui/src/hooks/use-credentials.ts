@@ -22,6 +22,8 @@ import {
   setPromptCacheConfig,
   getAdminSettings,
   setAdminSettings,
+  getSchedulerConfig,
+  setSchedulerConfig,
   getProxies,
   createProxy,
   updateProxy,
@@ -48,6 +50,8 @@ import type {
   AddCredentialRequest,
   AdminSettingsResponse,
   AdminSettingsRequest,
+  SchedulerConfig,
+  SchedulerConfigResponse,
   BatchCredentialUpdateRequest,
   BatchDisabledRequest,
   BatchIdsRequest,
@@ -284,6 +288,25 @@ export function useSetAdminSettings() {
       queryClient.setQueryData(['adminSettings'], response)
       queryClient.invalidateQueries({ queryKey: ['adminSettings'] })
       queryClient.invalidateQueries({ queryKey: ['promptCacheConfig'] })
+    },
+  })
+}
+
+export function useSchedulerConfig() {
+  return useQuery({
+    queryKey: ['schedulerConfig'],
+    queryFn: getSchedulerConfig,
+    refetchInterval: 5000,
+  })
+}
+
+export function useSetSchedulerConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: SchedulerConfig) => setSchedulerConfig(payload),
+    onSuccess: (response: SchedulerConfigResponse) => {
+      queryClient.setQueryData(['schedulerConfig'], response)
+      queryClient.invalidateQueries({ queryKey: ['schedulerConfig'] })
     },
   })
 }

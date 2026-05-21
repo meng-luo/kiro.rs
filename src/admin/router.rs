@@ -14,12 +14,12 @@ use super::{
         delete_credential, delete_proxy, force_refresh_token, get_admin_settings,
         get_all_credentials, get_credential_balance, get_diagnostics_cli, get_diagnostics_request,
         get_diagnostics_requests, get_diagnostics_summary, get_load_balancing_mode,
-        get_prompt_cache_config, get_proxy_accounts, get_system_job, get_system_version,
-        list_proxies, recover_credential, reset_failure_count, restart_system,
+        get_prompt_cache_config, get_proxy_accounts, get_scheduler_config, get_system_job,
+        get_system_version, list_proxies, recover_credential, reset_failure_count, restart_system,
         rollback_system_version, set_admin_settings, set_credential_disabled,
         set_credential_max_concurrent, set_credential_priority, set_load_balancing_mode,
-        set_prompt_cache_config, stream_credentials, test_credential, test_proxy, update_proxy,
-        update_system_version,
+        set_prompt_cache_config, set_scheduler_config, stream_credentials, test_credential,
+        test_proxy, update_proxy, update_system_version,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -102,6 +102,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route(
             "/config/prompt-cache",
             get(get_prompt_cache_config).put(set_prompt_cache_config),
+        )
+        .route(
+            "/config/scheduler",
+            get(get_scheduler_config).put(set_scheduler_config),
         )
         .route("/system/version", get(get_system_version))
         .route("/system/version/check", post(check_system_version))

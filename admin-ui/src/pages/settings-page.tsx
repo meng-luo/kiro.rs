@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Download, History, Power, RefreshCw } from 'lucide-react'
+import { Activity, Download, History, Power, RefreshCw, Save } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,8 @@ import {
   useRestartSystem,
   useRollbackSystemVersion,
   useSetAdminSettings,
+  useSchedulerConfig,
+  useSetSchedulerConfig,
   useSystemJob,
   useSystemVersion,
   useUpdateSystemVersion,
@@ -18,6 +20,7 @@ import {
 import { storage, type AdminTheme } from '@/lib/storage'
 import { extractErrorMessage } from '@/lib/utils'
 import { formatTime } from '@/lib/format'
+import type { SchedulerConfig } from '@/types/api'
 
 function applyTheme(theme: AdminTheme) {
   const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
@@ -49,6 +52,8 @@ function jobLabel(status?: string) {
 export function SettingsPage() {
   const settings = useAdminSettings()
   const setSettings = useSetAdminSettings()
+  const scheduler = useSchedulerConfig()
+  const setScheduler = useSetSchedulerConfig()
   const version = useSystemVersion()
   const checkVersion = useCheckSystemVersion()
   const updateSystem = useUpdateSystemVersion()
@@ -56,6 +61,7 @@ export function SettingsPage() {
   const restartSystem = useRestartSystem()
   const [theme, setTheme] = useState<AdminTheme>('system')
   const [redisUrl, setRedisUrl] = useState('')
+  const [schedulerForm, setSchedulerForm] = useState<SchedulerConfig | null>(null)
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const activeJob = useSystemJob(activeJobId, Boolean(activeJobId))
   const currentJob = activeJob.data || version.data?.latestJob || null
@@ -65,6 +71,11 @@ export function SettingsPage() {
     setTheme(settings.data.theme)
     setRedisUrl(settings.data.promptCache.redisUrl ?? '')
   }, [settings.data])
+
+  useEffect(() => {
+    if (!scheduler.data?.config) return
+    setSchedulerForm(scheduler.data.config)
+  }, [scheduler.data?.config])
 
   useEffect(() => {
     if (version.data?.latestJob?.jobId) setActiveJobId((prev) => prev ?? version.data?.latestJob?.jobId ?? null)
@@ -82,6 +93,23 @@ export function SettingsPage() {
         onError: (error) => toast.error(extractErrorMessage(error)),
       },
     )
+  }
+
+  const saveScheduler = () => {
+    if (!schedulerForm) return
+    setScheduler.mutate(schedulerForm, {
+      onSuccess: () => toast.success('调度设置已保存'),
+      onError: (error) => toast.error(extractErrorMessage(error)),
+    })
+  }
+
+  const updateSchedulerNumber = (key: keyof SchedulerConfig, value: string) => {
+    if (!schedulerForm) return
+    const next = Number(value)
+    setSchedulerForm({
+      ...schedulerForm,
+      [key]: Number.isFinite(next) ? next : 0,
+    })
   }
 
   const startJob = (type: 'update' | 'rollback' | 'restart') => {
@@ -142,6 +170,106 @@ export function SettingsPage() {
             <Button onClick={saveSettings} disabled={setSettings.isPending}>
               {setSettings.isPending ? '保存中...' : '保存设置'}
             </Button>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Activity className="h-4 w-4" />
+              请求调度
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="grid gap-3 md:grid-cols-3">
+              {(scheduler.data?.models ?? []).slice(0, 6).map((item) => (
+                <div key={item.model} className="rounded-md border p-3">
+                  <div className="truncate text-xs text-muted-foreground" title={item.model}>{item.model}</div>
+                  <div className="mt-1 font-medium">{item.inflight}/{item.window}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {item.backoffRemainingMs > 0 ? `等待 ${(item.backoffRemainingMs / 1000).toFixed(1)} 秒` : '可继续接收'}
+                  </div>
+                </div>
+              ))}
+              {scheduler.data?.models.length === 0 ? (
+                <div className="rounded-md border p-3 text-sm text-muted-foreground">还没有请求记录</div>
+              ) : null}
+            </div>
+
+            {schedulerForm ? (
+              <div className="space-y-4">
+                <label className="flex items-center justify-between gap-4 rounded-md border p-3">
+                  <span>
+                    <span className="block text-sm font-medium">自动放慢重试</span>
+                    <span className="block text-xs text-muted-foreground">服务繁忙时先等待，再继续尝试返回结果。</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={schedulerForm.enabled}
+                    onChange={(event) => setSchedulerForm({ ...schedulerForm, enabled: event.target.checked })}
+                    className="h-4 w-4"
+                  />
+                </label>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">最长等待时间（毫秒）</label>
+                    <Input type="number" min="1000" value={schedulerForm.requestBudgetMs} onChange={(event) => updateSchedulerNumber('requestBudgetMs', event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">排队等待时间（毫秒）</label>
+                    <Input type="number" min="1000" value={schedulerForm.queueTimeoutMs} onChange={(event) => updateSchedulerNumber('queueTimeoutMs', event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">最多尝试次数</label>
+                    <Input type="number" min="1" max="9" value={schedulerForm.maxAttemptsPerRequest} onChange={(event) => updateSchedulerNumber('maxAttemptsPerRequest', event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">繁忙后首次等待（毫秒）</label>
+                    <Input type="number" min="100" value={schedulerForm.normal429BackoffInitialMs} onChange={(event) => updateSchedulerNumber('normal429BackoffInitialMs', event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">繁忙后最长等待（毫秒）</label>
+                    <Input type="number" min="1000" value={schedulerForm.normal429BackoffMaxMs} onChange={(event) => updateSchedulerNumber('normal429BackoffMaxMs', event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">账号短暂休息（毫秒）</label>
+                    <Input type="number" min="1000" value={schedulerForm.normal429AccountCooldownMs} onChange={(event) => updateSchedulerNumber('normal429AccountCooldownMs', event.target.value)} />
+                  </div>
+                </div>
+
+                <label className="flex items-center justify-between gap-4 rounded-md border p-3">
+                  <span>
+                    <span className="block text-sm font-medium">流式请求加速试探</span>
+                    <span className="block text-xs text-muted-foreground">等待后仍未返回时，额外尝试一次更快拿到结果。</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={schedulerForm.hedgeEnabled}
+                    onChange={(event) => setSchedulerForm({ ...schedulerForm, hedgeEnabled: event.target.checked })}
+                    className="h-4 w-4"
+                  />
+                </label>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">加速试探等待（毫秒）</label>
+                    <Input type="number" min="500" value={schedulerForm.hedgeDelayMs} onChange={(event) => updateSchedulerNumber('hedgeDelayMs', event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">额外尝试次数</label>
+                    <Input type="number" min="0" max="1" value={schedulerForm.hedgeMaxExtraPerRequest} onChange={(event) => updateSchedulerNumber('hedgeMaxExtraPerRequest', event.target.value)} />
+                  </div>
+                </div>
+
+                <Button onClick={saveScheduler} disabled={setScheduler.isPending}>
+                  <Save className="h-4 w-4" />
+                  {setScheduler.isPending ? '保存中...' : '保存调度设置'}
+                </Button>
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">正在读取调度设置...</div>
+            )}
           </CardContent>
         </Card>
 

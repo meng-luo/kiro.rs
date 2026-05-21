@@ -17,6 +17,7 @@ use crate::kiro::diagnostics::RequestDiagnosticUpdate;
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::scheduler::{ModelDispatchLease, Scheduler, SchedulerRuntimeSnapshot};
 use crate::kiro::token_manager::{
     AcquireOptions, CallContext, DispatchLease, MultiTokenManager, RateLimitKind,
 };
@@ -48,15 +49,19 @@ pub struct KiroProvider {
     endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
     /// 默认端点名称（凭据未指定 endpoint 时使用）
     default_endpoint: String,
+    /// 模型级动态调度器
+    scheduler: Arc<Scheduler>,
 }
 
 pub struct ProviderResponse {
     pub response: reqwest::Response,
     pub lease: DispatchLease,
+    pub model_lease: Option<ModelDispatchLease>,
     pub request_id: String,
     pub dispatch_path: String,
     pub used_soft_fallback: bool,
     pub account_state_at_start: String,
+    pub hedged: bool,
 }
 
 impl KiroProvider {
@@ -88,6 +93,7 @@ impl KiroProvider {
             build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
+        let scheduler = Scheduler::new(token_manager.config().scheduler.clone());
 
         Self {
             token_manager,
@@ -96,7 +102,16 @@ impl KiroProvider {
             tls_backend,
             endpoints,
             default_endpoint,
+            scheduler,
         }
+    }
+
+    pub fn scheduler_snapshot(&self) -> SchedulerRuntimeSnapshot {
+        self.scheduler.snapshot()
+    }
+
+    pub fn update_scheduler_config(&self, config: crate::model::config::SchedulerConfig) {
+        self.scheduler.update_config(config);
     }
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
@@ -159,13 +174,30 @@ impl KiroProvider {
             .await
     }
 
+    pub async fn call_api_stream_hedged_with_metadata(
+        &self,
+        request_body: &str,
+        original_model: Option<&str>,
+        input_tokens: Option<i32>,
+    ) -> anyhow::Result<ProviderResponse> {
+        self.call_api_with_retry_and_options(
+            request_body,
+            true,
+            None,
+            original_model,
+            input_tokens,
+            true,
+        )
+        .await
+    }
+
     #[allow(dead_code)]
     pub async fn call_api_stream_for_account(
         &self,
         request_body: &str,
         options: AcquireOptions,
     ) -> anyhow::Result<ProviderResponse> {
-        self.call_api_with_retry_and_options(request_body, true, Some(options), None, None)
+        self.call_api_with_retry_and_options(request_body, true, Some(options), None, None, false)
             .await
     }
 
@@ -182,6 +214,7 @@ impl KiroProvider {
             Some(options),
             original_model,
             input_tokens,
+            false,
         )
         .await
     }
@@ -360,6 +393,7 @@ impl KiroProvider {
             None,
             original_model,
             input_tokens,
+            false,
         )
         .await
     }
@@ -371,12 +405,24 @@ impl KiroProvider {
         base_options: Option<AcquireOptions>,
         original_model: Option<&str>,
         input_tokens: Option<i32>,
+        hedged: bool,
     ) -> anyhow::Result<ProviderResponse> {
         let request_id = Uuid::new_v4().to_string();
         let started_at = chrono::Utc::now();
         let started_instant = Instant::now();
         let total_credentials = self.token_manager.total_count();
-        let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let scheduler_config = self.scheduler.config();
+        let legacy_max_retries =
+            (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let max_retries = if scheduler_config.enabled {
+            scheduler_config
+                .max_attempts_per_request
+                .clamp(1, MAX_TOTAL_RETRIES)
+        } else {
+            legacy_max_retries
+        };
+        let request_budget = Duration::from_millis(scheduler_config.request_budget_ms.max(1));
+        let queue_timeout = Duration::from_millis(scheduler_config.queue_timeout_ms.max(1));
         let mut last_error: Option<anyhow::Error> = None;
         let mut force_refreshed: HashSet<u64> = HashSet::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
@@ -399,6 +445,39 @@ impl KiroProvider {
         let strict_preferred_account = base_options.strict_preferred_account;
 
         for attempt in 0..max_retries {
+            if scheduler_config.enabled && started_instant.elapsed() >= request_budget {
+                break;
+            }
+
+            let mut model_lease = loop {
+                let account_capacity = self
+                    .token_manager
+                    .schedulable_capacity_for_model(model.as_deref());
+                match self
+                    .scheduler
+                    .try_acquire_model_slot(model.as_deref(), account_capacity)
+                {
+                    Ok(lease) => break lease,
+                    Err(wait) => {
+                        if !scheduler_config.enabled {
+                            break None;
+                        }
+                        let elapsed = started_instant.elapsed();
+                        let remaining_budget = request_budget.saturating_sub(elapsed);
+                        if remaining_budget.is_zero() {
+                            break None;
+                        }
+                        let wait_duration = Duration::from_millis(wait.wait_ms)
+                            .min(queue_timeout)
+                            .min(remaining_budget);
+                        if wait_duration.is_zero() {
+                            break None;
+                        }
+                        sleep(wait_duration).await;
+                    }
+                }
+            };
+
             // 获取调用上下文（绑定 index、credentials、token）
             let mut acquire_options = base_options.clone();
             acquire_options.tried_account_ids = tried_account_ids.clone();
@@ -420,9 +499,18 @@ impl KiroProvider {
                         upstream_error_code: Some("acquire_context_failed".to_string()),
                         upstream_message_short: Some(Self::short_message(&e.to_string())),
                         input_tokens,
+                        attempt_no: Some((attempt + 1) as u32),
+                        request_attempt_count: Some((attempt + 1) as u32),
+                        hedged,
                         ..Default::default()
                     });
+                    if let Some(mut lease) = model_lease.take() {
+                        lease.release();
+                    }
                     last_error = Some(e);
+                    if scheduler_config.enabled {
+                        sleep(Duration::from_millis(100)).await;
+                    }
                     continue;
                 }
             };
@@ -455,8 +543,14 @@ impl KiroProvider {
                         upstream_error_code: Some("endpoint_config_error".to_string()),
                         upstream_message_short: Some(Self::short_message(&message)),
                         input_tokens,
+                        attempt_no: Some((attempt + 1) as u32),
+                        request_attempt_count: Some((attempt + 1) as u32),
+                        hedged,
                         ..Default::default()
                     });
+                    if let Some(mut lease) = model_lease.take() {
+                        lease.release();
+                    }
                     tried_account_ids.insert(ctx.id);
                     continue;
                 }
@@ -511,8 +605,14 @@ impl KiroProvider {
                         upstream_error_code: Some("send_failed".to_string()),
                         upstream_message_short: Some(Self::short_message(&message)),
                         input_tokens,
+                        attempt_no: Some((attempt + 1) as u32),
+                        request_attempt_count: Some((attempt + 1) as u32),
+                        hedged,
                         ..Default::default()
                     });
+                    if let Some(mut lease) = model_lease.take() {
+                        lease.release();
+                    }
                     last_error = Some(anyhow::anyhow!(message));
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -526,6 +626,11 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
+                self.scheduler.report_model_success(
+                    model.as_deref(),
+                    self.token_manager
+                        .schedulable_capacity_for_model(model.as_deref()),
+                );
                 let lease = ctx
                     .lease
                     .take()
@@ -545,15 +650,20 @@ impl KiroProvider {
                     success: true,
                     upstream_status: Some(status.as_u16()),
                     input_tokens,
+                    attempt_no: Some((attempt + 1) as u32),
+                    request_attempt_count: Some((attempt + 1) as u32),
+                    hedged,
                     ..Default::default()
                 });
                 return Ok(ProviderResponse {
                     response,
                     lease,
+                    model_lease,
                     request_id: request_id.clone(),
                     dispatch_path: ctx.dispatch_path.to_string(),
                     used_soft_fallback: ctx.used_soft_fallback,
                     account_state_at_start: ctx.account_state_at_start.to_string(),
+                    hedged,
                 });
             }
 
@@ -561,6 +671,9 @@ impl KiroProvider {
             let body = response.text().await.unwrap_or_default();
             if let Some(mut lease) = ctx.lease.take() {
                 self.token_manager.release_slot(&mut lease);
+            }
+            if let Some(mut lease) = model_lease.take() {
+                lease.release();
             }
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
@@ -587,6 +700,8 @@ impl KiroProvider {
                     "quota_exhausted",
                     &body,
                     None,
+                    attempt + 1,
+                    hedged,
                 ));
                 let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
                 if strict_preferred_account {
@@ -620,6 +735,8 @@ impl KiroProvider {
                     "bad_request",
                     &body,
                     None,
+                    attempt + 1,
+                    hedged,
                 ));
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -664,6 +781,8 @@ impl KiroProvider {
                     "credential_error",
                     &body,
                     None,
+                    attempt + 1,
+                    hedged,
                 ));
                 let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
                 if strict_preferred_account {
@@ -689,9 +808,23 @@ impl KiroProvider {
                 } else {
                     RateLimitKind::Normal429
                 };
-                self.token_manager.report_rate_limited(ctx.id, kind);
+                let model_backoff_ms =
+                    if kind == RateLimitKind::Normal429 && scheduler_config.enabled {
+                        self.token_manager.report_normal_429_short_cooldown(
+                            ctx.id,
+                            scheduler_config.normal_429_account_cooldown_ms,
+                        );
+                        self.scheduler.report_model_capacity_limited(
+                            model.as_deref(),
+                            self.token_manager
+                                .schedulable_capacity_for_model(model.as_deref()),
+                        )
+                    } else {
+                        self.token_manager.report_rate_limited(ctx.id, kind);
+                        0
+                    };
                 let kind_text = Self::rate_limit_kind_label(kind);
-                self.record_api_diagnostic(Self::failure_diagnostic(
+                let mut diagnostic = Self::failure_diagnostic(
                     &request_id,
                     started_at,
                     started_instant,
@@ -704,13 +837,26 @@ impl KiroProvider {
                     kind_text,
                     &body,
                     Some(kind_text.to_string()),
-                ));
+                    attempt + 1,
+                    hedged,
+                );
+                if model_backoff_ms > 0 {
+                    diagnostic.model_backoff_ms = Some(model_backoff_ms);
+                }
+                self.record_api_diagnostic(diagnostic);
                 let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
                 if strict_preferred_account {
                     return Err(err);
                 }
                 tried_account_ids.insert(ctx.id);
                 last_error = Some(err);
+                if model_backoff_ms > 0 && attempt + 1 < max_retries {
+                    let remaining_budget = request_budget.saturating_sub(started_instant.elapsed());
+                    let wait = Duration::from_millis(model_backoff_ms).min(remaining_budget);
+                    if !wait.is_zero() {
+                        sleep(wait).await;
+                    }
+                }
                 continue;
             }
 
@@ -736,6 +882,8 @@ impl KiroProvider {
                     "upstream_transient",
                     &body,
                     None,
+                    attempt + 1,
+                    hedged,
                 ));
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
@@ -764,6 +912,8 @@ impl KiroProvider {
                     "client_error",
                     &body,
                     None,
+                    attempt + 1,
+                    hedged,
                 ));
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -789,6 +939,8 @@ impl KiroProvider {
                 "unknown_error",
                 &body,
                 None,
+                attempt + 1,
+                hedged,
             ));
             last_error = Some(anyhow::anyhow!(
                 "{} API 请求失败: {} {}",
@@ -873,6 +1025,8 @@ impl KiroProvider {
         error_code: &str,
         body: &str,
         rate_limit_kind: Option<String>,
+        attempt_no: usize,
+        hedged: bool,
     ) -> RequestDiagnosticUpdate {
         RequestDiagnosticUpdate {
             request_id: request_id.to_string(),
@@ -892,6 +1046,9 @@ impl KiroProvider {
             upstream_message_short: Some(Self::short_message(body)),
             rate_limit_kind,
             input_tokens,
+            attempt_no: Some(attempt_no as u32),
+            request_attempt_count: Some(attempt_no as u32),
+            hedged,
             ..Default::default()
         }
     }

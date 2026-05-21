@@ -65,6 +65,49 @@ export interface AdminSettingsRequest {
   recordsPageSize?: number
 }
 
+export interface SchedulerModelOverrideConfig {
+  maxModelConcurrency?: number | null
+  minModelConcurrency?: number | null
+  normal429BackoffInitialMs?: number | null
+  normal429BackoffMaxMs?: number | null
+  modelDecreaseRatio?: number | null
+  modelIncreaseStep?: number | null
+}
+
+export interface SchedulerConfig {
+  enabled: boolean
+  requestBudgetMs: number
+  queueTimeoutMs: number
+  maxAttemptsPerRequest: number
+  aggressiveRetry: boolean
+  normal429BackoffInitialMs: number
+  normal429BackoffMaxMs: number
+  normal429BackoffMultiplier: number
+  normal429JitterRatio: number
+  modelDecreaseRatio: number
+  modelIncreaseStep: number
+  minModelConcurrency: number
+  normal429AccountCooldownMs: number
+  hedgeEnabled: boolean
+  hedgeDelayMs: number
+  hedgeMaxExtraPerRequest: number
+  modelOverrides: Record<string, SchedulerModelOverrideConfig>
+}
+
+export interface SchedulerModelState {
+  model: string
+  window: number
+  inflight: number
+  successStreak: number
+  backoffRemainingMs: number
+  nextBackoffMs: number
+}
+
+export interface SchedulerConfigResponse {
+  config: SchedulerConfig
+  models: SchedulerModelState[]
+}
+
 // 单个凭据状态
 export interface CredentialStatusItem {
   id: number

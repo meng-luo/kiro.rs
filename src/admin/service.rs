@@ -766,6 +766,18 @@ impl AdminService {
         Ok(self.get_admin_settings())
     }
 
+    pub fn get_scheduler_config(&self) -> super::types::SchedulerConfigResponse {
+        self.provider.scheduler_snapshot()
+    }
+
+    pub fn set_scheduler_config(
+        &self,
+        req: super::types::SchedulerConfigRequest,
+    ) -> Result<super::types::SchedulerConfigResponse, AdminServiceError> {
+        self.persist_scheduler_config(req)?;
+        Ok(self.get_scheduler_config())
+    }
+
     pub fn list_proxies(&self) -> Result<ProxyListResponse, AdminServiceError> {
         let data = self
             .proxy_store
@@ -1383,6 +1395,33 @@ impl AdminService {
             accounts_page_size: next_accounts_page_size,
             records_page_size: next_records_page_size,
         };
+        Ok(())
+    }
+
+    fn persist_scheduler_config(
+        &self,
+        scheduler: crate::model::config::SchedulerConfig,
+    ) -> Result<(), AdminServiceError> {
+        use anyhow::Context;
+
+        let config_path = self
+            .token_manager
+            .config()
+            .config_path()
+            .ok_or_else(|| {
+                AdminServiceError::InternalError("配置文件路径未知，无法保存调度设置".to_string())
+            })?
+            .to_path_buf();
+
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        config.scheduler = scheduler.clone();
+        config
+            .save()
+            .with_context(|| format!("保存调度设置失败: {}", config_path.display()))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        self.provider.update_scheduler_config(scheduler);
         Ok(())
     }
 

@@ -34,6 +34,10 @@ pub struct RequestDiagnosticUpdate {
     pub cache_creation_input_tokens: Option<i32>,
     pub cache_read_input_tokens: Option<i32>,
     pub uncached_input_tokens: Option<i32>,
+    pub attempt_no: Option<u32>,
+    pub request_attempt_count: Option<u32>,
+    pub model_backoff_ms: Option<u64>,
+    pub hedged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +66,10 @@ pub struct RequestDiagnosticEntry {
     pub cache_creation_input_tokens: Option<i32>,
     pub cache_read_input_tokens: Option<i32>,
     pub uncached_input_tokens: Option<i32>,
+    pub attempt_no: Option<u32>,
+    pub request_attempt_count: Option<u32>,
+    pub model_backoff_ms: Option<u64>,
+    pub hedged: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -216,6 +224,10 @@ impl DiagnosticsStore {
             cache_creation_input_tokens: update.cache_creation_input_tokens,
             cache_read_input_tokens: update.cache_read_input_tokens,
             uncached_input_tokens: update.uncached_input_tokens,
+            attempt_no: update.attempt_no,
+            request_attempt_count: update.request_attempt_count,
+            model_backoff_ms: update.model_backoff_ms,
+            hedged: update.hedged,
         };
 
         {

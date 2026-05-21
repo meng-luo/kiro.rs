@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::kiro::scheduler::SchedulerRuntimeSnapshot;
+use crate::model::config::SchedulerConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemOperationJobResponse {
@@ -15,6 +18,9 @@ pub struct SystemOperationJobResponse {
     pub message: String,
     pub can_retry: bool,
 }
+
+pub type SchedulerConfigRequest = SchedulerConfig;
+pub type SchedulerConfigResponse = SchedulerRuntimeSnapshot;
 
 // ============ 凭据状态 ============
 

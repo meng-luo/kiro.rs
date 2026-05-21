@@ -16,7 +16,7 @@ use super::{
     types::{
         AddCredentialRequest, AdminSettingsRequest, BatchCredentialUpdateRequest,
         BatchDisabledRequest, BatchIdsRequest, CredentialTestRequest, DiagnosticsQueryRequest,
-        PromptCacheConfigRequest, ProxyUpsertRequest, SetDisabledRequest,
+        PromptCacheConfigRequest, ProxyUpsertRequest, SchedulerConfigRequest, SetDisabledRequest,
         SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
         SystemRollbackRequest, SystemUpdateRequest,
     },
@@ -121,6 +121,22 @@ pub async fn set_admin_settings(
     Json(payload): Json<AdminSettingsRequest>,
 ) -> impl IntoResponse {
     match state.service.set_admin_settings(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/config/scheduler
+pub async fn get_scheduler_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_scheduler_config())
+}
+
+/// PUT /api/admin/config/scheduler
+pub async fn set_scheduler_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<SchedulerConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.set_scheduler_config(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

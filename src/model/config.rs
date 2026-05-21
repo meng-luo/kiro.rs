@@ -146,6 +146,86 @@ impl Default for AdminUiConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerModelOverrideConfig {
+    #[serde(default)]
+    pub max_model_concurrency: Option<u32>,
+    #[serde(default)]
+    pub min_model_concurrency: Option<u32>,
+    #[serde(default)]
+    pub normal_429_backoff_initial_ms: Option<u64>,
+    #[serde(default)]
+    pub normal_429_backoff_max_ms: Option<u64>,
+    #[serde(default)]
+    pub model_decrease_ratio: Option<f64>,
+    #[serde(default)]
+    pub model_increase_step: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerConfig {
+    #[serde(default = "default_scheduler_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_scheduler_request_budget_ms")]
+    pub request_budget_ms: u64,
+    #[serde(default = "default_scheduler_queue_timeout_ms")]
+    pub queue_timeout_ms: u64,
+    #[serde(default = "default_scheduler_max_attempts_per_request")]
+    pub max_attempts_per_request: usize,
+    #[serde(default)]
+    pub aggressive_retry: bool,
+    #[serde(default = "default_scheduler_normal_429_backoff_initial_ms")]
+    pub normal_429_backoff_initial_ms: u64,
+    #[serde(default = "default_scheduler_normal_429_backoff_max_ms")]
+    pub normal_429_backoff_max_ms: u64,
+    #[serde(default = "default_scheduler_normal_429_backoff_multiplier")]
+    pub normal_429_backoff_multiplier: f64,
+    #[serde(default = "default_scheduler_normal_429_jitter_ratio")]
+    pub normal_429_jitter_ratio: f64,
+    #[serde(default = "default_scheduler_model_decrease_ratio")]
+    pub model_decrease_ratio: f64,
+    #[serde(default = "default_scheduler_model_increase_step")]
+    pub model_increase_step: u32,
+    #[serde(default = "default_scheduler_min_model_concurrency")]
+    pub min_model_concurrency: u32,
+    #[serde(default = "default_scheduler_normal_429_account_cooldown_ms")]
+    pub normal_429_account_cooldown_ms: u64,
+    #[serde(default = "default_scheduler_hedge_enabled")]
+    pub hedge_enabled: bool,
+    #[serde(default = "default_scheduler_hedge_delay_ms")]
+    pub hedge_delay_ms: u64,
+    #[serde(default = "default_scheduler_hedge_max_extra_per_request")]
+    pub hedge_max_extra_per_request: u32,
+    #[serde(default)]
+    pub model_overrides: HashMap<String, SchedulerModelOverrideConfig>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_scheduler_enabled(),
+            request_budget_ms: default_scheduler_request_budget_ms(),
+            queue_timeout_ms: default_scheduler_queue_timeout_ms(),
+            max_attempts_per_request: default_scheduler_max_attempts_per_request(),
+            aggressive_retry: false,
+            normal_429_backoff_initial_ms: default_scheduler_normal_429_backoff_initial_ms(),
+            normal_429_backoff_max_ms: default_scheduler_normal_429_backoff_max_ms(),
+            normal_429_backoff_multiplier: default_scheduler_normal_429_backoff_multiplier(),
+            normal_429_jitter_ratio: default_scheduler_normal_429_jitter_ratio(),
+            model_decrease_ratio: default_scheduler_model_decrease_ratio(),
+            model_increase_step: default_scheduler_model_increase_step(),
+            min_model_concurrency: default_scheduler_min_model_concurrency(),
+            normal_429_account_cooldown_ms: default_scheduler_normal_429_account_cooldown_ms(),
+            hedge_enabled: default_scheduler_hedge_enabled(),
+            hedge_delay_ms: default_scheduler_hedge_delay_ms(),
+            hedge_max_extra_per_request: default_scheduler_hedge_max_extra_per_request(),
+            model_overrides: HashMap::new(),
+        }
+    }
+}
+
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +339,10 @@ pub struct Config {
     #[serde(default)]
     pub rate_limit_cooldown: RateLimitCooldownConfig,
 
+    /// 请求调度配置
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -357,6 +441,66 @@ fn default_refresh_429_cooldown_seconds() -> i64 {
     5 * 60
 }
 
+fn default_scheduler_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_request_budget_ms() -> u64 {
+    90_000
+}
+
+fn default_scheduler_queue_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_scheduler_max_attempts_per_request() -> usize {
+    9
+}
+
+fn default_scheduler_normal_429_backoff_initial_ms() -> u64 {
+    1_200
+}
+
+fn default_scheduler_normal_429_backoff_max_ms() -> u64 {
+    30_000
+}
+
+fn default_scheduler_normal_429_backoff_multiplier() -> f64 {
+    1.7
+}
+
+fn default_scheduler_normal_429_jitter_ratio() -> f64 {
+    0.2
+}
+
+fn default_scheduler_model_decrease_ratio() -> f64 {
+    0.5
+}
+
+fn default_scheduler_model_increase_step() -> u32 {
+    1
+}
+
+fn default_scheduler_min_model_concurrency() -> u32 {
+    1
+}
+
+fn default_scheduler_normal_429_account_cooldown_ms() -> u64 {
+    15_000
+}
+
+fn default_scheduler_hedge_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_hedge_delay_ms() -> u64 {
+    2_500
+}
+
+fn default_scheduler_hedge_max_extra_per_request() -> u32 {
+    1
+}
+
 fn default_update_channel() -> String {
     "stable".to_string()
 }
@@ -427,6 +571,7 @@ impl Default for Config {
             diagnostics: DiagnosticsConfig::default(),
             admin_ui: AdminUiConfig::default(),
             rate_limit_cooldown: RateLimitCooldownConfig::default(),
+            scheduler: SchedulerConfig::default(),
             config_path: None,
         }
     }

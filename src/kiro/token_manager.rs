@@ -906,6 +906,19 @@ impl MultiTokenManager {
             .count()
     }
 
+    pub fn schedulable_capacity_for_model(&self, model: Option<&str>) -> u32 {
+        let entries = self.entries.lock();
+        let empty_tried = HashSet::new();
+        let is_opus = model
+            .map(|m| m.to_lowercase().contains("opus"))
+            .unwrap_or(false);
+        entries
+            .iter()
+            .filter(|e| self.entry_schedulable(e, is_opus, &empty_tried))
+            .map(|e| e.max_concurrent.saturating_sub(e.inflight))
+            .sum()
+    }
+
     /// 根据负载均衡模式选择下一个凭据
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
@@ -1866,6 +1879,33 @@ impl MultiTokenManager {
 
     pub fn report_rate_limited(&self, id: u64, kind: RateLimitKind) -> bool {
         self.apply_cooldown(id, kind)
+    }
+
+    pub fn report_normal_429_short_cooldown(&self, id: u64, cooldown_ms: u64) -> bool {
+        let result = {
+            let mut entries = self.entries.lock();
+            let entry = match entries.iter_mut().find(|e| e.id == id) {
+                Some(e) => e,
+                None => return false,
+            };
+
+            let now = Utc::now();
+            let cooldown = chrono::Duration::milliseconds(cooldown_ms.max(1) as i64);
+            let next_deadline = now + cooldown;
+            entry.cooldown_until = Some(
+                entry
+                    .cooldown_until
+                    .map(|current| current.max(next_deadline))
+                    .unwrap_or(next_deadline),
+            );
+            entry.last_rate_limit_kind = Some(RateLimitKind::Normal429);
+            entry.last_used_at = Some(now.to_rfc3339());
+            entry.recent_429_count += 1;
+            entry.sticky_detached = false;
+            entries.iter().any(|e| !e.disabled)
+        };
+        self.save_stats_debounced();
+        result
     }
 
     /// 报告指定凭据额度已用尽
@@ -3225,6 +3265,31 @@ mod tests {
         assert_eq!(ctx.id, 1);
         assert!(ctx.used_soft_fallback);
         assert_eq!(ctx.dispatch_path.to_string(), "soft_fallback");
+    }
+
+    #[tokio::test]
+    async fn test_normal_429_short_cooldown_uses_milliseconds_budget() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![cred1], None, None, false).unwrap();
+
+        assert!(manager.report_normal_429_short_cooldown(1, 250));
+
+        let snapshot = manager.snapshot();
+        let entry = snapshot.entries.iter().find(|entry| entry.id == 1).unwrap();
+        assert_eq!(entry.dispatch_state, DispatchState::Cooldown.to_string());
+        assert_eq!(entry.last_rate_limit_kind.as_deref(), Some("normal_429"));
+        let remaining_ms = entry.cooldown_remaining_ms.unwrap();
+        assert!(
+            remaining_ms <= 1_000,
+            "普通 429 短冷却应按毫秒生效，实际剩余 {}ms",
+            remaining_ms
+        );
     }
 
     #[tokio::test]
