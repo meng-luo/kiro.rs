@@ -1121,19 +1121,7 @@ impl MultiTokenManager {
         &self,
         available: &[&CredentialEntry],
     ) -> Option<(u64, KiroCredentials)> {
-        let min_inflight = available.iter().map(|e| e.inflight).min()?;
-        let filtered: Vec<_> = available
-            .iter()
-            .copied()
-            .filter(|e| e.inflight == min_inflight)
-            .collect();
-        let min_priority = filtered.iter().map(|e| e.credentials.priority).min()?;
-        let group: Vec<_> = filtered
-            .iter()
-            .copied()
-            .filter(|e| e.credentials.priority == min_priority)
-            .collect();
-        self.pick_round_robin_from_group(min_priority, &group)
+        self.pick_round_robin_from_group(u32::MAX, available)
     }
 
     fn pick_round_robin_from_group(
@@ -3276,6 +3264,31 @@ mod tests {
         let ctx = manager.acquire_context(None).await.unwrap();
         assert_eq!(ctx.id, 2);
         assert_eq!(ctx.token, "good-token");
+    }
+
+    #[tokio::test]
+    async fn test_balanced_mode_rotates_across_all_ready_credentials() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut credentials = Vec::new();
+        for i in 0..4 {
+            let mut cred = KiroCredentials::default();
+            cred.priority = if i < 2 { 0 } else { 1 };
+            cred.access_token = Some(format!("t{}", i + 1));
+            cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+            credentials.push(cred);
+        }
+
+        let manager = MultiTokenManager::new(config, credentials, None, None, false).unwrap();
+        let mut selected = Vec::new();
+        for _ in 0..4 {
+            let ctx = manager.acquire_context(None).await.unwrap();
+            selected.push(ctx.id);
+            drop(ctx);
+        }
+
+        assert_eq!(selected, vec![1, 2, 3, 4]);
     }
 
     #[tokio::test]
