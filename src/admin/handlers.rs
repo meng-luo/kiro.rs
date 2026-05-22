@@ -343,6 +343,7 @@ pub async fn bind_credential_proxy(
             disabled: None,
             proxy_mode,
             proxy_id,
+            scheduler_policy: None,
         }) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),

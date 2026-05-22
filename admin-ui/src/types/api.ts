@@ -26,6 +26,8 @@ export interface SystemVersionResponse {
   latestJob?: SystemOperationJob | null
 }
 
+export type SchedulerPolicy = 'stable' | 'canary'
+
 export interface SystemOperationJob {
   jobId: string
   operation: string
@@ -133,6 +135,7 @@ export interface CredentialStatusItem {
   proxyId?: number
   proxyName?: string
   proxyStatus?: string
+  schedulerPolicy?: SchedulerPolicy
   refreshFailureCount: number
   disabledReason?: string
   endpoint: string
@@ -331,6 +334,7 @@ export interface BatchCredentialUpdateRequest extends BatchIdsRequest {
   disabled?: boolean
   proxyMode?: 'inherit' | 'direct' | 'proxy' | string
   proxyId?: number | null
+  schedulerPolicy?: SchedulerPolicy
 }
 
 export interface BatchOperationResponse {

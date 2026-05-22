@@ -27,7 +27,7 @@ import {
 } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { BalanceResponse, BatchOperationResponse, CredentialStatusItem } from '@/types/api'
+import type { BalanceResponse, BatchOperationResponse, CredentialStatusItem, SchedulerPolicy } from '@/types/api'
 
 export function AccountsPage() {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
@@ -47,6 +47,7 @@ export function AccountsPage() {
   const [bulkProxyMode, setBulkProxyMode] = useState('inherit')
   const [bulkProxyId, setBulkProxyId] = useState('')
   const [bulkMaxConcurrent, setBulkMaxConcurrent] = useState('')
+  const [bulkSchedulerPolicy, setBulkSchedulerPolicy] = useState<'' | SchedulerPolicy>('')
 
   const { data, isLoading, error } = useCredentials()
   useCredentialsStream()
@@ -208,6 +209,7 @@ export function AccountsPage() {
 
   const saveBulkEdit = () => {
     const maxConcurrent = bulkMaxConcurrent.trim() ? Number(bulkMaxConcurrent) : undefined
+    const schedulerPolicy = bulkSchedulerPolicy || undefined
     if (maxConcurrent !== undefined && (!Number.isInteger(maxConcurrent) || maxConcurrent <= 0)) {
       toast.error('并发上限必须是大于 0 的整数')
       return
@@ -218,6 +220,7 @@ export function AccountsPage() {
         proxyMode: bulkProxyMode,
         proxyId: bulkProxyMode === 'proxy' ? Number(bulkProxyId) : null,
         maxConcurrent,
+        schedulerPolicy,
       }),
       '已更新选中的账号',
     )
@@ -388,6 +391,14 @@ export function AccountsPage() {
             <div className="space-y-2">
               <label className="text-sm font-medium">并发上限</label>
               <Input type="number" min="1" value={bulkMaxConcurrent} onChange={(event) => setBulkMaxConcurrent(event.target.value)} placeholder="留空则不修改" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">请求策略</label>
+              <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={bulkSchedulerPolicy} onChange={(event) => setBulkSchedulerPolicy(event.target.value as '' | SchedulerPolicy)}>
+                <option value="">不修改</option>
+                <option value="stable">稳定</option>
+                <option value="canary">试用</option>
+              </select>
             </div>
           </div>
           <DialogFooter>

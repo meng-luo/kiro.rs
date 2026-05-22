@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::kiro::scheduler::SchedulerRuntimeSnapshot;
+use crate::kiro::token_manager::SchedulerPolicy;
 use crate::model::config::SchedulerConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +92,8 @@ pub struct CredentialStatusItem {
     pub id: u64,
     /// 优先级（数字越小优先级越高）
     pub priority: u32,
+    /// 请求策略
+    pub scheduler_policy: SchedulerPolicy,
     /// 是否被禁用
     pub disabled: bool,
     /// 连续失败次数
@@ -357,6 +360,8 @@ pub struct BatchCredentialUpdateRequest {
     pub proxy_mode: Option<String>,
     #[serde(default)]
     pub proxy_id: Option<u64>,
+    #[serde(default)]
+    pub scheduler_policy: Option<SchedulerPolicy>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

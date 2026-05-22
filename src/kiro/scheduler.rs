@@ -5,6 +5,7 @@ use std::time::{Duration as StdDuration, Instant};
 use parking_lot::Mutex;
 use serde::Serialize;
 
+use crate::kiro::token_manager::SchedulerPolicy;
 use crate::model::config::{SchedulerConfig, SchedulerModelOverrideConfig};
 
 #[derive(Debug, Clone, Serialize)]
@@ -14,6 +15,8 @@ pub struct SchedulerModelStateSnapshot {
     pub model: String,
     /// 发往 Kiro 上游的模型 ID，用于管理台展示。
     pub upstream_model: String,
+    /// 账号请求策略池。
+    pub scheduler_policy: SchedulerPolicy,
     pub window: u32,
     pub inflight: u32,
     pub success_streak: u32,
@@ -40,7 +43,7 @@ struct ModelRuntimeState {
 impl ModelRuntimeState {
     fn new(config: &EffectiveSchedulerConfig, account_capacity: u32) -> Self {
         Self {
-            window: account_capacity.max(config.min_model_concurrency),
+            window: initial_window(account_capacity, config),
             inflight: 0,
             success_streak: 0,
             backoff_until: None,
@@ -62,15 +65,15 @@ struct EffectiveSchedulerConfig {
 }
 
 pub struct ModelDispatchLease {
-    model: String,
+    model_key: String,
     released: bool,
     scheduler: Weak<Scheduler>,
 }
 
 impl ModelDispatchLease {
-    fn new(model: String, scheduler: &Arc<Scheduler>) -> Self {
+    fn new(model_key: String, scheduler: &Arc<Scheduler>) -> Self {
         Self {
-            model,
+            model_key,
             released: false,
             scheduler: Arc::downgrade(scheduler),
         }
@@ -81,7 +84,7 @@ impl ModelDispatchLease {
             return;
         }
         if let Some(scheduler) = self.scheduler.upgrade() {
-            scheduler.release_model_slot(&self.model);
+            scheduler.release_model_slot(&self.model_key);
         }
         self.released = true;
     }
@@ -121,18 +124,22 @@ impl Scheduler {
             .models
             .lock()
             .iter()
-            .map(|(model, state)| SchedulerModelStateSnapshot {
-                model: model.clone(),
-                upstream_model: model.clone(),
-                window: state.window,
-                inflight: state.inflight,
-                success_streak: state.success_streak,
-                backoff_remaining_ms: state
-                    .backoff_until
-                    .and_then(|deadline| deadline.checked_duration_since(now))
-                    .map(|duration| duration.as_millis() as u64)
-                    .unwrap_or(0),
-                next_backoff_ms: state.next_backoff_ms,
+            .map(|(model_key, state)| {
+                let (scheduler_policy, upstream_model) = split_model_key(model_key);
+                SchedulerModelStateSnapshot {
+                    model: model_key.clone(),
+                    upstream_model,
+                    scheduler_policy,
+                    window: state.window,
+                    inflight: state.inflight,
+                    success_streak: state.success_streak,
+                    backoff_remaining_ms: state
+                        .backoff_until
+                        .and_then(|deadline| deadline.checked_duration_since(now))
+                        .map(|duration| duration.as_millis() as u64)
+                        .unwrap_or(0),
+                    next_backoff_ms: state.next_backoff_ms,
+                }
             })
             .collect();
         models.sort_by(|a, b| a.model.cmp(&b.model));
@@ -141,6 +148,7 @@ impl Scheduler {
 
     pub fn try_acquire_model_slot(
         self: &Arc<Self>,
+        scheduler_policy: SchedulerPolicy,
         model: Option<&str>,
         account_capacity: u32,
     ) -> Result<Option<ModelDispatchLease>, SchedulerWait> {
@@ -157,15 +165,14 @@ impl Scheduler {
         if capacity == 0 {
             return Err(SchedulerWait::new(100));
         }
+        let model_key = model_key(scheduler_policy, model);
 
         let now = Instant::now();
         let mut models = self.models.lock();
         let state = models
-            .entry(model.to_string())
+            .entry(model_key.clone())
             .or_insert_with(|| ModelRuntimeState::new(&effective, capacity));
-        state.window = state
-            .window
-            .clamp(effective.min_model_concurrency, capacity);
+        state.window = clamp_window(state.window, capacity, &effective);
 
         if let Some(deadline) = state.backoff_until {
             if deadline > now {
@@ -181,10 +188,15 @@ impl Scheduler {
         }
 
         state.inflight += 1;
-        Ok(Some(ModelDispatchLease::new(model.to_string(), self)))
+        Ok(Some(ModelDispatchLease::new(model_key, self)))
     }
 
-    pub fn report_model_success(&self, model: Option<&str>, account_capacity: u32) {
+    pub fn report_model_success(
+        &self,
+        scheduler_policy: SchedulerPolicy,
+        model: Option<&str>,
+        account_capacity: u32,
+    ) {
         let config = self.config();
         if !config.enabled {
             return;
@@ -194,10 +206,12 @@ impl Scheduler {
         };
         let effective = Self::effective_config(&config, model);
         let capacity = self.effective_capacity(account_capacity, &effective);
+        let model_key = model_key(scheduler_policy, model);
         let mut models = self.models.lock();
         let state = models
-            .entry(model.to_string())
+            .entry(model_key)
             .or_insert_with(|| ModelRuntimeState::new(&effective, capacity));
+        state.window = clamp_window(state.window, capacity, &effective);
         state.success_streak = state.success_streak.saturating_add(1);
         state.backoff_until = None;
         state.next_backoff_ms = effective.normal_429_backoff_initial_ms;
@@ -206,7 +220,12 @@ impl Scheduler {
         }
     }
 
-    pub fn report_model_capacity_limited(&self, model: Option<&str>, account_capacity: u32) -> u64 {
+    pub fn report_model_capacity_limited(
+        &self,
+        scheduler_policy: SchedulerPolicy,
+        model: Option<&str>,
+        account_capacity: u32,
+    ) -> u64 {
         let config = self.config();
         if !config.enabled {
             return 0;
@@ -217,14 +236,16 @@ impl Scheduler {
         let effective = Self::effective_config(&config, model);
         let capacity = self.effective_capacity(account_capacity, &effective);
         let mut models = self.models.lock();
+        let model_key = model_key(scheduler_policy, model);
         let state = models
-            .entry(model.to_string())
-            .or_insert_with(|| ModelRuntimeState::new(&effective, capacity.max(1)));
+            .entry(model_key)
+            .or_insert_with(|| ModelRuntimeState::new(&effective, capacity));
 
         let next_window = ((state.window as f64) * effective.model_decrease_ratio)
             .floor()
-            .max(effective.min_model_concurrency as f64) as u32;
-        state.window = next_window.min(capacity.max(effective.min_model_concurrency));
+            .max(effective_min_window(capacity, &effective) as f64)
+            as u32;
+        state.window = clamp_window(next_window, capacity, &effective);
         state.success_streak = 0;
 
         let jitter = if effective.normal_429_jitter_ratio > 0.0 {
@@ -245,9 +266,9 @@ impl Scheduler {
         wait_ms.max(1)
     }
 
-    fn release_model_slot(&self, model: &str) {
+    fn release_model_slot(&self, model_key: &str) {
         let mut models = self.models.lock();
-        if let Some(state) = models.get_mut(model) {
+        if let Some(state) = models.get_mut(model_key) {
             state.inflight = state.inflight.saturating_sub(1);
         }
     }
@@ -293,6 +314,41 @@ impl Scheduler {
     }
 }
 
+fn effective_min_window(capacity: u32, config: &EffectiveSchedulerConfig) -> u32 {
+    if capacity == 0 {
+        0
+    } else {
+        config.min_model_concurrency.min(capacity).max(1)
+    }
+}
+
+fn initial_window(capacity: u32, _config: &EffectiveSchedulerConfig) -> u32 {
+    if capacity == 0 { 0 } else { capacity }
+}
+
+fn clamp_window(window: u32, capacity: u32, config: &EffectiveSchedulerConfig) -> u32 {
+    if capacity == 0 {
+        return 0;
+    }
+    let min = effective_min_window(capacity, config);
+    window.clamp(min, capacity)
+}
+
+fn model_key(scheduler_policy: SchedulerPolicy, model: &str) -> String {
+    format!("{}::{}", scheduler_policy, model)
+}
+
+fn split_model_key(model_key: &str) -> (SchedulerPolicy, String) {
+    if let Some((policy, model)) = model_key.split_once("::") {
+        (
+            SchedulerPolicy::from_config_value(policy).unwrap_or_default(),
+            model.to_string(),
+        )
+    } else {
+        (SchedulerPolicy::default(), model_key.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerWait {
     pub wait_ms: u64,
@@ -322,20 +378,25 @@ mod tests {
         let scheduler = Scheduler::new(config);
 
         let lease = scheduler
-            .try_acquire_model_slot(Some("claude-opus-4.7"), 8)
+            .try_acquire_model_slot(SchedulerPolicy::Canary, Some("claude-opus-4.7"), 8)
             .unwrap();
         drop(lease);
 
-        let wait_ms = scheduler.report_model_capacity_limited(Some("claude-opus-4.7"), 8);
+        let wait_ms = scheduler.report_model_capacity_limited(
+            SchedulerPolicy::Canary,
+            Some("claude-opus-4.7"),
+            8,
+        );
         let snapshot = scheduler.snapshot();
         let state = snapshot
             .models
             .iter()
-            .find(|item| item.model == "claude-opus-4.7")
+            .find(|item| item.upstream_model == "claude-opus-4.7")
             .unwrap();
 
         assert_eq!(wait_ms, 100);
         assert_eq!(state.window, 4);
+        assert_eq!(state.scheduler_policy, SchedulerPolicy::Canary);
         assert!(state.backoff_remaining_ms > 0);
     }
 
@@ -348,17 +409,21 @@ mod tests {
         let scheduler = Scheduler::new(config);
 
         let lease = scheduler
-            .try_acquire_model_slot(Some("claude-opus-4.7"), 6)
+            .try_acquire_model_slot(SchedulerPolicy::Canary, Some("claude-opus-4.7"), 6)
             .unwrap();
         drop(lease);
-        scheduler.report_model_capacity_limited(Some("claude-opus-4.7"), 6);
-        scheduler.report_model_success(Some("claude-opus-4.7"), 6);
+        scheduler.report_model_capacity_limited(
+            SchedulerPolicy::Canary,
+            Some("claude-opus-4.7"),
+            6,
+        );
+        scheduler.report_model_success(SchedulerPolicy::Canary, Some("claude-opus-4.7"), 6);
 
         let snapshot = scheduler.snapshot();
         let state = snapshot
             .models
             .iter()
-            .find(|item| item.model == "claude-opus-4.7")
+            .find(|item| item.upstream_model == "claude-opus-4.7")
             .unwrap();
 
         assert_eq!(state.window, 4);
@@ -370,12 +435,51 @@ mod tests {
     fn zero_account_capacity_does_not_grant_model_slot() {
         let scheduler = Scheduler::new(SchedulerConfig::default());
 
-        let err = match scheduler.try_acquire_model_slot(Some("claude-opus-4.7"), 0) {
+        let err = match scheduler.try_acquire_model_slot(
+            SchedulerPolicy::Canary,
+            Some("claude-opus-4.7"),
+            0,
+        ) {
             Ok(_) => panic!("账号可用并发为 0 时不应发放模型槽"),
             Err(err) => err,
         };
 
         assert_eq!(err.wait_ms, 100);
         assert!(scheduler.snapshot().models.is_empty());
+    }
+
+    #[test]
+    fn min_model_concurrency_never_exceeds_realtime_capacity() {
+        let mut config = SchedulerConfig::default();
+        config.min_model_concurrency = 2;
+        config.normal_429_jitter_ratio = 0.0;
+        config.normal_429_backoff_initial_ms = 100;
+        let scheduler = Scheduler::new(config);
+
+        let first = scheduler
+            .try_acquire_model_slot(SchedulerPolicy::Canary, Some("claude-opus-4.7"), 1)
+            .unwrap();
+        assert!(first.is_some());
+        let second =
+            scheduler.try_acquire_model_slot(SchedulerPolicy::Canary, Some("claude-opus-4.7"), 1);
+        assert!(second.is_err());
+        drop(first);
+
+        let wait_ms = scheduler.report_model_capacity_limited(
+            SchedulerPolicy::Canary,
+            Some("claude-opus-4.7"),
+            1,
+        );
+        scheduler.report_model_success(SchedulerPolicy::Canary, Some("claude-opus-4.7"), 1);
+        let snapshot = scheduler.snapshot();
+        let state = snapshot
+            .models
+            .iter()
+            .find(|item| item.upstream_model == "claude-opus-4.7")
+            .unwrap();
+
+        assert_eq!(wait_ms, 100);
+        assert_eq!(state.window, 1);
+        assert!(state.inflight <= 1);
     }
 }

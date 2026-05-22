@@ -28,7 +28,7 @@ import { Progress } from '@/components/ui/progress'
 import { useBatchUpdateCredentials, useDeleteCredential, useForceRefreshToken, useProxies, useRecoverCredential, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
 import { testCredential } from '@/api/credentials'
 import { cn } from '@/lib/utils'
-import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent } from '@/types/api'
+import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent, SchedulerPolicy } from '@/types/api'
 
 interface CredentialRowProps {
   credential: CredentialStatusItem
@@ -277,6 +277,10 @@ function connectionLabel(credential: CredentialStatusItem) {
   return credential.proxyName || (credential.proxyMode === 'direct' ? '直连' : credential.hasProxy ? '独立代理' : '默认连接')
 }
 
+function schedulerPolicyLabel(policy?: SchedulerPolicy) {
+  return policy === 'canary' ? '试用' : '稳定'
+}
+
 function cardTone(credential: CredentialStatusItem) {
   if (credential.disabled) return 'border-gray-300 bg-gray-50/70 dark:bg-muted/20'
   if (isRiskCooldown(credential)) return riskCooldownTone(credential.cooldownRemainingMs).card
@@ -338,6 +342,7 @@ export function CredentialRow({
   const [maxConcurrentValue, setMaxConcurrentValue] = useState(String(credential.maxConcurrent))
   const [proxyModeValue, setProxyModeValue] = useState(credential.proxyMode || (credential.hasProxy ? 'direct' : 'inherit'))
   const [proxyIdValue, setProxyIdValue] = useState(credential.proxyId ? String(credential.proxyId) : '')
+  const [schedulerPolicyValue, setSchedulerPolicyValue] = useState<SchedulerPolicy>(credential.schedulerPolicy ?? 'stable')
   const [testModel, setTestModel] = useState(modelOptionsFor(credential)[0]?.value ?? 'claude-sonnet-4.6')
   const [testPrompt, setTestPrompt] = useState('请回复一句简短的话，确认连接已可用。')
   const [testing, setTesting] = useState(false)
@@ -372,7 +377,8 @@ export function CredentialRow({
     setMaxConcurrentValue(String(credential.maxConcurrent))
     setProxyModeValue(credential.proxyMode || (credential.hasProxy ? 'direct' : 'inherit'))
     setProxyIdValue(credential.proxyId ? String(credential.proxyId) : '')
-  }, [credential.priority, credential.maxConcurrent, credential.proxyMode, credential.hasProxy, credential.proxyId])
+    setSchedulerPolicyValue(credential.schedulerPolicy ?? 'stable')
+  }, [credential.priority, credential.maxConcurrent, credential.proxyMode, credential.hasProxy, credential.proxyId, credential.schedulerPolicy])
 
   const infoItems = useMemo(() => {
     const items = [
@@ -410,6 +416,11 @@ export function CredentialRow({
         label: '连接方式',
         value: connectionLabel(credential),
         title: '这个账号发起请求时会使用的连接方式。',
+      },
+      {
+        label: '请求策略',
+        value: schedulerPolicyLabel(credential.schedulerPolicy),
+        title: `请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`,
       },
       {
         label: '优先级',
@@ -474,9 +485,10 @@ export function CredentialRow({
         ids: [credential.id],
         proxyMode: proxyModeValue,
         proxyId: proxyModeValue === 'proxy' ? Number(proxyIdValue) : null,
+        schedulerPolicy: schedulerPolicyValue,
       },
       {
-        onError: (err) => toast.error(`连接方式保存失败: ${(err as Error).message}`),
+        onError: (err) => toast.error(`账号设置保存失败: ${(err as Error).message}`),
       },
     )
   }
@@ -676,6 +688,9 @@ export function CredentialRow({
                 </span>
                 <span className="truncate" title={dispatchPathMeta.title}>最近调度：{dispatchPathMeta.text}</span>
                 <span className="truncate" title={authMethod?.title ?? ''}>接入类型：{authMethod?.text ?? balanceLabel(credential)}</span>
+                <span className="truncate" title={`请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`}>
+                  请求策略：{schedulerPolicyLabel(credential.schedulerPolicy)}
+                </span>
                 <span className="truncate" title={connectionLabel(credential)}>连接：{connectionLabel(credential)}</span>
               </div>
               <select
@@ -712,6 +727,9 @@ export function CredentialRow({
               {credential.isCurrent && <Badge variant="success" className="whitespace-nowrap">当前</Badge>}
               <Badge variant="outline" className="max-w-[120px] truncate whitespace-nowrap" title={credential.endpoint}>
                 {credential.endpoint}
+              </Badge>
+              <Badge variant="outline" className="whitespace-nowrap" title={`请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`}>
+                请求策略：{schedulerPolicyLabel(credential.schedulerPolicy)}
               </Badge>
             </div>
           </div>
@@ -858,6 +876,19 @@ export function CredentialRow({
                 </select>
               </div>
             ) : null}
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">请求策略</label>
+              <select
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={schedulerPolicyValue}
+                onChange={(event) => setSchedulerPolicyValue(event.target.value as SchedulerPolicy)}
+              >
+                <option value="stable">稳定</option>
+                <option value="canary">试用</option>
+              </select>
+            </div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             {infoItems.map((item) => (

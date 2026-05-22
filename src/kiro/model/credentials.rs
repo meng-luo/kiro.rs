@@ -10,6 +10,38 @@ use std::path::Path;
 use crate::http_client::ProxyConfig;
 use crate::model::config::Config;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SchedulerPolicy {
+    #[default]
+    Stable,
+    Canary,
+}
+
+impl SchedulerPolicy {
+    pub fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            v if v.eq_ignore_ascii_case("stable") => Some(Self::Stable),
+            v if v.eq_ignore_ascii_case("canary") => Some(Self::Canary),
+            _ => None,
+        }
+    }
+
+    pub fn is_stable(value: &Self) -> bool {
+        *value == Self::Stable
+    }
+}
+
+impl std::fmt::Display for SchedulerPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            SchedulerPolicy::Stable => "stable",
+            SchedulerPolicy::Canary => "canary",
+        };
+        write!(f, "{}", value)
+    }
+}
+
 /// Kiro OAuth 凭证
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +87,11 @@ pub struct KiroCredentials {
     /// 未配置时由服务端使用默认值
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+
+    /// 请求策略：stable 稳定策略，canary 试用策略。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "SchedulerPolicy::is_stable")]
+    pub scheduler_policy: SchedulerPolicy,
 
     /// 凭据级 Region 配置（用于 OIDC token 刷新）
     /// 未配置时回退到 config.json 的全局 region
@@ -345,6 +382,7 @@ mod tests {
             client_secret: None,
             priority: 0,
             max_concurrent: None,
+            scheduler_policy: Default::default(),
             region: None,
             auth_region: None,
             api_region: None,
@@ -466,6 +504,7 @@ mod tests {
             client_secret: None,
             priority: 0,
             max_concurrent: None,
+            scheduler_policy: Default::default(),
             region: Some("eu-west-1".to_string()),
             auth_region: None,
             api_region: None,
@@ -500,6 +539,7 @@ mod tests {
             client_secret: None,
             priority: 0,
             max_concurrent: None,
+            scheduler_policy: Default::default(),
             region: None,
             auth_region: None,
             api_region: None,
@@ -617,6 +657,7 @@ mod tests {
             client_secret: None,
             priority: 3,
             max_concurrent: None,
+            scheduler_policy: Default::default(),
             region: Some("us-west-2".to_string()),
             auth_region: None,
             api_region: None,

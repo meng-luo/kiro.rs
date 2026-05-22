@@ -227,6 +227,7 @@ impl AdminService {
                 CredentialStatusItem {
                     id: entry.id,
                     priority: entry.priority,
+                    scheduler_policy: entry.scheduler_policy,
                     disabled: entry.disabled,
                     failure_count: entry.failure_count,
                     is_current: entry.id == snapshot.current_id,
@@ -638,6 +639,7 @@ impl AdminService {
             proxy_password: req.proxy_password,
             proxy_mode: None,
             proxy_id: None,
+            scheduler_policy: Default::default(),
             disabled: false, // 新添加的凭据默认启用
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
@@ -1239,6 +1241,7 @@ impl AdminService {
             && req.max_concurrent.is_none()
             && req.disabled.is_none()
             && req.proxy_mode.is_none()
+            && req.scheduler_policy.is_none()
         {
             return Err(AdminServiceError::InvalidCredential(
                 "请选择至少一个要更新的内容".to_string(),
@@ -1264,6 +1267,11 @@ impl AdminService {
                 }
                 if let Some(disabled) = req.disabled {
                     self.set_disabled(id, disabled)?;
+                }
+                if let Some(scheduler_policy) = req.scheduler_policy {
+                    self.token_manager
+                        .set_scheduler_policy(id, scheduler_policy)
+                        .map_err(|e| self.classify_error(e, id))?;
                 }
                 if let Some((mode, proxy_id, proxy_url, proxy_username, proxy_password)) =
                     proxy_binding.clone()

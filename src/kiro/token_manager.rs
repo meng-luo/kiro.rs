@@ -24,6 +24,7 @@ use crate::kiro::diagnostics::{
 };
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+pub use crate::kiro::model::credentials::SchedulerPolicy;
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -532,6 +533,8 @@ pub struct CredentialEntrySnapshot {
     pub id: u64,
     /// 优先级
     pub priority: u32,
+    /// 请求策略。
+    pub scheduler_policy: SchedulerPolicy,
     /// 是否被禁用
     pub disabled: bool,
     /// 连续失败次数
@@ -622,6 +625,7 @@ pub struct ManagerSnapshot {
 #[derive(Debug, Clone)]
 pub struct AcquireOptions {
     pub model: Option<String>,
+    pub scheduler_policy: Option<SchedulerPolicy>,
     pub session_key: Option<String>,
     pub tried_account_ids: HashSet<u64>,
     pub preferred_account_id: Option<u64>,
@@ -633,6 +637,7 @@ impl AcquireOptions {
     pub fn new(model: Option<String>) -> Self {
         Self {
             model,
+            scheduler_policy: None,
             session_key: None,
             tried_account_ids: HashSet::new(),
             preferred_account_id: None,
@@ -906,17 +911,47 @@ impl MultiTokenManager {
             .count()
     }
 
-    pub fn schedulable_capacity_for_model(&self, model: Option<&str>) -> u32 {
-        let entries = self.entries.lock();
+    pub fn schedulable_capacity_for_model(
+        &self,
+        model: Option<&str>,
+        scheduler_policy: Option<SchedulerPolicy>,
+    ) -> u32 {
         let empty_tried = HashSet::new();
+        self.schedulable_capacity_for_filter(model, scheduler_policy, &empty_tried)
+    }
+
+    pub fn schedulable_capacity_for_options(&self, options: &AcquireOptions) -> u32 {
+        self.schedulable_capacity_for_filter(
+            options.model.as_deref(),
+            options.scheduler_policy,
+            &options.tried_account_ids,
+        )
+    }
+
+    fn schedulable_capacity_for_filter(
+        &self,
+        model: Option<&str>,
+        scheduler_policy: Option<SchedulerPolicy>,
+        tried_account_ids: &HashSet<u64>,
+    ) -> u32 {
+        let entries = self.entries.lock();
         let is_opus = model
             .map(|m| m.to_lowercase().contains("opus"))
             .unwrap_or(false);
         entries
             .iter()
-            .filter(|e| self.entry_schedulable(e, is_opus, &empty_tried))
+            .filter(|e| self.entry_policy_matches(e, scheduler_policy))
+            .filter(|e| self.entry_schedulable(e, is_opus, tried_account_ids))
             .map(|e| e.max_concurrent.saturating_sub(e.inflight))
             .sum()
+    }
+
+    pub fn scheduler_policy_for_account(&self, id: u64) -> Option<SchedulerPolicy> {
+        self.entries
+            .lock()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.credentials.scheduler_policy)
     }
 
     /// 根据负载均衡模式选择下一个凭据
@@ -941,6 +976,7 @@ impl MultiTokenManager {
             if options.runtime_probe {
                 if let Some(entry) = entries.iter().find(|e| {
                     e.id == preferred_account_id
+                        && self.entry_policy_matches(e, options.scheduler_policy)
                         && !options.tried_account_ids.contains(&e.id)
                         && (!is_opus || e.credentials.supports_opus())
                 }) {
@@ -964,7 +1000,7 @@ impl MultiTokenManager {
                 if !self.entry_schedulable(e, is_opus, &options.tried_account_ids) {
                     return false;
                 }
-                true
+                self.entry_policy_matches(e, options.scheduler_policy)
             })
             .collect();
 
@@ -1023,7 +1059,22 @@ impl MultiTokenManager {
             }
         }
 
-        self.pick_soft_fallback_entry(&entries, is_opus, &options.tried_account_ids)
+        self.pick_soft_fallback_entry(
+            &entries,
+            is_opus,
+            &options.tried_account_ids,
+            options.scheduler_policy,
+        )
+    }
+
+    fn entry_policy_matches(
+        &self,
+        entry: &CredentialEntry,
+        scheduler_policy: Option<SchedulerPolicy>,
+    ) -> bool {
+        scheduler_policy
+            .map(|policy| entry.credentials.scheduler_policy == policy)
+            .unwrap_or(true)
     }
 
     fn entry_schedulable(
@@ -1109,10 +1160,12 @@ impl MultiTokenManager {
         entries: &[CredentialEntry],
         is_opus: bool,
         tried_account_ids: &HashSet<u64>,
+        scheduler_policy: Option<SchedulerPolicy>,
     ) -> Option<SelectionResult> {
         let now = Utc::now();
         let normal_group: Vec<_> = entries
             .iter()
+            .filter(|entry| self.entry_policy_matches(entry, scheduler_policy))
             .filter(|entry| self.soft_fallback_eligible(entry, is_opus, tried_account_ids, now))
             .collect();
 
@@ -1249,6 +1302,7 @@ impl MultiTokenManager {
                         .iter()
                         .find(|e| {
                             e.id == current_id
+                                && self.entry_policy_matches(e, options.scheduler_policy)
                                 && self.entry_schedulable(
                                     e,
                                     options
@@ -1309,6 +1363,7 @@ impl MultiTokenManager {
                         let enabled_count = entries.iter().filter(|e| !e.disabled).count();
                         let schedulable_count = entries
                             .iter()
+                            .filter(|e| self.entry_policy_matches(e, options.scheduler_policy))
                             .filter(|e| self.entry_schedulable(e, false, &empty_tried))
                             .count();
                         anyhow::bail!(
@@ -1523,6 +1578,7 @@ impl MultiTokenManager {
                     cred.canonicalize_auth_method();
                     // 同步 disabled 状态到凭据对象
                     cred.disabled = e.disabled;
+                    cred.scheduler_policy = e.credentials.scheduler_policy;
                     cred
                 })
                 .collect()
@@ -2121,6 +2177,7 @@ impl MultiTokenManager {
                 .map(|e| CredentialEntrySnapshot {
                     id: e.id,
                     priority: e.credentials.priority,
+                    scheduler_policy: e.credentials.scheduler_policy,
                     disabled: e.disabled,
                     failure_count: e.failure_count,
                     auth_method: if e.credentials.is_api_key_credential() {
@@ -2325,6 +2382,23 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.max_concurrent = sanitized;
             entry.credentials.max_concurrent = Some(sanitized);
+        }
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    pub fn set_scheduler_policy(
+        &self,
+        id: u64,
+        scheduler_policy: SchedulerPolicy,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials.scheduler_policy = scheduler_policy;
         }
         self.persist_credentials()?;
         Ok(())
@@ -3369,6 +3443,58 @@ mod tests {
             err
         );
         assert_eq!(manager.snapshot().schedulable_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_policy_filters_capacity_and_selection() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut stable = KiroCredentials::default();
+        stable.access_token = Some("stable-token".to_string());
+        stable.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        stable.max_concurrent = Some(2);
+
+        let mut canary = KiroCredentials::default();
+        canary.access_token = Some("canary-token".to_string());
+        canary.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        canary.max_concurrent = Some(1);
+        canary.scheduler_policy = SchedulerPolicy::Canary;
+
+        let manager =
+            MultiTokenManager::new(config, vec![stable, canary], None, None, false).unwrap();
+
+        assert_eq!(
+            manager.schedulable_capacity_for_model(
+                Some("claude-sonnet-4.6"),
+                Some(SchedulerPolicy::Stable),
+            ),
+            2
+        );
+        assert_eq!(
+            manager.schedulable_capacity_for_model(
+                Some("claude-sonnet-4.6"),
+                Some(SchedulerPolicy::Canary),
+            ),
+            1
+        );
+
+        let mut canary_options = AcquireOptions::new(Some("claude-sonnet-4.6".to_string()));
+        canary_options.scheduler_policy = Some(SchedulerPolicy::Canary);
+        let canary_ctx = manager
+            .acquire_context_with_options(canary_options)
+            .await
+            .unwrap();
+        assert_eq!(canary_ctx.id, 2);
+        drop(canary_ctx);
+
+        let mut stable_options = AcquireOptions::new(Some("claude-sonnet-4.6".to_string()));
+        stable_options.scheduler_policy = Some(SchedulerPolicy::Stable);
+        let stable_ctx = manager
+            .acquire_context_with_options(stable_options)
+            .await
+            .unwrap();
+        assert_eq!(stable_ctx.id, 1);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::scheduler::{ModelDispatchLease, Scheduler, SchedulerRuntimeSnapshot};
 use crate::kiro::token_manager::{
-    AcquireOptions, CallContext, DispatchLease, MultiTokenManager, RateLimitKind,
+    AcquireOptions, CallContext, DispatchLease, MultiTokenManager, RateLimitKind, SchedulerPolicy,
 };
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
@@ -112,6 +112,32 @@ impl KiroProvider {
 
     pub fn update_scheduler_config(&self, config: crate::model::config::SchedulerConfig) {
         self.scheduler.update_config(config);
+    }
+
+    fn select_scheduler_policy_for_attempt(
+        &self,
+        _model: Option<&str>,
+        options: &AcquireOptions,
+    ) -> SchedulerPolicy {
+        if let Some(policy) = options.scheduler_policy {
+            return policy;
+        }
+        if let Some(account_id) = options.preferred_account_id {
+            if let Some(policy) = self.token_manager.scheduler_policy_for_account(account_id) {
+                return policy;
+            }
+        }
+        let mut canary_options = options.clone();
+        canary_options.scheduler_policy = Some(SchedulerPolicy::Canary);
+        if self
+            .token_manager
+            .schedulable_capacity_for_options(&canary_options)
+            > 0
+        {
+            SchedulerPolicy::Canary
+        } else {
+            SchedulerPolicy::Stable
+        }
     }
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
@@ -448,15 +474,31 @@ impl KiroProvider {
             if scheduler_config.enabled && started_instant.elapsed() >= request_budget {
                 break;
             }
+            let mut attempt_options = base_options.clone();
+            attempt_options.tried_account_ids = tried_account_ids.clone();
+            let scheduler_policy = if scheduler_config.enabled {
+                let policy =
+                    self.select_scheduler_policy_for_attempt(model.as_deref(), &attempt_options);
+                attempt_options.scheduler_policy = Some(policy);
+                policy
+            } else {
+                SchedulerPolicy::Stable
+            };
+            let use_model_scheduler =
+                scheduler_config.enabled && scheduler_policy == SchedulerPolicy::Canary;
 
             let mut model_lease = loop {
+                if !use_model_scheduler {
+                    break None;
+                }
                 let account_capacity = self
                     .token_manager
-                    .schedulable_capacity_for_model(model.as_deref());
-                match self
-                    .scheduler
-                    .try_acquire_model_slot(model.as_deref(), account_capacity)
-                {
+                    .schedulable_capacity_for_options(&attempt_options);
+                match self.scheduler.try_acquire_model_slot(
+                    scheduler_policy,
+                    model.as_deref(),
+                    account_capacity,
+                ) {
                     Ok(lease) => break lease,
                     Err(wait) => {
                         if !scheduler_config.enabled {
@@ -479,11 +521,9 @@ impl KiroProvider {
             };
 
             // 获取调用上下文（绑定 index、credentials、token）
-            let mut acquire_options = base_options.clone();
-            acquire_options.tried_account_ids = tried_account_ids.clone();
             let mut ctx = match self
                 .token_manager
-                .acquire_context_with_options(acquire_options)
+                .acquire_context_with_options(attempt_options)
                 .await
             {
                 Ok(c) => c,
@@ -626,11 +666,16 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
-                self.scheduler.report_model_success(
-                    model.as_deref(),
-                    self.token_manager
-                        .schedulable_capacity_for_model(model.as_deref()),
-                );
+                if use_model_scheduler {
+                    self.scheduler.report_model_success(
+                        scheduler_policy,
+                        model.as_deref(),
+                        self.token_manager.schedulable_capacity_for_model(
+                            model.as_deref(),
+                            Some(scheduler_policy),
+                        ),
+                    );
+                }
                 let lease = ctx
                     .lease
                     .take()
@@ -808,21 +853,23 @@ impl KiroProvider {
                 } else {
                     RateLimitKind::Normal429
                 };
-                let model_backoff_ms =
-                    if kind == RateLimitKind::Normal429 && scheduler_config.enabled {
-                        self.token_manager.report_normal_429_short_cooldown(
-                            ctx.id,
-                            scheduler_config.normal_429_account_cooldown_ms,
-                        );
-                        self.scheduler.report_model_capacity_limited(
+                let model_backoff_ms = if kind == RateLimitKind::Normal429 && use_model_scheduler {
+                    self.token_manager.report_normal_429_short_cooldown(
+                        ctx.id,
+                        scheduler_config.normal_429_account_cooldown_ms,
+                    );
+                    self.scheduler.report_model_capacity_limited(
+                        scheduler_policy,
+                        model.as_deref(),
+                        self.token_manager.schedulable_capacity_for_model(
                             model.as_deref(),
-                            self.token_manager
-                                .schedulable_capacity_for_model(model.as_deref()),
-                        )
-                    } else {
-                        self.token_manager.report_rate_limited(ctx.id, kind);
-                        0
-                    };
+                            Some(scheduler_policy),
+                        ),
+                    )
+                } else {
+                    self.token_manager.report_rate_limited(ctx.id, kind);
+                    0
+                };
                 let kind_text = Self::rate_limit_kind_label(kind);
                 let mut diagnostic = Self::failure_diagnostic(
                     &request_id,
