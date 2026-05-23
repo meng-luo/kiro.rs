@@ -39,13 +39,13 @@ use super::error::AdminServiceError;
 use super::proxy_store::{ProxyItem, ProxyListItem, ProxyStore};
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AdminSettingsRequest, AdminSettingsResponse,
-    BalanceResponse, BatchBalanceResponse, BatchCredentialUpdateRequest, BatchDisabledRequest,
-    BatchIdsRequest, BatchOperationResponse, CachedBalanceStatus, CredentialStatusItem,
-    CredentialTestRequest, CredentialsStatusResponse, DefaultConnectionRequest,
-    DefaultConnectionResponse, DiagnosticsCliResponse, DiagnosticsQueryRequest,
-    LoadBalancingModeResponse, PromptCacheConfigRequest, PromptCacheConfigResponse,
-    ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest, SetMaxConcurrentRequest,
-    SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
+    AvailableModelsResponse, BalanceResponse, BatchBalanceResponse, BatchCredentialUpdateRequest,
+    BatchDisabledRequest, BatchIdsRequest, BatchOperationResponse, CachedBalanceStatus,
+    CredentialStatusItem, CredentialTestRequest, CredentialsStatusResponse, DiagnosticsCliResponse,
+    DiagnosticsQueryRequest, LoadBalancingModeResponse, PromptCacheConfigRequest,
+    PromptCacheConfigResponse, ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest,
+    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest,
+    SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -216,18 +216,10 @@ impl AdminService {
         let default_endpoint = self.token_manager.config().default_endpoint.clone();
         let balance_lookup = self.cached_balance_lookup();
 
-        let proxy_data = self.proxy_store.load().unwrap_or_default();
-        let proxy_lookup: HashMap<u64, ProxyItem> = proxy_data
-            .proxies
-            .into_iter()
-            .map(|proxy| (proxy.id, proxy))
-            .collect();
-
         let mut credentials: Vec<CredentialStatusItem> = snapshot
             .entries
             .into_iter()
             .map(|entry| {
-                let proxy = entry.proxy_id.and_then(|id| proxy_lookup.get(&id));
                 let cached_balance = balance_lookup.get(&entry.id).cloned();
                 CredentialStatusItem {
                     id: entry.id,
@@ -248,20 +240,12 @@ impl AdminService {
                     cached_balance,
                     success_count: entry.success_count,
                     last_used_at: entry.last_used_at.clone(),
-                    has_proxy: entry.has_proxy,
-                    proxy_url: entry.proxy_url,
-                    proxy_mode: entry.proxy_mode,
-                    proxy_id: entry.proxy_id,
-                    proxy_name: proxy.map(|item| item.name.clone()),
-                    proxy_status: proxy.map(|item| {
-                        if item.disabled {
-                            "disabled".to_string()
-                        } else {
-                            item.last_test_status
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string())
-                        }
-                    }),
+                    has_proxy: false,
+                    proxy_url: None,
+                    proxy_mode: Some("pool".to_string()),
+                    proxy_id: None,
+                    proxy_name: None,
+                    proxy_status: None,
                     refresh_failure_count: entry.refresh_failure_count,
                     disabled_reason: entry.disabled_reason,
                     account_status: entry.account_status,
@@ -513,6 +497,23 @@ impl AdminService {
         Ok(balance)
     }
 
+    /// 刷新指定凭据的可用模型列表
+    pub async fn refresh_available_models(
+        &self,
+        id: u64,
+    ) -> Result<AvailableModelsResponse, AdminServiceError> {
+        let models = self
+            .token_manager
+            .refresh_available_models_for(id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?;
+
+        Ok(AvailableModelsResponse {
+            id,
+            available_models: models,
+        })
+    }
+
     /// 从上游获取余额（无缓存）
     async fn fetch_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         let usage = self
@@ -647,9 +648,9 @@ impl AdminService {
             email: req.email,
             subscription_title: None, // 将在首次获取使用额度时自动更新
             available_models: None,
-            proxy_url: req.proxy_url,
-            proxy_username: req.proxy_username,
-            proxy_password: req.proxy_password,
+            proxy_url: None,
+            proxy_username: None,
+            proxy_password: None,
             proxy_mode: None,
             proxy_id: None,
             scheduler_policy: Default::default(),
@@ -752,7 +753,6 @@ impl AdminService {
             prompt_cache: self.get_prompt_cache_config(),
             accounts_page_size: page_settings.accounts_page_size,
             records_page_size: page_settings.records_page_size,
-            default_connection: self.default_connection_status(),
         }
     }
 
@@ -795,70 +795,15 @@ impl AdminService {
         Ok(self.get_scheduler_config())
     }
 
-    pub fn set_default_connection(
-        &self,
-        req: DefaultConnectionRequest,
-    ) -> Result<DefaultConnectionResponse, AdminServiceError> {
-        let mode = req.mode.trim().to_ascii_lowercase();
-        let proxy = match mode.as_str() {
-            "direct" => None,
-            "proxy" => {
-                let proxy_id = req.proxy_id.ok_or_else(|| {
-                    AdminServiceError::InvalidCredential("请选择默认代理".to_string())
-                })?;
-                let data = self
-                    .proxy_store
-                    .load()
-                    .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-                let proxy = data
-                    .proxies
-                    .into_iter()
-                    .find(|item| item.id == proxy_id)
-                    .ok_or_else(|| {
-                        AdminServiceError::InvalidCredential(format!("代理不存在: {}", proxy_id))
-                    })?;
-                if proxy.disabled {
-                    return Err(AdminServiceError::InvalidCredential(
-                        "不能将停用代理设为默认连接".to_string(),
-                    ));
-                }
-                Some(proxy)
-            }
-            _ => {
-                return Err(AdminServiceError::InvalidCredential(
-                    "默认连接必须是 direct 或 proxy".to_string(),
-                ));
-            }
-        };
-
-        self.persist_default_connection(proxy.as_ref())?;
-        let proxy_config = proxy.as_ref().map(Self::proxy_config_from_item);
-        self.token_manager.update_global_proxy(proxy_config.clone());
-        self.provider
-            .update_global_proxy(proxy_config)
-            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-
-        Ok(self.default_connection_status())
-    }
-
     pub fn list_proxies(&self) -> Result<ProxyListResponse, AdminServiceError> {
         let data = self
             .proxy_store
             .load()
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        let snapshot = self.token_manager.snapshot();
-        let default_proxy = self.token_manager.global_proxy();
         let proxies = data
             .proxies
             .iter()
-            .map(|proxy| {
-                let account_count = snapshot
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.proxy_id == Some(proxy.id))
-                    .count();
-                Self::proxy_list_item(proxy, account_count, default_proxy.as_ref())
-            })
+            .map(|proxy| Self::proxy_list_item(proxy, 0))
             .collect::<Vec<_>>();
         Ok(ProxyListResponse {
             total: proxies.len(),
@@ -904,11 +849,7 @@ impl AdminService {
         self.proxy_store
             .save(&data)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        Ok(Self::proxy_list_item(
-            &proxy,
-            0,
-            self.token_manager.global_proxy().as_ref(),
-        ))
+        Ok(Self::proxy_list_item(&proxy, 0))
     }
 
     pub fn update_proxy(
@@ -921,13 +862,11 @@ impl AdminService {
             .load()
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
         Self::validate_proxy_request(&req)?;
-        let default_proxy = self.token_manager.global_proxy();
         let proxy = data
             .proxies
             .iter_mut()
             .find(|item| item.id == id)
             .ok_or_else(|| AdminServiceError::InvalidCredential(format!("代理不存在: {}", id)))?;
-        let was_default = Self::proxy_matches(proxy, default_proxy.as_ref());
         proxy.name = req.name.trim().to_string();
         proxy.protocol = req.protocol.trim().to_lowercase();
         proxy.host = req.host.trim().to_string();
@@ -937,35 +876,11 @@ impl AdminService {
             proxy.password = Some(password);
         }
         proxy.disabled = req.disabled;
-        if was_default && proxy.disabled {
-            return Err(AdminServiceError::InvalidCredential(
-                "默认连接正在使用该代理，请先切换默认连接".to_string(),
-            ));
-        }
         proxy.updated_at = ProxyItem::now_timestamp();
-        let updated_proxy = proxy.clone();
-        let updated_default_proxy = if was_default {
-            Some(Self::proxy_config_from_item(&updated_proxy))
-        } else {
-            default_proxy
-        };
-        let result = Self::proxy_list_item(
-            proxy,
-            self.proxy_account_ids(id).len(),
-            updated_default_proxy.as_ref(),
-        );
+        let result = Self::proxy_list_item(proxy, self.proxy_account_ids(id).len());
         self.proxy_store
             .save(&data)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        if was_default {
-            self.persist_default_connection(Some(&updated_proxy))?;
-            let proxy_config = Self::proxy_config_from_item(&updated_proxy);
-            self.token_manager
-                .update_global_proxy(Some(proxy_config.clone()));
-            self.provider
-                .update_global_proxy(Some(proxy_config))
-                .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        }
         Ok(result)
     }
 
@@ -977,18 +892,10 @@ impl AdminService {
                 accounts.len()
             )));
         }
-        let default_proxy = self.token_manager.global_proxy();
         let mut data = self
             .proxy_store
             .load()
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        if let Some(proxy) = data.proxies.iter().find(|item| item.id == id) {
-            if Self::proxy_matches(proxy, default_proxy.as_ref()) {
-                return Err(AdminServiceError::InvalidCredential(
-                    "默认连接正在使用该代理，请先切换默认连接".to_string(),
-                ));
-            }
-        }
         let before = data.proxies.len();
         data.proxies.retain(|item| item.id != id);
         if data.proxies.len() == before {
@@ -1043,12 +950,7 @@ impl AdminService {
             }
         }
         proxy.updated_at = ProxyItem::now_timestamp();
-        let default_proxy = self.token_manager.global_proxy();
-        let result = Self::proxy_list_item(
-            proxy,
-            self.proxy_account_ids(id).len(),
-            default_proxy.as_ref(),
-        );
+        let result = Self::proxy_list_item(proxy, self.proxy_account_ids(id).len());
         self.proxy_store
             .save(&data)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
@@ -1202,12 +1104,7 @@ impl AdminService {
             }
         }
         proxy.updated_at = ProxyItem::now_timestamp();
-        let default_proxy = self.token_manager.global_proxy();
-        let result = Self::proxy_list_item(
-            proxy,
-            self.proxy_account_ids(id).len(),
-            default_proxy.as_ref(),
-        );
+        let result = Self::proxy_list_item(proxy, self.proxy_account_ids(id).len());
         self.proxy_store
             .save(&data)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
@@ -1245,11 +1142,8 @@ impl AdminService {
     }
 
     pub fn proxy_accounts(&self, id: u64) -> Vec<CredentialStatusItem> {
-        self.get_all_credentials()
-            .credentials
-            .into_iter()
-            .filter(|credential| credential.proxy_id == Some(id))
-            .collect()
+        let _ = id;
+        Vec::new()
     }
 
     pub fn batch_set_disabled(
@@ -1369,19 +1263,12 @@ impl AdminService {
         if req.priority.is_none()
             && req.max_concurrent.is_none()
             && req.disabled.is_none()
-            && req.proxy_mode.is_none()
             && req.scheduler_policy.is_none()
         {
             return Err(AdminServiceError::InvalidCredential(
                 "请选择至少一个要更新的内容".to_string(),
             ));
         }
-
-        let proxy_binding = if let Some(mode) = req.proxy_mode.as_deref() {
-            Some(self.resolve_proxy_binding(mode, req.proxy_id)?)
-        } else {
-            None
-        };
 
         let mut response = BatchOperationResponse::default();
         for id in req.ids {
@@ -1400,20 +1287,6 @@ impl AdminService {
                 if let Some(scheduler_policy) = req.scheduler_policy {
                     self.token_manager
                         .set_scheduler_policy(id, scheduler_policy)
-                        .map_err(|e| self.classify_error(e, id))?;
-                }
-                if let Some((mode, proxy_id, proxy_url, proxy_username, proxy_password)) =
-                    proxy_binding.clone()
-                {
-                    self.token_manager
-                        .update_proxy_binding(
-                            id,
-                            mode,
-                            proxy_id,
-                            proxy_url,
-                            proxy_username,
-                            proxy_password,
-                        )
                         .map_err(|e| self.classify_error(e, id))?;
                 }
                 Ok(())
@@ -1562,50 +1435,6 @@ impl AdminService {
         Ok(())
     }
 
-    fn persist_default_connection(
-        &self,
-        proxy: Option<&ProxyItem>,
-    ) -> Result<(), AdminServiceError> {
-        use anyhow::Context;
-
-        let config_path = self
-            .token_manager
-            .config()
-            .config_path()
-            .ok_or_else(|| {
-                AdminServiceError::InternalError("配置文件路径未知，无法保存默认连接".to_string())
-            })?
-            .to_path_buf();
-
-        let mut config = Config::load(&config_path)
-            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))
-            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-
-        if let Some(proxy) = proxy {
-            config.proxy_url = Some(proxy.url());
-            config.proxy_username = proxy
-                .username
-                .as_ref()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            config.proxy_password = proxy
-                .password
-                .as_ref()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-        } else {
-            config.proxy_url = None;
-            config.proxy_username = None;
-            config.proxy_password = None;
-        }
-
-        config
-            .save()
-            .with_context(|| format!("保存默认连接失败: {}", config_path.display()))
-            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        Ok(())
-    }
-
     fn validate_proxy_request(req: &ProxyUpsertRequest) -> Result<(), AdminServiceError> {
         let name = req.name.trim();
         let protocol = req.protocol.trim().to_lowercase();
@@ -1634,11 +1463,7 @@ impl AdminService {
         Ok(())
     }
 
-    fn proxy_list_item(
-        proxy: &ProxyItem,
-        account_count: usize,
-        default_proxy: Option<&ProxyConfig>,
-    ) -> ProxyListItem {
+    fn proxy_list_item(proxy: &ProxyItem, account_count: usize) -> ProxyListItem {
         ProxyListItem {
             id: proxy.id,
             name: proxy.name.clone(),
@@ -1663,58 +1488,15 @@ impl AdminService {
             city: proxy.city.clone(),
             quality_error: proxy.quality_error.clone(),
             account_count,
-            is_default: Self::proxy_matches(proxy, default_proxy),
+            is_default: false,
             created_at: proxy.created_at.clone(),
             updated_at: proxy.updated_at.clone(),
         }
     }
 
-    fn proxy_matches(proxy: &ProxyItem, proxy_config: Option<&ProxyConfig>) -> bool {
-        let Some(proxy_config) = proxy_config else {
-            return false;
-        };
-        if proxy.url() != proxy_config.url {
-            return false;
-        }
-        proxy.username.as_deref().filter(|value| !value.is_empty())
-            == proxy_config.username.as_deref()
-            && proxy.password.as_deref().filter(|value| !value.is_empty())
-                == proxy_config.password.as_deref()
-    }
-
-    fn default_connection_status(&self) -> DefaultConnectionResponse {
-        let default_proxy = self.token_manager.global_proxy();
-        let Some(proxy_config) = default_proxy.as_ref() else {
-            return DefaultConnectionResponse {
-                mode: "direct".to_string(),
-                proxy_id: None,
-                proxy_name: None,
-                proxy_url: None,
-            };
-        };
-
-        let matched_proxy = self.proxy_store.load().ok().and_then(|data| {
-            data.proxies
-                .into_iter()
-                .find(|proxy| Self::proxy_matches(proxy, Some(proxy_config)))
-        });
-
-        DefaultConnectionResponse {
-            mode: "proxy".to_string(),
-            proxy_id: matched_proxy.as_ref().map(|proxy| proxy.id),
-            proxy_name: matched_proxy.as_ref().map(|proxy| proxy.name.clone()),
-            proxy_url: Some(proxy_config.url.clone()),
-        }
-    }
-
     fn proxy_account_ids(&self, id: u64) -> Vec<u64> {
-        self.token_manager
-            .snapshot()
-            .entries
-            .into_iter()
-            .filter(|entry| entry.proxy_id == Some(id))
-            .map(|entry| entry.id)
-            .collect()
+        let _ = id;
+        Vec::new()
     }
 
     fn proxy_config_from_item(proxy: &ProxyItem) -> ProxyConfig {
@@ -1753,63 +1535,6 @@ impl AdminService {
             ));
         }
         Ok(())
-    }
-
-    fn resolve_proxy_binding(
-        &self,
-        mode: &str,
-        proxy_id: Option<u64>,
-    ) -> Result<
-        (
-            Option<String>,
-            Option<u64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-        AdminServiceError,
-    > {
-        match mode {
-            "inherit" => Ok((Some("inherit".to_string()), None, None, None, None)),
-            "direct" => Ok((
-                Some("direct".to_string()),
-                None,
-                Some("direct".to_string()),
-                None,
-                None,
-            )),
-            "proxy" => {
-                let proxy_id = proxy_id.ok_or_else(|| {
-                    AdminServiceError::InvalidCredential("请选择要绑定的代理".to_string())
-                })?;
-                let data = self
-                    .proxy_store
-                    .load()
-                    .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-                let proxy = data
-                    .proxies
-                    .into_iter()
-                    .find(|item| item.id == proxy_id)
-                    .ok_or_else(|| {
-                        AdminServiceError::InvalidCredential(format!("代理不存在: {}", proxy_id))
-                    })?;
-                if proxy.disabled {
-                    return Err(AdminServiceError::InvalidCredential(
-                        "请选择启用中的代理".to_string(),
-                    ));
-                }
-                Ok((
-                    Some("proxy".to_string()),
-                    Some(proxy.id),
-                    Some(proxy.url()),
-                    proxy.username,
-                    proxy.password,
-                ))
-            }
-            _ => Err(AdminServiceError::InvalidCredential(
-                "代理使用方式必须是 inherit、direct 或 proxy".to_string(),
-            )),
-        }
     }
 
     /// 获取系统版本信息

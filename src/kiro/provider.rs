@@ -20,8 +20,10 @@ use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::scheduler::{ModelDispatchLease, Scheduler, SchedulerRuntimeSnapshot};
 use crate::kiro::token_manager::{
     AcquireOptions, CallContext, DispatchLease, MultiTokenManager, RateLimitKind, SchedulerPolicy,
+    is_account_banned_response,
 };
 use crate::model::config::TlsBackend;
+use crate::proxy_pool::ProxyPool;
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
@@ -38,8 +40,8 @@ const MAX_TOTAL_RETRIES: usize = 9;
 /// 按凭据 `endpoint` 字段选择 [`KiroEndpoint`] 实现
 pub struct KiroProvider {
     token_manager: Arc<MultiTokenManager>,
-    /// 全局代理配置（用于凭据无自定义代理时的回退）
-    global_proxy: Mutex<Option<ProxyConfig>>,
+    /// 账号出站请求代理池，池空时直连。
+    proxy_pool: ProxyPool,
     /// Client 缓存：key = effective proxy config, value = reqwest::Client
     /// 不同代理配置的凭据使用不同的 Client，共享相同代理的凭据复用 Client
     client_cache: Mutex<HashMap<Option<ProxyConfig>, Client>>,
@@ -73,12 +75,10 @@ impl KiroProvider {
     ///
     /// # Arguments
     /// * `token_manager` - 多凭据 Token 管理器
-    /// * `proxy` - 全局代理配置
     /// * `endpoints` - 端点名 → 实现的注册表（至少包含 `default_endpoint` 对应条目）
     /// * `default_endpoint` - 凭据未显式指定 endpoint 时使用的名称
     pub fn with_proxy(
         token_manager: Arc<MultiTokenManager>,
-        proxy: Option<ProxyConfig>,
         endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
         default_endpoint: String,
     ) -> Self {
@@ -88,16 +88,18 @@ impl KiroProvider {
             default_endpoint
         );
         let tls_backend = token_manager.config().tls_backend;
-        // 预热：构建全局代理对应的 Client
-        let initial_client =
-            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
+        let proxy_pool = ProxyPool::new(ProxyPool::path_for_cache_dir(
+            token_manager.cache_dir().as_deref(),
+        ));
+        // 预热：构建直连 Client，代理池命中后按代理配置懒加载。
+        let initial_client = build_client(None, 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
-        cache.insert(proxy.clone(), initial_client);
+        cache.insert(None, initial_client);
         let scheduler = Scheduler::new(token_manager.config().scheduler.clone());
 
         Self {
             token_manager,
-            global_proxy: Mutex::new(proxy),
+            proxy_pool,
             client_cache: Mutex::new(cache),
             tls_backend,
             endpoints,
@@ -112,17 +114,6 @@ impl KiroProvider {
 
     pub fn update_scheduler_config(&self, config: crate::model::config::SchedulerConfig) {
         self.scheduler.update_config(config);
-    }
-
-    pub fn update_global_proxy(&self, proxy: Option<ProxyConfig>) -> anyhow::Result<()> {
-        let client = build_client(proxy.as_ref(), 720, self.tls_backend)?;
-        {
-            let mut cache = self.client_cache.lock();
-            cache.clear();
-            cache.insert(proxy.clone(), client);
-        }
-        *self.global_proxy.lock() = proxy;
-        Ok(())
     }
 
     fn select_scheduler_policy_for_attempt(
@@ -151,10 +142,9 @@ impl KiroProvider {
         }
     }
 
-    /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
-    fn client_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Client> {
-        let global_proxy = self.global_proxy.lock().clone();
-        let effective = credentials.effective_proxy(global_proxy.as_ref());
+    /// 从代理池随机获取（或创建并缓存）对应的 reqwest::Client，池空时直连。
+    fn client_for(&self, _credentials: &KiroCredentials) -> anyhow::Result<Client> {
+        let effective = self.proxy_pool.random_enabled_proxy();
         let mut cache = self.client_cache.lock();
         if let Some(client) = cache.get(&effective) {
             return Ok(client.clone());
@@ -1131,23 +1121,7 @@ impl KiroProvider {
     }
 
     fn is_account_banned(body: &str) -> bool {
-        let lower = body.to_lowercase();
-        lower.contains("account banned")
-            || lower.contains("account has been banned")
-            || lower.contains("account suspended")
-            || lower.contains("account has been suspended")
-            || lower.contains("account disabled")
-            || lower.contains("account has been disabled")
-            || lower.contains("account deactivated")
-            || lower.contains("account has been deactivated")
-            || lower.contains("account terminated")
-            || lower.contains("account has been terminated")
-            || lower.contains("user banned")
-            || lower.contains("user suspended")
-            || lower.contains("封号")
-            || lower.contains("封禁")
-            || lower.contains("账号已被禁用")
-            || lower.contains("账户已被禁用")
+        is_account_banned_response(body)
     }
 
     fn record_api_diagnostic(&self, update: RequestDiagnosticUpdate) {

@@ -15,11 +15,10 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, AdminSettingsRequest, BatchCredentialUpdateRequest,
-        BatchDisabledRequest, BatchIdsRequest, CredentialTestRequest, DefaultConnectionRequest,
-        DiagnosticsQueryRequest, PromptCacheConfigRequest, ProxyUpsertRequest,
-        SchedulerConfigRequest, SetDisabledRequest, SetLoadBalancingModeRequest,
-        SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse, SystemRollbackRequest,
-        SystemUpdateRequest,
+        BatchDisabledRequest, BatchIdsRequest, CredentialTestRequest, DiagnosticsQueryRequest,
+        PromptCacheConfigRequest, ProxyUpsertRequest, SchedulerConfigRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
+        SystemRollbackRequest, SystemUpdateRequest,
     },
 };
 
@@ -324,33 +323,6 @@ pub async fn batch_update_credentials(
     }
 }
 
-/// PUT /api/admin/credentials/:id/proxy
-pub async fn bind_credential_proxy(
-    State(state): State<AdminState>,
-    Path(id): Path<u64>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let proxy_mode = payload
-        .get("proxyMode")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let proxy_id = payload.get("proxyId").and_then(|value| value.as_u64());
-    match state
-        .service
-        .batch_update_credentials(BatchCredentialUpdateRequest {
-            ids: vec![id],
-            priority: None,
-            max_concurrent: None,
-            disabled: None,
-            proxy_mode,
-            proxy_id,
-            scheduler_policy: None,
-        }) {
-        Ok(response) => Json(response).into_response(),
-        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
-    }
-}
-
 /// POST /api/admin/credentials/:id/refresh
 /// 强制刷新凭据 Token
 pub async fn force_refresh_token(
@@ -363,6 +335,18 @@ pub async fn force_refresh_token(
             id
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/models/refresh
+/// 刷新指定凭据的可用模型列表
+pub async fn refresh_credential_models(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.refresh_available_models(id).await {
+        Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
@@ -508,17 +492,6 @@ pub async fn batch_quality_check_proxies(
     Json(payload): Json<BatchIdsRequest>,
 ) -> impl IntoResponse {
     match state.service.batch_quality_check_proxies(payload).await {
-        Ok(response) => Json(response).into_response(),
-        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
-    }
-}
-
-/// PUT /api/admin/proxies/default
-pub async fn set_default_connection(
-    State(state): State<AdminState>,
-    Json(payload): Json<DefaultConnectionRequest>,
-) -> impl IntoResponse {
-    match state.service.set_default_connection(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

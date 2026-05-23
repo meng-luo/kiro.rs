@@ -10,14 +10,14 @@ use super::{
         add_credential, batch_delete_credentials, batch_delete_proxies,
         batch_quality_check_proxies, batch_refresh_balances, batch_refresh_credentials,
         batch_reset_credentials, batch_set_credential_disabled, batch_test_proxies,
-        batch_update_credentials, bind_credential_proxy, check_system_version, create_proxy,
-        delete_credential, delete_proxy, force_refresh_token, get_admin_settings,
-        get_all_credentials, get_credential_balance, get_diagnostics_cli, get_diagnostics_request,
+        batch_update_credentials, check_system_version, create_proxy, delete_credential,
+        delete_proxy, force_refresh_token, get_admin_settings, get_all_credentials,
+        get_credential_balance, get_diagnostics_cli, get_diagnostics_request,
         get_diagnostics_requests, get_diagnostics_summary, get_load_balancing_mode,
         get_prompt_cache_config, get_proxy_accounts, get_scheduler_config, get_system_job,
-        get_system_version, list_proxies, recover_credential, reset_failure_count, restart_system,
-        rollback_system_version, set_admin_settings, set_credential_disabled,
-        set_credential_max_concurrent, set_credential_priority, set_default_connection,
+        get_system_version, list_proxies, recover_credential, refresh_credential_models,
+        reset_failure_count, restart_system, rollback_system_version, set_admin_settings,
+        set_credential_disabled, set_credential_max_concurrent, set_credential_priority,
         set_load_balancing_mode, set_prompt_cache_config, set_scheduler_config, stream_credentials,
         test_credential, test_proxy, update_proxy, update_system_version,
     },
@@ -77,7 +77,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/recover", post(recover_credential))
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
-        .route("/credentials/{id}/proxy", put(bind_credential_proxy))
+        .route(
+            "/credentials/{id}/models/refresh",
+            post(refresh_credential_models),
+        )
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/credentials/{id}/test", post(test_credential))
         .route("/diagnostics/summary", get(get_diagnostics_summary))
@@ -92,7 +95,6 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/proxies/batch/test", post(batch_test_proxies))
         .route("/proxies/batch/delete", post(batch_delete_proxies))
         .route("/proxies/batch/quality", post(batch_quality_check_proxies))
-        .route("/proxies/default", put(set_default_connection))
         .route("/proxies/{id}", put(update_proxy).delete(delete_proxy))
         .route("/proxies/{id}/test", post(test_proxy))
         .route("/proxies/{id}/accounts", get(get_proxy_accounts))

@@ -942,7 +942,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
               <div className="rounded-md border py-10 text-center text-muted-foreground">当前没有{accountStatusFilterLabel(statusFilter)}账号</div>
             ) : (
               <div className="overflow-x-auto rounded-md border">
-                <table className="min-w-[1180px] w-full border-collapse">
+                <table className="min-w-[1360px] w-full border-collapse">
                   <thead>
                     <tr>
                       <TableHead className="w-12">
@@ -954,6 +954,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                       <TableHead>最近调用</TableHead>
                       <TableHead>限频</TableHead>
                       <TableHead>粘性</TableHead>
+                      <TableHead>支持模型</TableHead>
                       <TableHead>调度开关</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </tr>

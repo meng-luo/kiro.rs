@@ -22,7 +22,6 @@ import {
   useBatchUpdateCredentials,
   useCredentials,
   useCredentialsStream,
-  useProxies,
   useSetAdminSettings,
 } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
@@ -43,16 +42,13 @@ export function AccountsPage() {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [filter, setFilter] = useState<'all' | 'alert' | 'banned' | 'rate_limited' | 'disabled'>('all')
+  const [filter, setFilter] = useState<'all' | 'normal' | 'alert' | 'banned' | 'rate_limited' | 'disabled'>('all')
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
-  const [bulkProxyMode, setBulkProxyMode] = useState('inherit')
-  const [bulkProxyId, setBulkProxyId] = useState('')
   const [bulkMaxConcurrent, setBulkMaxConcurrent] = useState('')
   const [bulkSchedulerPolicy, setBulkSchedulerPolicy] = useState<'' | SchedulerPolicy>('')
 
   const { data, isLoading, error } = useCredentials()
   useCredentialsStream()
-  const proxies = useProxies()
   const batchDelete = useBatchDeleteCredentials()
   const batchReset = useBatchResetCredentials()
   const batchRefreshBalances = useBatchRefreshBalances()
@@ -63,6 +59,7 @@ export function AccountsPage() {
 
   const credentials = useMemo(() => {
     const list = data?.credentials ?? []
+    if (filter === 'normal') return list.filter((item) => item.accountStatus === 'normal' && !item.disabled && item.dispatchState === 'ready')
     if (filter === 'banned') return list.filter((item) => item.accountStatus === 'banned')
     if (filter === 'rate_limited') return list.filter((item) => item.accountStatus === 'rate_limited')
     if (filter === 'disabled') return list.filter((item) => item.accountStatus === 'disabled')
@@ -220,8 +217,6 @@ export function AccountsPage() {
     runBatch(
       () => batchUpdate.mutateAsync({
         ids: selectedArray,
-        proxyMode: bulkProxyMode,
-        proxyId: bulkProxyMode === 'proxy' ? Number(bulkProxyId) : null,
         maxConcurrent,
         schedulerPolicy,
       }),
@@ -249,6 +244,7 @@ export function AccountsPage() {
   if (error) return <div className="rounded-md border py-16 text-center text-destructive">{extractErrorMessage(error)}</div>
 
   const allCredentials = data?.credentials ?? []
+  const normalCount = allCredentials.filter((item) => item.accountStatus === 'normal' && !item.disabled && item.dispatchState === 'ready').length
   const alertCount = allCredentials.filter((item) => item.disabled || item.dispatchState !== 'ready').length
   const bannedCount = allCredentials.filter((item) => item.accountStatus === 'banned').length
   const rateLimitedCount = allCredentials.filter((item) => item.accountStatus === 'rate_limited').length
@@ -259,7 +255,7 @@ export function AccountsPage() {
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">账号</h1>
-          <p className="mt-1 text-sm text-muted-foreground">管理账号状态、批量处理和代理绑定。</p>
+          <p className="mt-1 text-sm text-muted-foreground">管理账号状态、批量处理和调度策略。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => setKamImportDialogOpen(true)}><FileUp className="h-4 w-4" />KAM 导入</Button>
@@ -315,6 +311,7 @@ export function AccountsPage() {
           <div className="flex flex-wrap items-center gap-2">
             {[
               { key: 'all', label: `全部 ${allCredentials.length}` },
+              { key: 'normal', label: `正常 ${normalCount}` },
               { key: 'alert', label: `需要处理 ${alertCount}` },
               { key: 'banned', label: `封号 ${bannedCount}` },
               { key: 'rate_limited', label: `限速 ${rateLimitedCount}` },
@@ -377,19 +374,6 @@ export function AccountsPage() {
             <DialogTitle>批量编辑</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={bulkProxyMode} onChange={(event) => setBulkProxyMode(event.target.value)}>
-              <option value="inherit">使用默认连接</option>
-              <option value="direct">直连</option>
-              <option value="proxy">选择代理</option>
-            </select>
-            {bulkProxyMode === 'proxy' ? (
-              <select className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={bulkProxyId} onChange={(event) => setBulkProxyId(event.target.value)}>
-                <option value="">请选择代理</option>
-                {(proxies.data?.proxies ?? []).filter((item) => !item.disabled).map((item) => (
-                  <option key={item.id} value={item.id}>{item.name} · {item.host}:{item.port}</option>
-                ))}
-              </select>
-            ) : null}
             <div className="space-y-2">
               <label className="text-sm font-medium">并发上限</label>
               <Input type="number" min="1" value={bulkMaxConcurrent} onChange={(event) => setBulkMaxConcurrent(event.target.value)} placeholder="留空则不修改" />
@@ -405,7 +389,7 @@ export function AccountsPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBulkEditOpen(false)}>取消</Button>
-            <Button onClick={saveBulkEdit} disabled={bulkProxyMode === 'proxy' && !bulkProxyId}>保存</Button>
+            <Button onClick={saveBulkEdit}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

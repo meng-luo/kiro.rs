@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react'
-import { Check, Copy, Download, FileUp, Network, PlugZap, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Check, Copy, Download, FileUp, Network, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MetricCard } from '@/components/metric-card'
-import { useAdminSettings, useBatchDeleteProxies, useBatchQualityCheckProxies, useBatchTestProxies, useCreateProxy, useDeleteProxy, useProxies, useSetDefaultConnection, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
+import { useBatchDeleteProxies, useBatchQualityCheckProxies, useBatchTestProxies, useCreateProxy, useDeleteProxy, useProxies, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { formatTime } from '@/lib/format'
 import type { ProxyListItem, ProxyUpsertRequest } from '@/types/api'
@@ -81,10 +81,8 @@ function cardTone(proxy: ProxyListItem) {
 
 export function ProxiesPage() {
   const proxies = useProxies()
-  const settings = useAdminSettings()
   const createProxy = useCreateProxy()
   const updateProxy = useUpdateProxy()
-  const setDefaultConnection = useSetDefaultConnection()
   const deleteProxy = useDeleteProxy()
   const testProxy = useTestProxy()
   const batchTest = useBatchTestProxies()
@@ -99,15 +97,6 @@ export function ProxiesPage() {
   const [state, setState] = useState('all')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const importInputRef = useRef<HTMLInputElement>(null)
-
-  const defaultConnection = settings.data?.defaultConnection
-  const defaultConnectionIsCustom = defaultConnection?.mode === 'proxy' && !defaultConnection.proxyId
-  const defaultConnectionValue =
-    defaultConnection?.mode === 'proxy' && defaultConnection.proxyId
-      ? `proxy:${defaultConnection.proxyId}`
-      : defaultConnectionIsCustom
-        ? 'custom:'
-      : 'direct:'
 
   useEffect(() => {
     if (!dialogOpen) return
@@ -201,7 +190,7 @@ export function ProxiesPage() {
   }
 
   const deleteSelected = async () => {
-    if (!confirm(`确定删除 ${selectedArray.length} 个代理吗？已绑定账号的代理不会被删除。`)) return
+    if (!confirm(`确定删除 ${selectedArray.length} 个代理吗？`)) return
     const result = await batchDelete.mutateAsync({ ids: selectedArray })
     setSelectedIds(new Set())
     toast.success(`已删除 ${result.successCount}/${selectedArray.length} 个代理`)
@@ -228,20 +217,6 @@ export function ProxiesPage() {
     link.download = `kiro-proxies-${Date.now()}.json`
     link.click()
     URL.revokeObjectURL(url)
-  }
-
-  const changeDefaultConnection = (value: string) => {
-    const [mode, proxyId] = value.split(':')
-    setDefaultConnection.mutate(
-      {
-        mode: mode === 'proxy' ? 'proxy' : 'direct',
-        proxyId: mode === 'proxy' ? Number(proxyId) : null,
-      },
-      {
-        onSuccess: () => toast.success('默认连接已更新'),
-        onError: (error) => toast.error(extractErrorMessage(error)),
-      },
-    )
   }
 
   const parseProxyImport = (text: string): ProxyUpsertRequest[] => {
@@ -290,7 +265,7 @@ export function ProxiesPage() {
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">代理</h1>
-          <p className="mt-1 text-sm text-muted-foreground">维护代理池，并为不同账号选择不同连接。</p>
+          <p className="mt-1 text-sm text-muted-foreground">维护自动代理池；所有账号请求会随机选择启用代理，池空时直连。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => proxies.refetch()}><RefreshCw className="h-4 w-4" />刷新</Button>
@@ -307,45 +282,8 @@ export function ProxiesPage() {
       <div className="grid gap-3 md:grid-cols-3">
         <MetricCard label="代理总数" value={proxies.data?.total ?? 0} icon={Network} />
         <MetricCard label="已启用" value={proxies.data?.enabledCount ?? 0} />
-        <MetricCard label="已绑定账号" value={list.reduce((sum, item) => sum + item.accountCount, 0)} />
+        <MetricCard label="自动模式" value="随机选择" />
       </div>
-
-      <Card className="rounded-md">
-        <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
-              <PlugZap className="h-4 w-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm font-medium">默认连接</div>
-              <div className="truncate text-xs text-muted-foreground">
-                {defaultConnection?.mode === 'proxy'
-                  ? (defaultConnection.proxyName || defaultConnection.proxyUrl || '自定义代理')
-                  : '直连'}
-              </div>
-            </div>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <select
-              className="h-10 min-w-[220px] rounded-md border border-input bg-background px-3 text-sm"
-              value={defaultConnectionValue}
-              onChange={(event) => changeDefaultConnection(event.target.value)}
-              disabled={setDefaultConnection.isPending}
-            >
-              {defaultConnectionIsCustom ? <option value="custom:" disabled>当前自定义代理</option> : null}
-              <option value="direct:">直连</option>
-              {list.filter((item) => !item.disabled).map((item) => (
-                <option key={item.id} value={`proxy:${item.id}`}>
-                  {item.name} · {item.host}:{item.port}
-                </option>
-              ))}
-            </select>
-            {defaultConnectionIsCustom ? (
-              <Badge variant="outline">自定义代理</Badge>
-            ) : null}
-          </div>
-        </CardContent>
-      </Card>
 
       <Card className="rounded-md">
         <CardContent className="grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_160px_160px_auto]">
@@ -415,11 +353,10 @@ export function ProxiesPage() {
                     <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <div className="truncate font-medium">{proxy.name}</div>
-                      {proxy.isDefault ? <Badge variant="success">默认</Badge> : null}
                       {status(proxy)}
                     </div>
                     <div className="mt-1 truncate text-sm text-muted-foreground">
-                      <code className="text-xs">{proxy.host}:{proxy.port}</code> · {proxy.accountCount} 个账号
+                      <code className="text-xs">{proxy.host}:{proxy.port}</code> · 自动代理池
                     </div>
                     <div className="mt-1 truncate text-xs text-muted-foreground">
                       {proxy.lastTestedAt ? `上次测试 ${formatTime(proxy.lastTestedAt)}` : '还没有测试记录'}

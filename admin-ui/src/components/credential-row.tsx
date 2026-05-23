@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import {
   Activity,
+  Bot,
   MoreHorizontal,
   Loader2,
   PlugZap,
@@ -25,7 +26,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
-import { useBatchUpdateCredentials, useDeleteCredential, useForceRefreshToken, useProxies, useRecoverCredential, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
+import { useBatchUpdateCredentials, useDeleteCredential, useForceRefreshToken, useRecoverCredential, useRefreshCredentialModels, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
 import { testCredential } from '@/api/credentials'
 import { cn } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent, SchedulerPolicy } from '@/types/api'
@@ -251,6 +252,13 @@ function terminalText(event: CredentialTestEvent) {
 }
 
 function modelOptionsFor(credential: CredentialStatusItem) {
+  if (credential.availableModels?.length) {
+    return credential.availableModels.map((model) => ({
+      value: model,
+      label: formatModelLabel(model),
+    }))
+  }
+
   const supportsOpus = credential.authMethod !== 'api_key'
   const base = [
     { value: 'claude-haiku-4.5', label: 'Claude Haiku 4.5' },
@@ -264,6 +272,25 @@ function modelOptionsFor(credential: CredentialStatusItem) {
     )
   }
   return base
+}
+
+function formatModelLabel(model: string) {
+  return model
+    .split(/[-_.]+/)
+    .filter(Boolean)
+    .map((part) => part.length <= 3 ? part.toUpperCase() : part[0].toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function modelsLabel(credential: CredentialStatusItem) {
+  const models = credential.availableModels
+  if (!models) return '未刷新'
+  if (models.length === 0) return '无可用模型'
+  return models.join(', ')
+}
+
+function visibleModels(credential: CredentialStatusItem, limit = 3) {
+  return credential.availableModels?.slice(0, limit) ?? []
 }
 
 function balanceLabel(credential: CredentialStatusItem) {
@@ -284,8 +311,8 @@ function balanceFreshText(credential: CredentialStatusItem, balance: BalanceResp
   return credential.cachedBalance.fresh ? '最近更新' : '待更新'
 }
 
-function connectionLabel(credential: CredentialStatusItem) {
-  return credential.proxyName || (credential.proxyMode === 'direct' ? '直连' : credential.hasProxy ? '独立代理' : '默认连接')
+function connectionLabel(_credential: CredentialStatusItem) {
+  return '代理池随机'
 }
 
 function schedulerPolicyLabel(policy?: SchedulerPolicy) {
@@ -357,8 +384,6 @@ export function CredentialRow({
   const [showTestDialog, setShowTestDialog] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [maxConcurrentValue, setMaxConcurrentValue] = useState(String(credential.maxConcurrent))
-  const [proxyModeValue, setProxyModeValue] = useState(credential.proxyMode || (credential.hasProxy ? 'direct' : 'inherit'))
-  const [proxyIdValue, setProxyIdValue] = useState(credential.proxyId ? String(credential.proxyId) : '')
   const [schedulerPolicyValue, setSchedulerPolicyValue] = useState<SchedulerPolicy>(credential.schedulerPolicy ?? 'stable')
   const [testModel, setTestModel] = useState(modelOptionsFor(credential)[0]?.value ?? 'claude-sonnet-4.6')
   const [testPrompt, setTestPrompt] = useState('请回复一句简短的话，确认连接已可用。')
@@ -372,7 +397,7 @@ export function CredentialRow({
   const recoverCredential = useRecoverCredential()
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
-  const proxies = useProxies()
+  const refreshModels = useRefreshCredentialModels()
   const updateCredential = useBatchUpdateCredentials()
 
   const status = statusMeta(credential)
@@ -390,14 +415,14 @@ export function CredentialRow({
   const isolationText = credential.isolationRemainingMs ? formatCooldown(credential.isolationRemainingMs) : '未隔离'
   const riskTone = riskCooldown ? riskCooldownTone(credential.cooldownRemainingMs) : null
   const label = accountLabel(credential)
+  const accountModels = visibleModels(credential, variant === 'card' ? 5 : 3)
+  const modelCount = credential.availableModels?.length ?? 0
 
   useEffect(() => {
     setPriorityValue(String(credential.priority))
     setMaxConcurrentValue(String(credential.maxConcurrent))
-    setProxyModeValue(credential.proxyMode || (credential.hasProxy ? 'direct' : 'inherit'))
-    setProxyIdValue(credential.proxyId ? String(credential.proxyId) : '')
     setSchedulerPolicyValue(credential.schedulerPolicy ?? 'stable')
-  }, [credential.priority, credential.maxConcurrent, credential.proxyMode, credential.hasProxy, credential.proxyId, credential.schedulerPolicy])
+  }, [credential.priority, credential.maxConcurrent, credential.schedulerPolicy])
 
   const infoItems = useMemo(() => {
     const items = [
@@ -455,6 +480,11 @@ export function CredentialRow({
         label: '请求策略',
         value: schedulerPolicyLabel(credential.schedulerPolicy),
         title: `请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`,
+      },
+      {
+        label: '支持模型',
+        value: credential.availableModels ? `${credential.availableModels.length} 个模型` : '未刷新',
+        title: modelsLabel(credential),
       },
       {
         label: '优先级',
@@ -517,27 +547,10 @@ export function CredentialRow({
     updateCredential.mutate(
       {
         ids: [credential.id],
-        proxyMode: proxyModeValue,
-        proxyId: proxyModeValue === 'proxy' ? Number(proxyIdValue) : null,
         schedulerPolicy: schedulerPolicyValue,
       },
       {
         onError: (err) => toast.error(`账号设置保存失败: ${(err as Error).message}`),
-      },
-    )
-  }
-
-  const handleQuickProxyChange = (value: string) => {
-    const [mode, proxyId] = value.split(':')
-    updateCredential.mutate(
-      {
-        ids: [credential.id],
-        proxyMode: mode,
-        proxyId: mode === 'proxy' ? Number(proxyId) : null,
-      },
-      {
-        onSuccess: () => toast.success('连接方式已更新'),
-        onError: (err) => toast.error(`连接方式保存失败: ${(err as Error).message}`),
       },
     )
   }
@@ -553,6 +566,13 @@ export function CredentialRow({
     forceRefresh.mutate(credential.id, {
       onSuccess: (res) => toast.success(res.message),
       onError: (err) => toast.error(`刷新失败: ${(err as Error).message}`),
+    })
+  }
+
+  const handleRefreshModels = () => {
+    refreshModels.mutate(credential.id, {
+      onSuccess: (res) => toast.success(`模型能力已刷新：${res.availableModels.length} 个模型`),
+      onError: (err) => toast.error(`刷新模型失败: ${(err as Error).message}`),
     })
   }
 
@@ -645,6 +665,7 @@ export function CredentialRow({
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" disabled={!canRecover || recoverCredential.isPending} onClick={() => { setActionsOpen(false); handleRecover() }}>重置失败</button>
       <div className="my-1 border-t" />
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowTestDialog(true) }}>测试连接</button>
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" disabled={refreshModels.isPending} onClick={() => { setActionsOpen(false); handleRefreshModels() }}>刷新模型</button>
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowSettingsDialog(true) }}>查看详情</button>
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowSettingsDialog(true) }}>编辑账号</button>
       <div className="my-1 border-t" />
@@ -678,6 +699,9 @@ export function CredentialRow({
               </Badge>
             </div>
             <div className="flex items-center justify-end gap-2">
+              <Button size="icon" variant="outline" onClick={handleRefreshModels} disabled={refreshModels.isPending} title="刷新支持模型">
+                {refreshModels.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+              </Button>
               <label className="flex items-center gap-2 text-sm">
                 <Switch checked={!credential.disabled} onCheckedChange={handleToggleDisabled} disabled={setDisabled.isPending} />
                 <span>启用</span>
@@ -736,18 +760,27 @@ export function CredentialRow({
                 </span>
                 <span className="truncate" title={connectionLabel(credential)}>连接：{connectionLabel(credential)}</span>
               </div>
-              <select
-                className="mt-3 h-9 w-full rounded-md border border-input bg-background px-3 text-xs"
-                value={credential.proxyMode === 'proxy' && credential.proxyId ? `proxy:${credential.proxyId}` : credential.proxyMode === 'direct' ? 'direct:' : 'inherit:'}
-                onChange={(event) => handleQuickProxyChange(event.target.value)}
-                disabled={updateCredential.isPending}
-              >
-                <option value="inherit:">使用默认连接</option>
-                <option value="direct:">直连</option>
-                {(proxies.data?.proxies ?? []).filter((item) => !item.disabled).map((item) => (
-                  <option key={item.id} value={`proxy:${item.id}`}>{item.name} · {item.host}:{item.port}</option>
-                ))}
-              </select>
+              <div className="mt-3 flex flex-wrap items-center gap-2" title={modelsLabel(credential)}>
+                <span className="text-xs text-muted-foreground">模型</span>
+                {credential.availableModels ? (
+                  modelCount > 0 ? (
+                    <>
+                      {accountModels.map((model) => (
+                        <Badge key={model} variant="outline" className="max-w-[180px] truncate">
+                          {model}
+                        </Badge>
+                      ))}
+                      {modelCount > accountModels.length ? (
+                        <Badge variant="secondary">+{modelCount - accountModels.length}</Badge>
+                      ) : null}
+                    </>
+                  ) : (
+                    <Badge variant="outline">无可用模型</Badge>
+                  )
+                ) : (
+                  <Badge variant="outline">未刷新</Badge>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -829,6 +862,28 @@ export function CredentialRow({
             {credential.stickyDetached ? '已解除粘性' : `${credential.stickySessionCount} 个活跃会话`}
           </CellText>
         </td>
+        <td className="max-w-[240px] px-3 py-3">
+          <div className="flex max-w-full flex-wrap items-center gap-1" title={modelsLabel(credential)}>
+            {credential.availableModels ? (
+              modelCount > 0 ? (
+                <>
+                  {accountModels.map((model) => (
+                    <Badge key={model} variant="outline" className="max-w-[115px] truncate">
+                      {model}
+                    </Badge>
+                  ))}
+                  {modelCount > accountModels.length ? (
+                    <Badge variant="secondary">+{modelCount - accountModels.length}</Badge>
+                  ) : null}
+                </>
+              ) : (
+                <CellText>无可用模型</CellText>
+              )
+            ) : (
+              <CellText>未刷新</CellText>
+            )}
+          </div>
+        </td>
         <td className="max-w-[120px] px-3 py-3">
           <div className="flex items-center gap-2">
             <span className="shrink-0 text-xs text-muted-foreground">参与调度</span>
@@ -860,6 +915,9 @@ export function CredentialRow({
                 <RefreshCw className={cn('h-4 w-4', forceRefresh.isPending && 'animate-spin')} />
               </Button>
             )}
+            <Button size="icon" variant="ghost" onClick={handleRefreshModels} disabled={refreshModels.isPending} title="刷新支持模型">
+              {refreshModels.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+            </Button>
             <Button size="icon" variant="ghost" onClick={() => setShowSettingsDialog(true)} title="查看更多信息">
               <MoreHorizontal className="h-4 w-4" />
             </Button>
@@ -893,35 +951,6 @@ export function CredentialRow({
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
-              <label className="text-sm font-medium">连接方式</label>
-              <select
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={proxyModeValue}
-                onChange={(event) => setProxyModeValue(event.target.value)}
-              >
-                <option value="inherit">使用默认连接</option>
-                <option value="direct">直连</option>
-                <option value="proxy">选择代理</option>
-              </select>
-            </div>
-            {proxyModeValue === 'proxy' ? (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">代理</label>
-                <select
-                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                  value={proxyIdValue}
-                  onChange={(event) => setProxyIdValue(event.target.value)}
-                >
-                  <option value="">请选择代理</option>
-                  {(proxies.data?.proxies ?? []).filter((item) => !item.disabled).map((item) => (
-                    <option key={item.id} value={item.id}>{item.name} · {item.host}:{item.port}</option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
-          </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
               <label className="text-sm font-medium">请求策略</label>
               <select
                 className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
@@ -945,7 +974,7 @@ export function CredentialRow({
             <Button variant="outline" onClick={() => setShowSettingsDialog(false)}>取消</Button>
             <Button
               onClick={handleSaveSettings}
-              disabled={setPriority.isPending || setMaxConcurrent.isPending || updateCredential.isPending || (proxyModeValue === 'proxy' && !proxyIdValue)}
+              disabled={setPriority.isPending || setMaxConcurrent.isPending || updateCredential.isPending}
             >
               保存设置
             </Button>

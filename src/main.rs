@@ -5,6 +5,7 @@ mod common;
 mod http_client;
 mod kiro;
 mod model;
+mod proxy_pool;
 pub mod token;
 
 use std::collections::HashMap;
@@ -129,7 +130,6 @@ async fn main() {
     let token_manager = MultiTokenManager::new(
         config.clone(),
         credentials_list,
-        proxy_config.clone(),
         Some(credentials_path.into()),
         is_multiple_format,
     )
@@ -138,10 +138,8 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
-    token_manager.warmup_account_model_capabilities().await;
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
-        proxy_config.clone(),
         endpoints,
         config.default_endpoint.clone(),
     );

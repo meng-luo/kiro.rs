@@ -59,7 +59,6 @@ export interface AdminSettingsResponse {
   promptCache: PromptCacheConfigResponse
   accountsPageSize: number
   recordsPageSize: number
-  defaultConnection: DefaultConnection
 }
 
 export interface AdminSettingsRequest {
@@ -67,18 +66,6 @@ export interface AdminSettingsRequest {
   redisUrl?: string | null
   accountsPageSize?: number
   recordsPageSize?: number
-}
-
-export interface DefaultConnection {
-  mode: 'direct' | 'proxy' | string
-  proxyId?: number | null
-  proxyName?: string | null
-  proxyUrl?: string | null
-}
-
-export interface DefaultConnectionRequest {
-  mode: 'direct' | 'proxy'
-  proxyId?: number | null
 }
 
 export interface SchedulerModelOverrideConfig {
@@ -152,7 +139,7 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
-  proxyMode?: 'inherit' | 'direct' | 'proxy' | string
+  proxyMode?: 'pool' | string
   proxyId?: number
   proxyName?: string
   proxyStatus?: string
@@ -189,6 +176,11 @@ export interface BalanceResponse {
   remaining: number
   usagePercentage: number
   nextResetAt: number | null
+}
+
+export interface AvailableModelsResponse {
+  id: number
+  availableModels: string[]
 }
 
 export interface CachedBalanceStatus {
@@ -360,8 +352,6 @@ export interface BatchCredentialUpdateRequest extends BatchIdsRequest {
   priority?: number
   maxConcurrent?: number
   disabled?: boolean
-  proxyMode?: 'inherit' | 'direct' | 'proxy' | string
-  proxyId?: number | null
   schedulerPolicy?: SchedulerPolicy
 }
 
@@ -440,9 +430,6 @@ export interface AddCredentialRequest {
   authRegion?: string
   apiRegion?: string
   machineId?: string
-  proxyUrl?: string
-  proxyUsername?: string
-  proxyPassword?: string
   kiroApiKey?: string
   endpoint?: string
 }

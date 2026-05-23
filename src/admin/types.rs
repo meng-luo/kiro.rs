@@ -125,21 +125,21 @@ pub struct CredentialStatusItem {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
-    /// 是否配置了凭据级代理
+    /// 历史字段：账号请求现在统一使用代理池。
     pub has_proxy: bool,
-    /// 代理 URL（用于前端展示）
+    /// 历史字段：账号请求现在统一使用代理池。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
-    /// 代理使用方式
+    /// 代理使用方式，当前固定为 pool。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_mode: Option<String>,
-    /// 绑定的代理池 ID
+    /// 历史字段：账号请求现在统一使用代理池。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_id: Option<u64>,
-    /// 绑定的代理名称
+    /// 历史字段：账号请求现在统一使用代理池。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_name: Option<String>,
-    /// 绑定代理的当前状态
+    /// 历史字段：账号请求现在统一使用代理池。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_status: Option<String>,
     /// Token 刷新连续失败次数
@@ -310,7 +310,6 @@ pub struct AdminSettingsResponse {
     pub prompt_cache: PromptCacheConfigResponse,
     pub accounts_page_size: usize,
     pub records_page_size: usize,
-    pub default_connection: DefaultConnectionResponse,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -324,26 +323,6 @@ pub struct AdminSettingsRequest {
     pub accounts_page_size: Option<usize>,
     #[serde(default)]
     pub records_page_size: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DefaultConnectionResponse {
-    pub mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proxy_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proxy_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proxy_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DefaultConnectionRequest {
-    pub mode: String,
-    #[serde(default)]
-    pub proxy_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -392,11 +371,6 @@ pub struct BatchCredentialUpdateRequest {
     pub max_concurrent: Option<u32>,
     #[serde(default)]
     pub disabled: Option<bool>,
-    #[serde(default)]
-    pub proxy_mode: Option<String>,
-    #[serde(default)]
-    pub proxy_id: Option<u64>,
-    #[serde(default)]
     pub scheduler_policy: Option<SchedulerPolicy>,
 }
 
@@ -449,15 +423,6 @@ pub struct AddCredentialRequest {
     /// 用户邮箱（可选，用于前端显示）
     pub email: Option<String>,
 
-    /// 凭据级代理 URL（可选，特殊值 "direct" 表示不使用代理）
-    pub proxy_url: Option<String>,
-
-    /// 凭据级代理认证用户名（可选）
-    pub proxy_username: Option<String>,
-
-    /// 凭据级代理认证密码（可选）
-    pub proxy_password: Option<String>,
-
     /// Kiro API Key（API Key 凭据必填，格式: ksk_xxxxxxxx）
     /// 设置后直接作为 Bearer Token 使用，无需 refreshToken
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,6 +470,16 @@ pub struct BalanceResponse {
     pub usage_percentage: f64,
     /// 下次重置时间（Unix 时间戳）
     pub next_reset_at: Option<f64>,
+}
+
+/// 可用模型刷新响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableModelsResponse {
+    /// 凭据 ID
+    pub id: u64,
+    /// 当前账号可用模型列表
+    pub available_models: Vec<String>,
 }
 
 // ============ 负载均衡配置 ============

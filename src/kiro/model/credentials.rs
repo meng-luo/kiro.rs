@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-use crate::http_client::ProxyConfig;
 use crate::model::config::Config;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -125,26 +124,24 @@ pub struct KiroCredentials {
     #[serde(default)]
     pub available_models: Option<Vec<String>>,
 
-    /// 凭据级代理 URL（可选）
-    /// 支持 http/https/socks5 协议
-    /// 特殊值 "direct" 表示显式不使用代理（即使全局配置了代理）
-    /// 未配置时回退到全局代理配置
+    /// 历史字段：凭据级代理 URL。
+    /// 当前账号请求统一从代理池随机选择代理，保留字段仅用于兼容旧配置反序列化。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
 
-    /// 凭据级代理认证用户名（可选）
+    /// 历史字段：凭据级代理认证用户名。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_username: Option<String>,
 
-    /// 凭据级代理认证密码（可选）
+    /// 历史字段：凭据级代理认证密码。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_password: Option<String>,
 
-    /// 代理使用方式：inherit 使用全局代理，direct 直连，proxy 使用代理池
+    /// 历史字段：代理使用方式。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_mode: Option<String>,
 
-    /// 绑定的代理池 ID
+    /// 历史字段：绑定的代理池 ID。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_id: Option<u64>,
 
@@ -250,9 +247,6 @@ impl CredentialsConfig {
 }
 
 impl KiroCredentials {
-    /// 特殊值：显式不使用代理
-    pub const PROXY_DIRECT: &'static str = "direct";
-
     /// 获取默认凭证文件路径
     pub fn default_credentials_path() -> &'static str {
         "credentials.json"
@@ -273,25 +267,6 @@ impl KiroCredentials {
         self.api_region
             .as_deref()
             .unwrap_or(config.effective_api_region())
-    }
-
-    /// 获取有效的代理配置
-    /// 优先级：凭据代理 > 全局代理 > 无代理
-    /// 特殊值 "direct" 表示显式不使用代理（即使全局配置了代理）
-    pub fn effective_proxy(&self, global_proxy: Option<&ProxyConfig>) -> Option<ProxyConfig> {
-        match self.proxy_url.as_deref() {
-            Some(url) if url.eq_ignore_ascii_case(Self::PROXY_DIRECT) => None,
-            Some(url) => {
-                let mut proxy = ProxyConfig::new(url);
-                if let (Some(username), Some(password)) =
-                    (&self.proxy_username, &self.proxy_password)
-                {
-                    proxy = proxy.with_auth(username, password);
-                }
-                Some(proxy)
-            }
-            None => global_proxy.cloned(),
-        }
     }
 
     pub fn canonicalize_auth_method(&mut self) {
@@ -315,10 +290,7 @@ impl KiroCredentials {
                 .any(|available| available == requested);
         }
 
-        models_for_subscription(self.subscription_title.as_deref())
-            .iter()
-            .map(|m| normalize_model_for_capability(m))
-            .any(|available| available == requested)
+        true
     }
 
     /// 检查是否为 API Key 凭据
@@ -363,27 +335,6 @@ pub fn normalize_model_for_capability(model: &str) -> String {
     }
 
     lower.to_string()
-}
-
-pub fn models_for_subscription(subscription_title: Option<&str>) -> Vec<String> {
-    let mut models = vec![
-        "claude-sonnet-4.6".to_string(),
-        "claude-sonnet-4.5".to_string(),
-        "claude-haiku-4.5".to_string(),
-    ];
-
-    let supports_opus = subscription_title
-        .map(|title| !title.to_ascii_uppercase().contains("FREE"))
-        .unwrap_or(false);
-    if supports_opus {
-        models.extend([
-            "claude-opus-4.7".to_string(),
-            "claude-opus-4.6".to_string(),
-            "claude-opus-4.5".to_string(),
-        ]);
-    }
-
-    models
 }
 
 #[cfg(test)]
@@ -756,10 +707,10 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_subscription_does_not_support_opus() {
+    fn test_unknown_model_capabilities_do_not_filter_models() {
         let creds = KiroCredentials::default();
 
-        assert!(!creds.supports_model("claude-opus-4-7"));
+        assert!(creds.supports_model("claude-opus-4-7"));
         assert!(creds.supports_model("claude-sonnet-4-6"));
     }
 
@@ -961,66 +912,5 @@ mod tests {
 
         assert_eq!(creds.effective_auth_region(&config), "auth-only");
         assert_eq!(creds.effective_api_region(&config), "api-only");
-    }
-
-    // ============ 凭据级代理优先级测试 ============
-
-    #[test]
-    fn test_effective_proxy_credential_overrides_global() {
-        let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("socks5://cred:1080".to_string());
-
-        let result = creds.effective_proxy(Some(&global));
-        assert_eq!(result, Some(ProxyConfig::new("socks5://cred:1080")));
-    }
-
-    #[test]
-    fn test_effective_proxy_credential_with_auth() {
-        let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("http://proxy:3128".to_string());
-        creds.proxy_username = Some("user".to_string());
-        creds.proxy_password = Some("pass".to_string());
-
-        let result = creds.effective_proxy(Some(&global));
-        let expected = ProxyConfig::new("http://proxy:3128").with_auth("user", "pass");
-        assert_eq!(result, Some(expected));
-    }
-
-    #[test]
-    fn test_effective_proxy_direct_bypasses_global() {
-        let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("direct".to_string());
-
-        let result = creds.effective_proxy(Some(&global));
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_effective_proxy_direct_case_insensitive() {
-        let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("DIRECT".to_string());
-
-        let result = creds.effective_proxy(Some(&global));
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_effective_proxy_fallback_to_global() {
-        let global = ProxyConfig::new("http://global:8080");
-        let creds = KiroCredentials::default();
-
-        let result = creds.effective_proxy(Some(&global));
-        assert_eq!(result, Some(ProxyConfig::new("http://global:8080")));
-    }
-
-    #[test]
-    fn test_effective_proxy_none_when_no_proxy() {
-        let creds = KiroCredentials::default();
-        let result = creds.effective_proxy(None);
-        assert_eq!(result, None);
     }
 }

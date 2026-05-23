@@ -2,6 +2,7 @@ import axios from 'axios'
 import { storage } from '@/lib/storage'
 import type {
   CredentialsStatusResponse,
+  AvailableModelsResponse,
   BalanceResponse,
   SuccessResponse,
   SetMaxConcurrentRequest,
@@ -28,8 +29,6 @@ import type {
   ProxyListResponse,
   ProxyListItem,
   ProxyUpsertRequest,
-  DefaultConnection,
-  DefaultConnectionRequest,
   BatchIdsRequest,
   BatchDisabledRequest,
   BatchCredentialUpdateRequest,
@@ -209,6 +208,12 @@ export async function forceRefreshToken(
   return data
 }
 
+// 刷新凭据可用模型列表
+export async function refreshCredentialModels(id: number): Promise<AvailableModelsResponse> {
+  const { data } = await api.post<AvailableModelsResponse>(`/credentials/${id}/models/refresh`)
+  return data
+}
+
 // 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)
@@ -280,11 +285,6 @@ export async function createProxy(payload: ProxyUpsertRequest): Promise<ProxyLis
 
 export async function updateProxy(id: number, payload: ProxyUpsertRequest): Promise<ProxyListItem> {
   const { data } = await api.put<ProxyListItem>(`/proxies/${id}`, payload)
-  return data
-}
-
-export async function setDefaultConnection(payload: DefaultConnectionRequest): Promise<DefaultConnection> {
-  const { data } = await api.put<DefaultConnection>('/proxies/default', payload)
   return data
 }
 
