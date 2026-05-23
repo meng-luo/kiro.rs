@@ -366,7 +366,7 @@ function CellText({ title, children, className }: { title?: string; children: st
 }
 
 function accountLabel(credential: CredentialStatusItem) {
-  return credential.email?.trim() || '未获取邮箱'
+  return credential.email?.trim() || `#${credential.id}`
 }
 
 export function CredentialRow({

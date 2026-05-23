@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  AlertTriangle, BarChart3, CheckCircle2, Clipboard, Clock3, Copy, Filter,
+  AlertTriangle, BarChart3, CheckCircle2, Clipboard, Clock3, Filter,
   Gauge, RefreshCw, Search, ShieldAlert, Timer, X, XCircle, Zap,
 } from 'lucide-react'
 import {
@@ -11,20 +11,15 @@ import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import {
-  useDiagnosticsCli, useDiagnosticsRequest, useDiagnosticsRequests,
-  useDiagnosticsSummary,
+  useDiagnosticsCli, useDiagnosticsSummary,
 } from '@/hooks/use-credentials'
-import { formatTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type {
   DiagnosticsBucket, DiagnosticsFilters, DiagnosticsPerformanceItem,
-  DiagnosticsSummaryResponse, DiagnosticsTimeBucket, RequestDiagnosticEntry,
+  DiagnosticsSummaryResponse, DiagnosticsTimeBucket,
 } from '@/types/api'
 
 const RESULT_COLORS = ['#22c55e', '#ef4444', '#f59e0b']
@@ -36,7 +31,7 @@ const SINCE_PRESETS: Array<[string, string]> = [
   ['1小时', '1h'], ['6小时', '6h'], ['24小时', '24h'],
   ['7天', '168h'], ['30天', '720h'],
 ]
-const PAGE_SIZE = 50
+const SUMMARY_LIMIT = 200
 
 function formatNumber(value?: number | null) {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
@@ -70,11 +65,6 @@ function dispatchLabel(path?: string | null) {
     case 'preferred': return '指定账号'
     default: return path || '-'
   }
-}
-
-function copyText(text: string, hint = '已复制') {
-  if (!text) return
-  navigator.clipboard.writeText(text).then(() => toast.success(hint)).catch(() => toast.error('复制失败'))
 }
 
 function StatCard({
@@ -434,170 +424,6 @@ function PerformanceTable({
   )
 }
 
-function DetailRow({ label, value, copyable, mono }: { label: string; value?: React.ReactNode; copyable?: string; mono?: boolean }) {
-  const empty = value === null || value === undefined || value === ''
-  return (
-    <div className="grid grid-cols-[120px_minmax(0,1fr)_auto] items-start gap-3 py-2 text-sm">
-      <div className="text-muted-foreground">{label}</div>
-      <div className={cn('min-w-0 break-all', mono && 'font-mono text-xs', empty && 'text-muted-foreground')}>
-        {empty ? '-' : value}
-      </div>
-      {copyable ? (
-        <button
-          type="button"
-          onClick={() => copyText(copyable, '已复制')}
-          className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-          aria-label="复制"
-        >
-          <Copy className="h-3.5 w-3.5" />
-        </button>
-      ) : <div />}
-    </div>
-  )
-}
-
-function RequestDetailDialog({
-  requestId, onClose,
-}: {
-  requestId: string | null
-  onClose: () => void
-}) {
-  const detail = useDiagnosticsRequest(requestId)
-  const entry = detail.data
-  const totalToken =
-    (entry?.inputTokens ?? 0) + (entry?.outputTokens ?? 0)
-  return (
-    <Dialog open={!!requestId} onOpenChange={(open) => { if (!open) onClose() }}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            请求详情
-            {entry ? (
-              <Badge variant={entry.success ? 'success' : 'destructive'}>
-                {entry.success ? '成功' : '失败'}
-              </Badge>
-            ) : null}
-          </DialogTitle>
-        </DialogHeader>
-        {detail.isLoading ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">正在加载</div>
-        ) : !entry ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">未找到该请求</div>
-        ) : (
-          <div className="divide-y">
-            <DetailRow label="请求 ID" value={entry.requestId} copyable={entry.requestId} mono />
-            <DetailRow label="开始时间" value={formatTime(entry.startedAt)} />
-            <DetailRow label="结束时间" value={formatTime(entry.finishedAt)} />
-            <DetailRow label="耗时" value={formatDuration(entry.durationMs)} />
-            <DetailRow label="原始模型" value={entry.originalModel} />
-            <DetailRow label="映射模型" value={entry.mappedModel} />
-            <DetailRow
-              label="账号"
-              value={entry.credentialId ? `#${entry.credentialId}` : null}
-            />
-            <DetailRow
-              label="调度路径"
-              value={
-                <div className="flex flex-wrap gap-1">
-                  <Badge variant={entry.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'}>
-                    {dispatchLabel(entry.dispatchPath)}
-                  </Badge>
-                  {entry.stickyHit ? <Badge variant="success">粘性命中</Badge> : null}
-                  {entry.stickyDetached ? <Badge variant="destructive">已脱粘</Badge> : null}
-                </div>
-              }
-            />
-            <DetailRow label="会话哈希" value={entry.sessionHash} copyable={entry.sessionHash ?? undefined} mono />
-            <DetailRow label="上游状态" value={entry.upstreamStatus} />
-            <DetailRow label="错误码" value={entry.upstreamErrorCode} />
-            <DetailRow label="错误消息" value={entry.upstreamMessageShort} copyable={entry.upstreamMessageShort ?? undefined} />
-            <DetailRow
-              label="限频类型"
-              value={
-                entry.rateLimitKind ? (
-                  <Badge variant="warning">{rateLimitLabel(entry.rateLimitKind)}</Badge>
-                ) : null
-              }
-            />
-            <DetailRow label="冷却时长" value={entry.cooldownMs ? formatDuration(entry.cooldownMs) : null} />
-            <DetailRow label="冷却结束" value={entry.cooldownUntil ? formatTime(entry.cooldownUntil) : null} />
-            <DetailRow
-              label="Token"
-              value={
-                <div className="space-y-1">
-                  <div>合计 <span className="font-medium">{formatNumber(totalToken)}</span></div>
-                  <div className="text-xs text-muted-foreground">
-                    输入 {formatNumber(entry.inputTokens)} ·
-                    输出 {formatNumber(entry.outputTokens)} ·
-                    缓存命中 {formatNumber(entry.cacheReadInputTokens)} ·
-                    缓存写入 {formatNumber(entry.cacheCreationInputTokens)} ·
-                    未命中 {formatNumber(entry.uncachedInputTokens)}
-                  </div>
-                </div>
-              }
-            />
-            <div className="pt-3">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => copyText(JSON.stringify(entry, null, 2), '已复制 JSON')}
-              >
-                <Clipboard className="h-4 w-4" />
-                复制 JSON
-              </Button>
-            </div>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function RequestRow({
-  item, onPick,
-}: {
-  item: RequestDiagnosticEntry
-  onPick: (id: string) => void
-}) {
-  return (
-    <tr
-      className="cursor-pointer border-b text-sm transition hover:bg-muted/40"
-      onClick={() => onPick(item.requestId)}
-    >
-      <td className="max-w-[190px] px-3 py-3">
-        <div className="truncate font-mono text-xs" title={item.requestId}>{item.requestId}</div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">{formatTime(item.startedAt)}</div>
-      </td>
-      <td className="max-w-[220px] px-3 py-3">
-        <div className="truncate font-medium" title={item.originalModel ?? '-'}>{item.originalModel ?? '-'}</div>
-        <div className="mt-1 truncate text-xs text-muted-foreground" title={item.mappedModel ?? '-'}>{item.mappedModel ?? '-'}</div>
-      </td>
-      <td className="px-3 py-3">
-        <Badge variant="outline">{item.credentialId ? `#${item.credentialId}` : '-'}</Badge>
-      </td>
-      <td className="px-3 py-3">
-        <div className="flex flex-wrap gap-1">
-          <Badge variant={item.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'}>{dispatchLabel(item.dispatchPath)}</Badge>
-          {item.stickyHit ? <Badge variant="success">粘性命中</Badge> : null}
-          {item.stickyDetached ? <Badge variant="destructive">已脱粘</Badge> : null}
-        </div>
-      </td>
-      <td className="px-3 py-3">
-        <Badge variant={item.success ? 'success' : 'destructive'}>{item.success ? '成功' : '失败'}</Badge>
-      </td>
-      <td className="max-w-[260px] px-3 py-3">
-        <div className="truncate" title={item.upstreamMessageShort ?? ''}>
-          {item.rateLimitKind ? rateLimitLabel(item.rateLimitKind) : item.upstreamErrorCode || item.upstreamStatus || '-'}
-        </div>
-        <div className="mt-1 truncate text-xs text-muted-foreground" title={item.upstreamMessageShort ?? ''}>
-          {item.upstreamMessageShort ?? '-'}
-        </div>
-      </td>
-      <td className="px-3 py-3 text-right">{formatDuration(item.durationMs)}</td>
-    </tr>
-  )
-}
-
 interface UiFilters {
   since: string
   until: string
@@ -655,8 +481,6 @@ export function DiagnosticsDashboard() {
   const [ui, setUi] = useState<UiFilters>(DEFAULT_FILTERS)
   const [keywordInput, setKeywordInput] = useState('')
   const [autoRefresh, setAutoRefresh] = useState(true)
-  const [pageSize, setPageSize] = useState(PAGE_SIZE)
-  const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
 
   // keyword 防抖
   useEffect(() => {
@@ -666,11 +490,9 @@ export function DiagnosticsDashboard() {
     return () => window.clearTimeout(handle)
   }, [keywordInput])
 
-  const summaryFilters = useMemo(() => buildFilters(ui, pageSize), [ui, pageSize])
-  const requestsFilters = useMemo(() => buildFilters(ui, pageSize), [ui, pageSize])
+  const summaryFilters = useMemo(() => buildFilters(ui, SUMMARY_LIMIT), [ui])
 
   const summary = useDiagnosticsSummary(summaryFilters)
-  const requests = useDiagnosticsRequests(requestsFilters)
   const cli = useDiagnosticsCli(summaryFilters)
   const data = summary.data
 
@@ -679,26 +501,22 @@ export function DiagnosticsDashboard() {
     if (!autoRefresh) return
     const handle = window.setInterval(() => {
       summary.refetch()
-      requests.refetch()
     }, 30000)
     return () => window.clearInterval(handle)
-  }, [autoRefresh, summary, requests])
+  }, [autoRefresh, summary])
 
   const updateFilter = <K extends keyof UiFilters>(key: K, value: UiFilters[K]) => {
     setUi((prev) => ({ ...prev, [key]: value }))
-    setPageSize(PAGE_SIZE)
   }
 
   const resetFilter = (key: keyof UiFilters) => {
     setUi((prev) => ({ ...prev, [key]: (key === 'rateLimitOnly' ? false : '') as UiFilters[typeof key] }))
     if (key === 'keyword') setKeywordInput('')
-    setPageSize(PAGE_SIZE)
   }
 
   const resetAll = () => {
     setUi(DEFAULT_FILTERS)
     setKeywordInput('')
-    setPageSize(PAGE_SIZE)
   }
 
   const copyCli = async () => {
@@ -706,10 +524,6 @@ export function DiagnosticsDashboard() {
     await navigator.clipboard.writeText(cli.data.command)
     toast.success('已复制诊断命令')
   }
-
-  const total = requests.data?.total ?? 0
-  const loaded = requests.data?.items.length ?? 0
-  const canLoadMore = loaded < total
 
   const totalRequests = data?.totalRequests ?? 0
   const successRate = totalRequests
@@ -746,7 +560,7 @@ export function DiagnosticsDashboard() {
                 className="pl-9"
               />
             </div>
-            <Button variant="outline" size="sm" onClick={() => { summary.refetch(); requests.refetch(); cli.refetch() }}>
+            <Button variant="outline" size="sm" onClick={() => { summary.refetch(); cli.refetch() }}>
               <RefreshCw className={cn('h-4 w-4', summary.isFetching && 'animate-spin')} />
               刷新
             </Button>
@@ -989,69 +803,9 @@ export function DiagnosticsDashboard() {
         />
       </div>
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-3">
-          <CardTitle className="text-base">
-            请求明细
-            <span className="ml-2 text-xs font-normal text-muted-foreground">
-              共 {formatNumber(total)} 条，已加载 {formatNumber(loaded)} 条
-            </span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {requests.isLoading ? (
-            <div className="rounded-md border py-10 text-center text-muted-foreground">正在加载请求记录</div>
-          ) : requests.data?.items.length ? (
-            <div className="overflow-x-auto rounded-md border">
-              <table className="min-w-[1180px] w-full border-collapse">
-                <thead>
-                  <tr>
-                    <th className="bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground">请求</th>
-                    <th className="bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground">模型</th>
-                    <th className="bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground">账号</th>
-                    <th className="bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground">调度</th>
-                    <th className="bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground">结果</th>
-                    <th className="bg-muted/30 px-3 py-3 text-left text-xs font-medium text-muted-foreground">上游返回</th>
-                    <th className="bg-muted/30 px-3 py-3 text-right text-xs font-medium text-muted-foreground">耗时</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {requests.data.items.map((item) => (
-                    <RequestRow key={item.requestId} item={item} onPick={setActiveRequestId} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="rounded-md border py-10 text-center text-muted-foreground">当前筛选下暂无请求记录</div>
-          )}
-          {canLoadMore ? (
-            <div className="flex justify-center">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPageSize((prev) => Math.min(prev + PAGE_SIZE, 500))}
-                disabled={requests.isFetching}
-              >
-                {requests.isFetching ? '加载中…' : `加载更多（剩余 ${formatNumber(total - loaded)} 条）`}
-              </Button>
-            </div>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <RequestDetailDialog
-        requestId={activeRequestId}
-        onClose={() => setActiveRequestId(null)}
-      />
     </div>
   )
 }
-
-
-
-
-
 
 
 
