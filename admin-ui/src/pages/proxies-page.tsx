@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react'
-import { Check, Copy, Download, FileUp, Network, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Check, Copy, Download, FileUp, Network, PlugZap, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MetricCard } from '@/components/metric-card'
-import { useBatchDeleteProxies, useBatchQualityCheckProxies, useBatchTestProxies, useCreateProxy, useDeleteProxy, useProxies, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
+import { useAdminSettings, useBatchDeleteProxies, useBatchQualityCheckProxies, useBatchTestProxies, useCreateProxy, useDeleteProxy, useProxies, useSetDefaultConnection, useTestProxy, useUpdateProxy } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { formatTime } from '@/lib/format'
 import type { ProxyListItem, ProxyUpsertRequest } from '@/types/api'
@@ -81,8 +81,10 @@ function cardTone(proxy: ProxyListItem) {
 
 export function ProxiesPage() {
   const proxies = useProxies()
+  const settings = useAdminSettings()
   const createProxy = useCreateProxy()
   const updateProxy = useUpdateProxy()
+  const setDefaultConnection = useSetDefaultConnection()
   const deleteProxy = useDeleteProxy()
   const testProxy = useTestProxy()
   const batchTest = useBatchTestProxies()
@@ -97,6 +99,15 @@ export function ProxiesPage() {
   const [state, setState] = useState('all')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const importInputRef = useRef<HTMLInputElement>(null)
+
+  const defaultConnection = settings.data?.defaultConnection
+  const defaultConnectionIsCustom = defaultConnection?.mode === 'proxy' && !defaultConnection.proxyId
+  const defaultConnectionValue =
+    defaultConnection?.mode === 'proxy' && defaultConnection.proxyId
+      ? `proxy:${defaultConnection.proxyId}`
+      : defaultConnectionIsCustom
+        ? 'custom:'
+      : 'direct:'
 
   useEffect(() => {
     if (!dialogOpen) return
@@ -219,6 +230,20 @@ export function ProxiesPage() {
     URL.revokeObjectURL(url)
   }
 
+  const changeDefaultConnection = (value: string) => {
+    const [mode, proxyId] = value.split(':')
+    setDefaultConnection.mutate(
+      {
+        mode: mode === 'proxy' ? 'proxy' : 'direct',
+        proxyId: mode === 'proxy' ? Number(proxyId) : null,
+      },
+      {
+        onSuccess: () => toast.success('默认连接已更新'),
+        onError: (error) => toast.error(extractErrorMessage(error)),
+      },
+    )
+  }
+
   const parseProxyImport = (text: string): ProxyUpsertRequest[] => {
     const raw = JSON.parse(text)
     const items = Array.isArray(raw) ? raw : raw?.proxies
@@ -284,6 +309,43 @@ export function ProxiesPage() {
         <MetricCard label="已启用" value={proxies.data?.enabledCount ?? 0} />
         <MetricCard label="已绑定账号" value={list.reduce((sum, item) => sum + item.accountCount, 0)} />
       </div>
+
+      <Card className="rounded-md">
+        <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
+              <PlugZap className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-medium">默认连接</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {defaultConnection?.mode === 'proxy'
+                  ? (defaultConnection.proxyName || defaultConnection.proxyUrl || '自定义代理')
+                  : '直连'}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <select
+              className="h-10 min-w-[220px] rounded-md border border-input bg-background px-3 text-sm"
+              value={defaultConnectionValue}
+              onChange={(event) => changeDefaultConnection(event.target.value)}
+              disabled={setDefaultConnection.isPending}
+            >
+              {defaultConnectionIsCustom ? <option value="custom:" disabled>当前自定义代理</option> : null}
+              <option value="direct:">直连</option>
+              {list.filter((item) => !item.disabled).map((item) => (
+                <option key={item.id} value={`proxy:${item.id}`}>
+                  {item.name} · {item.host}:{item.port}
+                </option>
+              ))}
+            </select>
+            {defaultConnectionIsCustom ? (
+              <Badge variant="outline">自定义代理</Badge>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card className="rounded-md">
         <CardContent className="grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_160px_160px_auto]">
@@ -353,6 +415,7 @@ export function ProxiesPage() {
                     <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <div className="truncate font-medium">{proxy.name}</div>
+                      {proxy.isDefault ? <Badge variant="success">默认</Badge> : null}
                       {status(proxy)}
                     </div>
                     <div className="mt-1 truncate text-sm text-muted-foreground">

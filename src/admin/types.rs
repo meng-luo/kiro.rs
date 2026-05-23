@@ -147,6 +147,8 @@ pub struct CredentialStatusItem {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 账号状态：normal / banned / rate_limited / disabled
+    pub account_status: String,
     /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
     pub endpoint: String,
     /// 调度状态
@@ -297,6 +299,7 @@ pub struct AdminSettingsResponse {
     pub prompt_cache: PromptCacheConfigResponse,
     pub accounts_page_size: usize,
     pub records_page_size: usize,
+    pub default_connection: DefaultConnectionResponse,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -310,6 +313,26 @@ pub struct AdminSettingsRequest {
     pub accounts_page_size: Option<usize>,
     #[serde(default)]
     pub records_page_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultConnectionResponse {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultConnectionRequest {
+    pub mode: String,
+    #[serde(default)]
+    pub proxy_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

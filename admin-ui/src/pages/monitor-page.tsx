@@ -10,15 +10,17 @@ import { useCredentials, useCredentialsStream, useDiagnosticsSummary } from '@/h
 import { formatDateTimeParts, formatDuration, formatNumber, formatRelativeTime, percent } from '@/lib/format'
 import { extractErrorMessage } from '@/lib/utils'
 
-function stateText(state: string, disabled: boolean) {
-  if (disabled) return '已停用'
+function stateText(state: string, disabled: boolean, accountStatus?: string) {
+  if (accountStatus === 'banned') return '封号'
+  if (accountStatus === 'rate_limited') return '限速'
+  if (disabled || accountStatus === 'disabled') return '禁用'
   switch (state) {
     case 'ready':
-      return '可用'
+      return '正常'
     case 'saturated':
       return '并发已满'
     case 'cooldown':
-      return '冷却中'
+      return '限速'
     case 'blocked':
       return '待处理'
     default:
@@ -267,7 +269,7 @@ export function MonitorPage() {
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{item.email || `账号 #${item.id}`}</div>
                       <div className="mt-1 truncate text-xs text-muted-foreground">
-                        {stateText(item.dispatchState, item.disabled)} · {formatRelativeTime(item.lastUsedAt)}
+                        {stateText(item.dispatchState, item.disabled, item.accountStatus)} · {formatRelativeTime(item.lastUsedAt)}
                       </div>
                     </div>
                     <Badge variant="outline">{item.recent429Count + item.recentSuspiciousCount} 次</Badge>

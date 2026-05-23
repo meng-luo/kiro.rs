@@ -31,6 +31,7 @@ import type { BalanceResponse, BatchOperationResponse, CredentialStatusItem, Sch
 
 export function AccountsPage() {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
+  const [selectedCredentialLabel, setSelectedCredentialLabel] = useState<string | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
@@ -42,7 +43,7 @@ export function AccountsPage() {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [filter, setFilter] = useState<'all' | 'alert' | 'disabled'>('all')
+  const [filter, setFilter] = useState<'all' | 'alert' | 'banned' | 'rate_limited' | 'disabled'>('all')
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkProxyMode, setBulkProxyMode] = useState('inherit')
   const [bulkProxyId, setBulkProxyId] = useState('')
@@ -62,7 +63,9 @@ export function AccountsPage() {
 
   const credentials = useMemo(() => {
     const list = data?.credentials ?? []
-    if (filter === 'disabled') return list.filter((item) => item.disabled)
+    if (filter === 'banned') return list.filter((item) => item.accountStatus === 'banned')
+    if (filter === 'rate_limited') return list.filter((item) => item.accountStatus === 'rate_limited')
+    if (filter === 'disabled') return list.filter((item) => item.accountStatus === 'disabled')
     if (filter === 'alert') return list.filter((item) => item.disabled || item.dispatchState !== 'ready')
     return list
   }, [data?.credentials, filter])
@@ -247,12 +250,9 @@ export function AccountsPage() {
 
   const allCredentials = data?.credentials ?? []
   const alertCount = allCredentials.filter((item) => item.disabled || item.dispatchState !== 'ready').length
-  const disabledCount = allCredentials.filter((item) => item.disabled).length
-  const cachedBalanceCount = allCredentials.filter((item) => item.cachedBalance).length
-  const lowBalanceCount = allCredentials.filter((item) => {
-    const balance = item.cachedBalance?.balance
-    return balance && balance.usageLimit > 0 && balance.usagePercentage >= 80
-  }).length
+  const bannedCount = allCredentials.filter((item) => item.accountStatus === 'banned').length
+  const rateLimitedCount = allCredentials.filter((item) => item.accountStatus === 'rate_limited').length
+  const disabledCount = allCredentials.filter((item) => item.accountStatus === 'disabled').length
 
   return (
     <div className="space-y-6">
@@ -270,10 +270,10 @@ export function AccountsPage() {
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <MetricCard label="账号总数" value={data?.total ?? 0} />
-        <MetricCard label="启用账号" value={data?.enabledCount ?? 0} />
-        <MetricCard label="可用账号" value={data?.schedulableCount ?? 0} />
-        <MetricCard label="需要处理" value={alertCount} />
-        <MetricCard label="有用量记录" value={cachedBalanceCount} hint={lowBalanceCount > 0 ? `${lowBalanceCount} 个使用较高` : undefined} />
+        <MetricCard label="正常账号" value={allCredentials.filter((item) => item.accountStatus === 'normal').length} />
+        <MetricCard label="封号" value={bannedCount} />
+        <MetricCard label="限速" value={rateLimitedCount} />
+        <MetricCard label="禁用" value={disabledCount} />
       </div>
 
       {selectedIds.size > 0 ? (
@@ -291,7 +291,7 @@ export function AccountsPage() {
               <Button size="sm" variant="outline" onClick={() => runBatch(() => batchReset.mutateAsync({ ids: selectedArray }), '已恢复选中的账号')}><RotateCcw className="h-4 w-4" />重置状态</Button>
               <Button size="sm" variant="outline" onClick={handleBatchRefreshBalances}><CheckCircle2 className="h-4 w-4" />刷新用量</Button>
               <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: false }), '已启用选中的账号')}>启用调度</Button>
-              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已停用选中的账号')}>禁用调度</Button>
+              <Button size="sm" variant="outline" onClick={() => runBatch(() => batchDisabled.mutateAsync({ ids: selectedArray, disabled: true }), '已禁用选中的账号')}>禁用调度</Button>
               <Button size="sm" onClick={() => setBulkEditOpen(true)}>批量编辑</Button>
             </div>
           </div>
@@ -316,7 +316,9 @@ export function AccountsPage() {
             {[
               { key: 'all', label: `全部 ${allCredentials.length}` },
               { key: 'alert', label: `需要处理 ${alertCount}` },
-              { key: 'disabled', label: `已停用 ${disabledCount}` },
+              { key: 'banned', label: `封号 ${bannedCount}` },
+              { key: 'rate_limited', label: `限速 ${rateLimitedCount}` },
+              { key: 'disabled', label: `禁用 ${disabledCount}` },
             ].map((item) => (
               <Button key={item.key} size="sm" variant={filter === item.key ? 'default' : 'outline'} onClick={() => { setFilter(item.key as typeof filter); setCurrentPage(1) }}>
                 {item.label}
@@ -336,7 +338,7 @@ export function AccountsPage() {
               <CredentialRow
                 key={credential.id}
                 credential={credential}
-                onViewBalance={(id) => { setSelectedCredentialId(id); setBalanceDialogOpen(true) }}
+                onViewBalance={(id, label) => { setSelectedCredentialId(id); setSelectedCredentialLabel(label); setBalanceDialogOpen(true) }}
                 onRefreshBalance={refreshSingleBalance}
                 selected={selectedIds.has(credential.id)}
                 onToggleSelect={() => toggleSelect(credential.id)}
@@ -365,7 +367,7 @@ export function AccountsPage() {
         </CardContent>
       </Card>
 
-      <BalanceDialog credentialId={selectedCredentialId} open={balanceDialogOpen} onOpenChange={setBalanceDialogOpen} />
+      <BalanceDialog credentialId={selectedCredentialId} credentialLabel={selectedCredentialLabel} open={balanceDialogOpen} onOpenChange={setBalanceDialogOpen} />
       <AddCredentialDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
       <BatchImportDialog open={batchImportDialogOpen} onOpenChange={setBatchImportDialogOpen} />
       <KamImportDialog open={kamImportDialogOpen} onOpenChange={setKamImportDialogOpen} />

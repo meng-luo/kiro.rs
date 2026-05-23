@@ -152,6 +152,11 @@ pub struct KiroCredentials {
     #[serde(default)]
     pub disabled: bool,
 
+    /// 凭据被禁用的原因（用于区分手动禁用、封号等状态）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub disabled_reason: Option<String>,
+
     /// Kiro API Key（headless 模式）
     /// 格式: ksk_xxxxxxxx
     /// 设置后直接作为 Bearer Token 使用，无需 refreshToken
@@ -453,6 +458,7 @@ mod tests {
             proxy_mode: None,
             proxy_id: None,
             disabled: false,
+            disabled_reason: None,
             kiro_api_key: None,
             endpoint: None,
         };
@@ -576,6 +582,7 @@ mod tests {
             proxy_mode: None,
             proxy_id: None,
             disabled: false,
+            disabled_reason: None,
             kiro_api_key: None,
             endpoint: None,
         };
@@ -612,6 +619,7 @@ mod tests {
             proxy_mode: None,
             proxy_id: None,
             disabled: false,
+            disabled_reason: None,
             kiro_api_key: None,
             endpoint: None,
         };
@@ -731,6 +739,7 @@ mod tests {
             proxy_mode: None,
             proxy_id: None,
             disabled: false,
+            disabled_reason: None,
             kiro_api_key: None,
             endpoint: None,
         };

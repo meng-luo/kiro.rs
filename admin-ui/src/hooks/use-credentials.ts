@@ -27,6 +27,7 @@ import {
   getProxies,
   createProxy,
   updateProxy,
+  setDefaultConnection,
   deleteProxy,
   testProxy,
   batchTestProxies,
@@ -58,6 +59,7 @@ import type {
   DiagnosticsFilters,
   PromptCacheConfigRequest,
   ProxyUpsertRequest,
+  DefaultConnectionRequest,
   SystemRollbackRequest,
   SystemUpdateRequest,
 } from '@/types/api'
@@ -336,6 +338,18 @@ export function useUpdateProxy() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['proxies'] })
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useSetDefaultConnection() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: DefaultConnectionRequest) => setDefaultConnection(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['adminSettings'] })
     },
   })
 }

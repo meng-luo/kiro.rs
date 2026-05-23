@@ -103,6 +103,26 @@ impl fmt::Display for DispatchState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountStatus {
+    Normal,
+    Banned,
+    RateLimited,
+    Disabled,
+}
+
+impl fmt::Display for AccountStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            AccountStatus::Normal => "normal",
+            AccountStatus::Banned => "banned",
+            AccountStatus::RateLimited => "rate_limited",
+            AccountStatus::Disabled => "disabled",
+        };
+        write!(f, "{}", value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchPath {
     Preferred,
     Sticky,
@@ -497,6 +517,8 @@ struct CredentialEntry {
 enum DisabledReason {
     /// Admin API 手动禁用
     Manual,
+    /// 上游明确返回账号封禁/暂停/停用
+    Banned,
     /// 连续失败达到阈值后自动禁用
     TooManyFailures,
     /// Token 刷新连续失败达到阈值后自动禁用
@@ -507,6 +529,38 @@ enum DisabledReason {
     InvalidRefreshToken,
     /// 凭据配置无效（如 authMethod=api_key 但缺少 kiroApiKey）
     InvalidConfig,
+}
+
+fn disabled_reason_label(reason: DisabledReason) -> String {
+    match reason {
+        DisabledReason::Manual => "Manual",
+        DisabledReason::Banned => "Banned",
+        DisabledReason::TooManyFailures => "TooManyFailures",
+        DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
+        DisabledReason::QuotaExceeded => "QuotaExceeded",
+        DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
+        DisabledReason::InvalidConfig => "InvalidConfig",
+    }
+    .to_string()
+}
+
+fn disabled_reason_from_config(value: Option<&str>) -> Option<DisabledReason> {
+    match value {
+        Some("Manual") | Some("manual") => Some(DisabledReason::Manual),
+        Some("Banned") | Some("banned") => Some(DisabledReason::Banned),
+        Some("TooManyFailures") | Some("too_many_failures") => {
+            Some(DisabledReason::TooManyFailures)
+        }
+        Some("TooManyRefreshFailures") | Some("too_many_refresh_failures") => {
+            Some(DisabledReason::TooManyRefreshFailures)
+        }
+        Some("QuotaExceeded") | Some("quota_exceeded") => Some(DisabledReason::QuotaExceeded),
+        Some("InvalidRefreshToken") | Some("invalid_refresh_token") => {
+            Some(DisabledReason::InvalidRefreshToken)
+        }
+        Some("InvalidConfig") | Some("invalid_config") => Some(DisabledReason::InvalidConfig),
+        _ => None,
+    }
 }
 
 /// 统计数据持久化条目
@@ -572,6 +626,8 @@ pub struct CredentialEntrySnapshot {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 对外展示的账号状态：normal / banned / rate_limited / disabled
+    pub account_status: String,
     /// 端点名称（未显式配置时返回 None，由 Admin 层回退到默认值）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
@@ -686,7 +742,7 @@ impl Drop for DispatchLease {
 /// 故障统计基于 API 调用结果，而非 Token 刷新结果
 pub struct MultiTokenManager {
     config: Config,
-    proxy: Option<ProxyConfig>,
+    proxy: Mutex<Option<ProxyConfig>>,
     /// 凭据条目列表
     entries: Arc<Mutex<Vec<CredentialEntry>>>,
     /// 当前活动凭据 ID
@@ -793,7 +849,8 @@ impl MultiTokenManager {
                     refresh_failure_count: 0,
                     disabled: cred.disabled, // 从配置文件读取 disabled 状态
                     disabled_reason: if cred.disabled {
-                        Some(DisabledReason::Manual)
+                        disabled_reason_from_config(cred.disabled_reason.as_deref())
+                            .or(Some(DisabledReason::Manual))
                     } else {
                         None
                     },
@@ -860,7 +917,7 @@ impl MultiTokenManager {
             .and_then(|p| p.parent().map(|d| d.join("kiro_request_diagnostics.jsonl")));
         let manager = Self {
             config,
-            proxy,
+            proxy: Mutex::new(proxy),
             entries: Arc::new(Mutex::new(entries)),
             current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
@@ -892,6 +949,14 @@ impl MultiTokenManager {
     /// 获取配置的引用
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn global_proxy(&self) -> Option<ProxyConfig> {
+        self.proxy.lock().clone()
+    }
+
+    pub fn update_global_proxy(&self, proxy: Option<ProxyConfig>) {
+        *self.proxy.lock() = proxy;
     }
 
     /// 获取凭据总数
@@ -1476,7 +1541,8 @@ impl MultiTokenManager {
 
             if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
                 // 确实需要刷新
-                let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
+                let global_proxy = self.global_proxy();
+                let effective_proxy = current_creds.effective_proxy(global_proxy.as_ref());
                 let new_creds =
                     refresh_token(&current_creds, &self.config, effective_proxy.as_ref()).await?;
 
@@ -1563,6 +1629,7 @@ impl MultiTokenManager {
                     cred.canonicalize_auth_method();
                     // 同步 disabled 状态到凭据对象
                     cred.disabled = e.disabled;
+                    cred.disabled_reason = e.disabled_reason.map(disabled_reason_label);
                     cred.scheduler_policy = e.credentials.scheduler_policy;
                     cred
                 })
@@ -1833,6 +1900,18 @@ impl MultiTokenManager {
         }
     }
 
+    fn account_status_of(&self, entry: &CredentialEntry, now: DateTime<Utc>) -> AccountStatus {
+        if entry.disabled_reason == Some(DisabledReason::Banned) {
+            AccountStatus::Banned
+        } else if entry.disabled {
+            AccountStatus::Disabled
+        } else if entry.cooldown_until.is_some_and(|deadline| deadline > now) {
+            AccountStatus::RateLimited
+        } else {
+            AccountStatus::Normal
+        }
+    }
+
     /// 报告指定凭据 API 调用成功
     ///
     /// 重置该凭据的失败计数
@@ -1915,6 +1994,55 @@ impl MultiTokenManager {
             entries.iter().any(|e| !e.disabled)
         };
         self.save_stats_debounced();
+        result
+    }
+
+    /// 报告上游明确返回账号封禁/暂停/停用。
+    ///
+    /// 封号是硬禁用状态，不等待连续失败阈值。
+    pub fn report_banned(&self, id: u64) -> bool {
+        let result = {
+            let mut entries = self.entries.lock();
+            let mut current_id = self.current_id.lock();
+
+            let entry = match entries.iter_mut().find(|e| e.id == id) {
+                Some(e) => e,
+                None => return entries.iter().any(|e| !e.disabled),
+            };
+
+            if entry.disabled && entry.disabled_reason == Some(DisabledReason::Banned) {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
+            entry.last_used_at = Some(Utc::now().to_rfc3339());
+            entry.disabled = true;
+            entry.disabled_reason = Some(DisabledReason::Banned);
+            entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
+            self.clear_runtime_block(entry);
+
+            tracing::error!("凭据 #{} 检测到账号封禁，已自动标记为封号并禁用", id);
+
+            if let Some(next) = entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .min_by_key(|e| e.credentials.priority)
+            {
+                *current_id = next.id;
+                tracing::info!(
+                    "已切换到凭据 #{}（优先级 {}）",
+                    next.id,
+                    next.credentials.priority
+                );
+                true
+            } else {
+                tracing::error!("所有凭据均已禁用！");
+                false
+            }
+        };
+        self.save_stats_debounced();
+        if let Err(e) = self.persist_credentials() {
+            tracing::warn!("封号状态持久化失败（内存状态已生效）: {}", e);
+        }
         result
     }
 
@@ -2206,17 +2334,8 @@ impl MultiTokenManager {
                     proxy_mode: e.credentials.proxy_mode.clone(),
                     proxy_id: e.credentials.proxy_id,
                     refresh_failure_count: e.refresh_failure_count,
-                    disabled_reason: e.disabled_reason.map(|r| {
-                        match r {
-                            DisabledReason::Manual => "Manual",
-                            DisabledReason::TooManyFailures => "TooManyFailures",
-                            DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
-                            DisabledReason::QuotaExceeded => "QuotaExceeded",
-                            DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
-                            DisabledReason::InvalidConfig => "InvalidConfig",
-                        }
-                        .to_string()
-                    }),
+                    disabled_reason: e.disabled_reason.map(disabled_reason_label),
+                    account_status: self.account_status_of(e, now).to_string(),
                     endpoint: e.credentials.endpoint.clone(),
                     dispatch_state: self.dispatch_state_of(e, now).to_string(),
                     current_concurrent: e.inflight,
@@ -2449,7 +2568,8 @@ impl MultiTokenManager {
                 };
 
                 if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                    let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
+                    let global_proxy = self.global_proxy();
+                    let effective_proxy = current_creds.effective_proxy(global_proxy.as_ref());
                     let new_creds =
                         refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
                             .await?;
@@ -2487,7 +2607,8 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let global_proxy = self.global_proxy();
+        let effective_proxy = credentials.effective_proxy(global_proxy.as_ref());
         let usage_limits =
             get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
 
@@ -2637,7 +2758,8 @@ impl MultiTokenManager {
         let mut validated_cred = if new_cred.is_api_key_credential() {
             new_cred.clone()
         } else {
-            let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
+            let global_proxy = self.global_proxy();
+            let effective_proxy = new_cred.effective_proxy(global_proxy.as_ref());
             refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?
         };
 
@@ -2780,7 +2902,8 @@ impl MultiTokenManager {
         let _guard = self.refresh_lock.lock().await;
 
         // 无条件调用 refresh_token
-        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let global_proxy = self.global_proxy();
+        let effective_proxy = credentials.effective_proxy(global_proxy.as_ref());
         let new_creds = refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await?;
 
         // 更新 entries 中对应凭据
@@ -3406,6 +3529,7 @@ mod tests {
         let snapshot = manager.snapshot();
         let entry = snapshot.entries.iter().find(|entry| entry.id == 1).unwrap();
         assert_eq!(entry.dispatch_state, DispatchState::Cooldown.to_string());
+        assert_eq!(entry.account_status, AccountStatus::RateLimited.to_string());
         assert_eq!(entry.last_rate_limit_kind.as_deref(), Some("normal_429"));
         let remaining_ms = entry.cooldown_remaining_ms.unwrap();
         assert!(
@@ -3413,6 +3537,25 @@ mod tests {
             "普通 429 短冷却应按毫秒生效，实际剩余 {}ms",
             remaining_ms
         );
+    }
+
+    #[test]
+    fn test_report_banned_disables_account_immediately() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(manager.report_banned(1));
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|entry| entry.id == 1).unwrap();
+        assert!(first.disabled);
+        assert_eq!(first.account_status, AccountStatus::Banned.to_string());
+        assert_eq!(first.disabled_reason.as_deref(), Some("Banned"));
+        assert_eq!(snapshot.enabled_count, 1);
     }
 
     #[tokio::test]

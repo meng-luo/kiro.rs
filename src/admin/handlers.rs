@@ -15,10 +15,11 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, AdminSettingsRequest, BatchCredentialUpdateRequest,
-        BatchDisabledRequest, BatchIdsRequest, CredentialTestRequest, DiagnosticsQueryRequest,
-        PromptCacheConfigRequest, ProxyUpsertRequest, SchedulerConfigRequest, SetDisabledRequest,
-        SetLoadBalancingModeRequest, SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse,
-        SystemRollbackRequest, SystemUpdateRequest,
+        BatchDisabledRequest, BatchIdsRequest, CredentialTestRequest, DefaultConnectionRequest,
+        DiagnosticsQueryRequest, PromptCacheConfigRequest, ProxyUpsertRequest,
+        SchedulerConfigRequest, SetDisabledRequest, SetLoadBalancingModeRequest,
+        SetMaxConcurrentRequest, SetPriorityRequest, SuccessResponse, SystemRollbackRequest,
+        SystemUpdateRequest,
     },
 };
 
@@ -507,6 +508,17 @@ pub async fn batch_quality_check_proxies(
     Json(payload): Json<BatchIdsRequest>,
 ) -> impl IntoResponse {
     match state.service.batch_quality_check_proxies(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PUT /api/admin/proxies/default
+pub async fn set_default_connection(
+    State(state): State<AdminState>,
+    Json(payload): Json<DefaultConnectionRequest>,
+) -> impl IntoResponse {
+    match state.service.set_default_connection(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

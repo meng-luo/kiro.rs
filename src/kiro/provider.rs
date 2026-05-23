@@ -39,7 +39,7 @@ const MAX_TOTAL_RETRIES: usize = 9;
 pub struct KiroProvider {
     token_manager: Arc<MultiTokenManager>,
     /// 全局代理配置（用于凭据无自定义代理时的回退）
-    global_proxy: Option<ProxyConfig>,
+    global_proxy: Mutex<Option<ProxyConfig>>,
     /// Client 缓存：key = effective proxy config, value = reqwest::Client
     /// 不同代理配置的凭据使用不同的 Client，共享相同代理的凭据复用 Client
     client_cache: Mutex<HashMap<Option<ProxyConfig>, Client>>,
@@ -97,7 +97,7 @@ impl KiroProvider {
 
         Self {
             token_manager,
-            global_proxy: proxy,
+            global_proxy: Mutex::new(proxy),
             client_cache: Mutex::new(cache),
             tls_backend,
             endpoints,
@@ -112,6 +112,17 @@ impl KiroProvider {
 
     pub fn update_scheduler_config(&self, config: crate::model::config::SchedulerConfig) {
         self.scheduler.update_config(config);
+    }
+
+    pub fn update_global_proxy(&self, proxy: Option<ProxyConfig>) -> anyhow::Result<()> {
+        let client = build_client(proxy.as_ref(), 720, self.tls_backend)?;
+        {
+            let mut cache = self.client_cache.lock();
+            cache.clear();
+            cache.insert(proxy.clone(), client);
+        }
+        *self.global_proxy.lock() = proxy;
+        Ok(())
     }
 
     fn select_scheduler_policy_for_attempt(
@@ -142,7 +153,8 @@ impl KiroProvider {
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
     fn client_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Client> {
-        let effective = credentials.effective_proxy(self.global_proxy.as_ref());
+        let global_proxy = self.global_proxy.lock().clone();
+        let effective = credentials.effective_proxy(global_proxy.as_ref());
         let mut cache = self.client_cache.lock();
         if let Some(client) = cache.get(&effective) {
             return Ok(client.clone());
@@ -343,6 +355,15 @@ impl KiroProvider {
 
             // 401/403 凭据问题
             if matches!(status.as_u16(), 401 | 403) {
+                if Self::is_account_banned(&body) {
+                    let has_available = self.token_manager.report_banned(ctx.id);
+                    if !has_available {
+                        anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
+                    }
+                    last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                    continue;
+                }
+
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
@@ -796,6 +817,41 @@ impl KiroProvider {
                     body
                 );
 
+                if Self::is_account_banned(&body) {
+                    let has_available = self.token_manager.report_banned(ctx.id);
+                    self.record_api_diagnostic(Self::failure_diagnostic(
+                        &request_id,
+                        started_at,
+                        started_instant,
+                        original_model.clone(),
+                        model.clone(),
+                        input_tokens,
+                        &session_hash,
+                        &ctx,
+                        status.as_u16(),
+                        "account_banned",
+                        &body,
+                        None,
+                        attempt + 1,
+                        hedged,
+                    ));
+                    let err = anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body);
+                    if strict_preferred_account {
+                        return Err(err);
+                    }
+                    if !has_available {
+                        anyhow::bail!(
+                            "{} API 请求失败（所有凭据已用尽）: {} {}",
+                            api_type,
+                            status,
+                            body
+                        );
+                    }
+                    last_error = Some(err);
+                    tried_account_ids.insert(ctx.id);
+                    continue;
+                }
+
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
@@ -1041,6 +1097,26 @@ impl KiroProvider {
         lower.contains("suspicious activity")
             || lower.contains("due to suspicious activity")
             || lower.contains("suspicious_activity")
+    }
+
+    fn is_account_banned(body: &str) -> bool {
+        let lower = body.to_lowercase();
+        lower.contains("account banned")
+            || lower.contains("account has been banned")
+            || lower.contains("account suspended")
+            || lower.contains("account has been suspended")
+            || lower.contains("account disabled")
+            || lower.contains("account has been disabled")
+            || lower.contains("account deactivated")
+            || lower.contains("account has been deactivated")
+            || lower.contains("account terminated")
+            || lower.contains("account has been terminated")
+            || lower.contains("user banned")
+            || lower.contains("user suspended")
+            || lower.contains("封号")
+            || lower.contains("封禁")
+            || lower.contains("账号已被禁用")
+            || lower.contains("账户已被禁用")
     }
 
     fn record_api_diagnostic(&self, update: RequestDiagnosticUpdate) {

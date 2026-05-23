@@ -28,6 +28,8 @@ import type {
   ProxyListResponse,
   ProxyListItem,
   ProxyUpsertRequest,
+  DefaultConnection,
+  DefaultConnectionRequest,
   BatchIdsRequest,
   BatchDisabledRequest,
   BatchCredentialUpdateRequest,
@@ -278,6 +280,11 @@ export async function createProxy(payload: ProxyUpsertRequest): Promise<ProxyLis
 
 export async function updateProxy(id: number, payload: ProxyUpsertRequest): Promise<ProxyListItem> {
   const { data } = await api.put<ProxyListItem>(`/proxies/${id}`, payload)
+  return data
+}
+
+export async function setDefaultConnection(payload: DefaultConnectionRequest): Promise<DefaultConnection> {
+  const { data } = await api.put<DefaultConnection>('/proxies/default', payload)
   return data
 }
 

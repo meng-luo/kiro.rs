@@ -163,8 +163,10 @@ interface DashboardProps {
 type AccountStatusFilter = 'all' | 'normal' | 'attention' | 'disabled'
 
 function accountStatusGroup(credential: CredentialStatusItem): Exclude<AccountStatusFilter, 'all'> {
-  if (credential.disabled || credential.dispatchState === 'disabled') return 'disabled'
+  if (credential.accountStatus === 'normal') return 'normal'
+  if (credential.accountStatus === 'disabled' || credential.accountStatus === 'banned' || credential.dispatchState === 'disabled') return 'disabled'
   if (
+    credential.accountStatus === 'rate_limited' ||
     credential.dispatchState !== 'ready' ||
     credential.recent429Count > 0 ||
     credential.recentSuspiciousCount > 0
@@ -181,7 +183,7 @@ function accountStatusFilterLabel(filter: AccountStatusFilter) {
     case 'attention':
       return '需要处理'
     case 'disabled':
-      return '已停用'
+      return '禁用'
     default:
       return '全部'
   }
@@ -189,6 +191,7 @@ function accountStatusFilterLabel(filter: AccountStatusFilter) {
 
 export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
+  const [selectedCredentialLabel, setSelectedCredentialLabel] = useState<string | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [versionDialogOpen, setVersionDialogOpen] = useState(false)
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false)
@@ -336,8 +339,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
-  const handleViewBalance = (id: number) => {
+  const handleViewBalance = (id: number, label: string) => {
     setSelectedCredentialId(id)
+    setSelectedCredentialLabel(label)
     setBalanceDialogOpen(true)
   }
 
@@ -517,19 +521,19 @@ export function Dashboard({ onLogout }: DashboardProps) {
   }
 
   const handleClearAll = async () => {
-    const disabledCredentials = credentials.filter((credential) => credential.disabled)
+    const disabledCredentials = credentials.filter((credential) => credential.accountStatus === 'disabled' || credential.accountStatus === 'banned')
     if (disabledCredentials.length === 0) {
-      toast.error('没有可清除的已停用账号')
+      toast.error('没有可清除的禁用账号')
       return
     }
 
-    if (!confirm(`确定要清除所有 ${disabledCredentials.length} 个已停用账号吗？删除后无法恢复。`)) {
+    if (!confirm(`确定要清除所有 ${disabledCredentials.length} 个禁用账号吗？删除后无法恢复。`)) {
       return
     }
 
     const { successCount, failCount } = await runDeleteIds(disabledCredentials.map((credential) => credential.id))
     if (failCount === 0) {
-      toast.success(`成功清除 ${successCount} 个已停用账号`)
+      toast.success(`成功清除 ${successCount} 个禁用账号`)
     } else {
       toast.warning(`清除完成：成功 ${successCount} 个，失败 ${failCount} 个`)
     }
@@ -885,7 +889,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 disabled={disabledCredentialCount === 0}
               >
                 <Trash2 className="mr-2 h-4 w-4" />
-                清除已停用
+                清除禁用
               </Button>
             </div>
           </CardHeader>
@@ -913,7 +917,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   <option value="all">全部 ({credentials.length})</option>
                   <option value="normal">正常 ({normalCredentialCount})</option>
                   <option value="attention">需要处理 ({attentionCredentialCount})</option>
-                  <option value="disabled">已停用 ({disabledCredentialCount})</option>
+                  <option value="disabled">禁用 ({disabledCredentialCount})</option>
                 </select>
                 <label htmlFor="page-size" className="text-sm text-muted-foreground">每页</label>
                 <select
@@ -992,7 +996,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         )}
       </main>
 
-      <BalanceDialog credentialId={selectedCredentialId} open={balanceDialogOpen} onOpenChange={setBalanceDialogOpen} />
+      <BalanceDialog credentialId={selectedCredentialId} credentialLabel={selectedCredentialLabel} open={balanceDialogOpen} onOpenChange={setBalanceDialogOpen} />
       <AddCredentialDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
       <BatchImportDialog open={batchImportDialogOpen} onOpenChange={setBatchImportDialogOpen} />
       <KamImportDialog open={kamImportDialogOpen} onOpenChange={setKamImportDialogOpen} />

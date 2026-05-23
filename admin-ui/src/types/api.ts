@@ -27,6 +27,7 @@ export interface SystemVersionResponse {
 }
 
 export type SchedulerPolicy = 'stable' | 'canary'
+export type AccountStatus = 'normal' | 'banned' | 'rate_limited' | 'disabled'
 
 export interface SystemOperationJob {
   jobId: string
@@ -58,6 +59,7 @@ export interface AdminSettingsResponse {
   promptCache: PromptCacheConfigResponse
   accountsPageSize: number
   recordsPageSize: number
+  defaultConnection: DefaultConnection
 }
 
 export interface AdminSettingsRequest {
@@ -65,6 +67,18 @@ export interface AdminSettingsRequest {
   redisUrl?: string | null
   accountsPageSize?: number
   recordsPageSize?: number
+}
+
+export interface DefaultConnection {
+  mode: 'direct' | 'proxy' | string
+  proxyId?: number | null
+  proxyName?: string | null
+  proxyUrl?: string | null
+}
+
+export interface DefaultConnectionRequest {
+  mode: 'direct' | 'proxy'
+  proxyId?: number | null
 }
 
 export interface SchedulerModelOverrideConfig {
@@ -139,6 +153,7 @@ export interface CredentialStatusItem {
   schedulerPolicy?: SchedulerPolicy
   refreshFailureCount: number
   disabledReason?: string
+  accountStatus: AccountStatus
   endpoint: string
   dispatchState: 'ready' | 'saturated' | 'cooldown' | 'blocked' | 'disabled'
   currentConcurrent: number
@@ -301,6 +316,7 @@ export interface ProxyListItem {
   city?: string | null
   qualityError?: string | null
   accountCount: number
+  isDefault: boolean
   createdAt: string
   updatedAt: string
 }

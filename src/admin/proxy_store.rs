@@ -67,6 +67,7 @@ pub struct ProxyListItem {
     pub city: Option<String>,
     pub quality_error: Option<String>,
     pub account_count: usize,
+    pub is_default: bool,
     pub created_at: String,
     pub updated_at: String,
 }

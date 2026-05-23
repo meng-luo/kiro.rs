@@ -32,7 +32,7 @@ import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent, Schedu
 
 interface CredentialRowProps {
   credential: CredentialStatusItem
-  onViewBalance: (id: number) => void
+  onViewBalance: (id: number, label: string) => void
   onRefreshBalance?: (id: number) => void
   selected: boolean
   onToggleSelect: () => void
@@ -118,27 +118,38 @@ function statusMeta(credential: CredentialStatusItem): {
   variant: 'success' | 'warning' | 'outline' | 'destructive'
   title: string
 } {
-  if (credential.disabled) {
-    return { text: '已停用', variant: 'destructive', title: '当前账号已停用，不参与调度。' }
+  switch (credential.accountStatus) {
+    case 'normal':
+      break
+    case 'banned':
+      return { text: '封号', variant: 'destructive', title: '检测到上游账号封禁，已自动禁用。' }
+    case 'rate_limited':
+      return {
+        text: '限速',
+        variant: credential.lastRateLimitKind === 'suspicious_activity' ? 'destructive' : 'warning',
+        title: '当前账号刚触发限速，倒计时结束后会自动恢复正常。',
+      }
+    case 'disabled':
+      return { text: '禁用', variant: 'destructive', title: '当前账号已禁用，不参与调度。' }
   }
 
   switch (credential.dispatchState) {
     case 'ready':
-      return { text: '可用', variant: 'success', title: '当前可以继续承接请求。' }
+      return { text: '正常', variant: 'success', title: '当前可以继续承接请求。' }
     case 'saturated':
       return { text: '并发已满', variant: 'warning', title: '当前并发已达到上限。' }
     case 'cooldown':
       return {
-        text: credential.lastRateLimitKind === 'suspicious_activity' ? '风控冷却' : '冷却中',
+        text: credential.lastRateLimitKind === 'suspicious_activity' ? '风控限速' : '限速',
         variant: credential.lastRateLimitKind === 'suspicious_activity' ? 'destructive' : 'outline',
         title: credential.lastRateLimitKind === 'suspicious_activity'
           ? '上游返回风控限频，已进入长冷却。'
-          : '当前账号刚触发限频，冷却结束后会自动恢复。'
+          : '当前账号刚触发限速，倒计时结束后会自动恢复正常。'
       }
     case 'blocked':
       return { text: '本地阻塞', variant: 'warning', title: '本地刷新失败达到阈值，当前不承接新请求。' }
     case 'disabled':
-      return { text: '已停用', variant: 'destructive', title: '当前账号已停用，不参与调度。' }
+      return { text: '禁用', variant: 'destructive', title: '当前账号已禁用，不参与调度。' }
   }
 }
 
@@ -194,7 +205,7 @@ function accountStateLabel(state?: string) {
     case 'blocked':
       return { text: '本地阻塞', title: '开始请求时账号处于本地阻塞。' }
     case 'disabled':
-      return { text: '已停用', title: '开始请求时账号已停用。' }
+      return { text: '已禁用', title: '开始请求时账号已禁用。' }
     default:
       return { text: state || '未知', title: state || '开始请求时的账号状态。' }
   }
@@ -282,6 +293,7 @@ function schedulerPolicyLabel(policy?: SchedulerPolicy) {
 }
 
 function cardTone(credential: CredentialStatusItem) {
+  if (credential.accountStatus === 'banned') return 'border-red-400 bg-red-50/80 dark:bg-red-950/20'
   if (credential.disabled) return 'border-gray-300 bg-gray-50/70 dark:bg-muted/20'
   if (isRiskCooldown(credential)) return riskCooldownTone(credential.cooldownRemainingMs).card
   if (credential.dispatchState === 'blocked' || credential.lastRateLimitKind === 'suspicious_activity') {
@@ -302,18 +314,19 @@ function progressTone(credential: CredentialStatusItem) {
 }
 
 function probeStatusText(credential: CredentialStatusItem) {
-  if (credential.disabled) return '已停用'
+  if (credential.accountStatus === 'banned') return '封号禁用'
+  if (credential.disabled) return '已禁用'
   switch (credential.dispatchState) {
     case 'ready':
       return '可直接测试'
     case 'saturated':
       return '当前繁忙'
     case 'cooldown':
-      return '限频观察中'
+      return '限速倒计时'
     case 'blocked':
       return '待处理'
     case 'disabled':
-      return '已停用'
+      return '已禁用'
   }
 }
 
@@ -323,6 +336,10 @@ function CellText({ title, children, className }: { title?: string; children: st
       {children}
     </div>
   )
+}
+
+function accountLabel(credential: CredentialStatusItem) {
+  return credential.email?.trim() || '未获取邮箱'
 }
 
 export function CredentialRow({
@@ -371,6 +388,7 @@ export function CredentialRow({
   const riskCooldown = isRiskCooldown(credential)
   const cooldownText = credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : '无需等待'
   const riskTone = riskCooldown ? riskCooldownTone(credential.cooldownRemainingMs) : null
+  const label = accountLabel(credential)
 
   useEffect(() => {
     setPriorityValue(String(credential.priority))
@@ -388,9 +406,9 @@ export function CredentialRow({
         title: status.title,
       },
       {
-        label: '冷却剩余',
+        label: '限速剩余',
         value: cooldownText,
-        title: '冷却结束后会自动恢复参与调度。',
+        title: '倒计时结束后会自动恢复正常并参与调度。',
       },
       {
         label: '最近限频',
@@ -597,13 +615,13 @@ export function CredentialRow({
 
   const actionMenu = (
     <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-md border bg-popover p-1 text-sm shadow-lg">
-      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); onViewBalance(credential.id) }}>查看用量</button>
+      <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); onViewBalance(credential.id, label) }}>查看用量</button>
       <button
         className="block w-full rounded px-3 py-2 text-left hover:bg-muted"
         onClick={() => {
           setActionsOpen(false)
           if (onRefreshBalance) onRefreshBalance(credential.id)
-          else onViewBalance(credential.id)
+          else onViewBalance(credential.id, label)
         }}
       >
         刷新用量
@@ -627,8 +645,8 @@ export function CredentialRow({
               <Checkbox checked={selected} onCheckedChange={onToggleSelect} />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="truncate font-medium" title={credential.email || `账号 #${credential.id}`}>
-                    {credential.email || `账号 #${credential.id}`}
+                  <span className="truncate font-medium" title={label}>
+                    {label}
                   </span>
                   <Badge variant="outline" className="max-w-[140px] truncate" title={subscriptionLabel(credential, visibleBalance)}>
                     {loadingBalance ? '查询中...' : subscriptionLabel(credential, visibleBalance)}
@@ -720,8 +738,8 @@ export function CredentialRow({
         </td>
         <td className="max-w-[220px] px-3 py-3">
           <div className="min-w-0 space-y-1">
-            <CellText className="font-medium" title={credential.email || `账号 #${credential.id}`}>
-              {credential.email || `账号 #${credential.id}`}
+            <CellText className="font-medium" title={label}>
+              {label}
             </CellText>
             <div className="flex items-center gap-2 overflow-hidden">
               {credential.isCurrent && <Badge variant="success" className="whitespace-nowrap">当前</Badge>}
@@ -775,7 +793,7 @@ export function CredentialRow({
               <CellText>无</CellText>
             )}
             {credential.cooldownRemainingMs ? (
-              <CellText className={cn('text-xs', riskTone?.text ?? 'text-muted-foreground')} title="冷却结束后会自动恢复">
+              <CellText className={cn('text-xs', riskTone?.text ?? 'text-muted-foreground')} title="倒计时结束后会自动恢复正常">
                 {riskCooldown ? `剩余 ${cooldownText}` : cooldownText}
               </CellText>
             ) : null}
@@ -801,7 +819,7 @@ export function CredentialRow({
             <Button size="icon" variant="ghost" onClick={() => setShowTestDialog(true)} title="测试这个账号此刻是否真的还能调用">
               <PlugZap className="h-4 w-4" />
             </Button>
-            <Button size="icon" variant="ghost" onClick={() => onViewBalance(credential.id)} title="查看用量">
+            <Button size="icon" variant="ghost" onClick={() => onViewBalance(credential.id, label)} title="查看用量">
               <Wallet className="h-4 w-4" />
             </Button>
             <Button size="icon" variant="ghost" onClick={() => setShowSettingsDialog(true)} title="修改账号设置">
@@ -832,8 +850,8 @@ export function CredentialRow({
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>账号设置</DialogTitle>
-            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `账号 #${credential.id}`} · ${credential.endpoint}`}>
-              {credential.email || `账号 #${credential.id}`} · {credential.endpoint}
+            <DialogDescription className="truncate whitespace-nowrap" title={`${label} · ${credential.endpoint}`}>
+              {label} · {credential.endpoint}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 md:grid-cols-2">
@@ -914,8 +932,8 @@ export function CredentialRow({
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>测试接入</DialogTitle>
-            <DialogDescription className="truncate whitespace-nowrap" title={`${credential.email || `账号 #${credential.id}`} · ${credential.endpoint}`}>
-              {credential.email || `账号 #${credential.id}`} · {credential.endpoint}
+            <DialogDescription className="truncate whitespace-nowrap" title={`${label} · ${credential.endpoint}`}>
+              {label} · {credential.endpoint}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -926,7 +944,7 @@ export function CredentialRow({
                     <Activity className="h-5 w-5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="truncate font-medium">{credential.email || `账号 #${credential.id}`}</div>
+                    <div className="truncate font-medium">{label}</div>
                     <div className="mt-1 flex gap-2 overflow-hidden text-xs text-muted-foreground">
                       <CellText>{authMethod?.text ?? '账号接入'}</CellText>
                       <CellText>{credential.endpoint}</CellText>
