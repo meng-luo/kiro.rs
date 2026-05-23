@@ -120,6 +120,11 @@ pub struct KiroCredentials {
     #[serde(default)]
     pub subscription_title: Option<String>,
 
+    /// 当前账号可用模型列表（启动或余额查询时刷新）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub available_models: Option<Vec<String>>,
+
     /// 凭据级代理 URL（可选）
     /// 支持 http/https/socks5 协议
     /// 特殊值 "direct" 表示显式不使用代理（即使全局配置了代理）
@@ -296,19 +301,19 @@ impl KiroCredentials {
         }
     }
 
-    /// 检查凭据是否支持 Opus 模型
-    ///
-    /// Free 账号不支持 Opus 模型，需要 PRO 或更高等级订阅
-    pub fn supports_opus(&self) -> bool {
-        match &self.subscription_title {
-            Some(title) => {
-                let title_upper = title.to_uppercase();
-                // 如果包含 FREE，则不支持 Opus
-                !title_upper.contains("FREE")
-            }
-            // 如果还没有获取订阅信息，暂时允许（首次使用时会获取）
-            None => true,
+    pub fn supports_model(&self, model: &str) -> bool {
+        let requested = normalize_model_for_capability(model);
+        if let Some(available_models) = self.available_models.as_ref() {
+            return available_models
+                .iter()
+                .map(|m| normalize_model_for_capability(m))
+                .any(|available| available == requested);
         }
+
+        models_for_subscription(self.subscription_title.as_deref())
+            .iter()
+            .map(|m| normalize_model_for_capability(m))
+            .any(|available| available == requested)
     }
 
     /// 检查是否为 API Key 凭据
@@ -322,6 +327,58 @@ impl KiroCredentials {
                 .map(|m| m.eq_ignore_ascii_case("api_key") || m.eq_ignore_ascii_case("apikey"))
                 .unwrap_or(false)
     }
+}
+
+pub fn normalize_model_for_capability(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    let lower = lower
+        .strip_suffix("-thinking")
+        .or_else(|| lower.strip_suffix("-think"))
+        .unwrap_or(&lower);
+
+    if lower.contains("opus") {
+        if lower.contains("4-7") || lower.contains("4.7") {
+            return "claude-opus-4.7".to_string();
+        }
+        if lower.contains("4-6") || lower.contains("4.6") {
+            return "claude-opus-4.6".to_string();
+        }
+        if lower.contains("4-5") || lower.contains("4.5") {
+            return "claude-opus-4.5".to_string();
+        }
+    } else if lower.contains("sonnet") {
+        if lower.contains("4-6") || lower.contains("4.6") {
+            return "claude-sonnet-4.6".to_string();
+        }
+        if lower.contains("4-5") || lower.contains("4.5") {
+            return "claude-sonnet-4.5".to_string();
+        }
+    } else if lower.contains("haiku") {
+        return "claude-haiku-4.5".to_string();
+    }
+
+    lower.to_string()
+}
+
+pub fn models_for_subscription(subscription_title: Option<&str>) -> Vec<String> {
+    let mut models = vec![
+        "claude-sonnet-4.6".to_string(),
+        "claude-sonnet-4.5".to_string(),
+        "claude-haiku-4.5".to_string(),
+    ];
+
+    let supports_opus = subscription_title
+        .map(|title| !title.to_ascii_uppercase().contains("FREE"))
+        .unwrap_or(false);
+    if supports_opus {
+        models.extend([
+            "claude-opus-4.7".to_string(),
+            "claude-opus-4.6".to_string(),
+            "claude-opus-4.5".to_string(),
+        ]);
+    }
+
+    models
 }
 
 #[cfg(test)]
@@ -389,6 +446,7 @@ mod tests {
             machine_id: None,
             email: None,
             subscription_title: None,
+            available_models: None,
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
@@ -511,6 +569,7 @@ mod tests {
             machine_id: None,
             email: None,
             subscription_title: None,
+            available_models: None,
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
@@ -546,6 +605,7 @@ mod tests {
             machine_id: None,
             email: None,
             subscription_title: None,
+            available_models: None,
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
@@ -664,6 +724,7 @@ mod tests {
             machine_id: Some("c".repeat(64)),
             email: None,
             subscription_title: None,
+            available_models: None,
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
@@ -683,6 +744,23 @@ mod tests {
         assert_eq!(parsed.priority, original.priority);
         assert_eq!(parsed.region, original.region);
         assert_eq!(parsed.machine_id, original.machine_id);
+    }
+
+    #[test]
+    fn test_unknown_subscription_does_not_support_opus() {
+        let creds = KiroCredentials::default();
+
+        assert!(!creds.supports_model("claude-opus-4-7"));
+        assert!(creds.supports_model("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_available_models_are_used_for_capability_check() {
+        let mut creds = KiroCredentials::default();
+        creds.available_models = Some(vec!["claude-opus-4.7".to_string()]);
+
+        assert!(creds.supports_model("claude-opus-4-7-thinking"));
+        assert!(!creds.supports_model("claude-sonnet-4-6"));
     }
 
     // ============ auth_region / api_region 字段测试 ============

@@ -116,6 +116,8 @@ pub struct CredentialStatusItem {
     pub email: Option<String>,
     /// 订阅等级
     pub subscription_title: Option<String>,
+    /// 当前账号可用模型列表
+    pub available_models: Option<Vec<String>>,
     /// 最近缓存的余额信息
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_balance: Option<CachedBalanceStatus>,

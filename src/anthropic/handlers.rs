@@ -852,14 +852,14 @@ async fn handle_non_stream_request(
     (StatusCode::OK, Json(response_body)).into_response()
 }
 
-/// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
+/// 检测模型名是否包含 thinking/think 后缀，若包含则覆写 thinking 配置
 ///
 /// - Opus 4.6：覆写为 adaptive 类型
 /// - 其他模型：覆写为 enabled 类型
 /// - budget_tokens 固定为 20000
 fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
     let model_lower = payload.model.to_lowercase();
-    if !model_lower.contains("thinking") {
+    if !is_thinking_model_alias(&model_lower) {
         return;
     }
 
@@ -883,6 +883,44 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
         });
+    }
+}
+
+fn is_thinking_model_alias(model: &str) -> bool {
+    model.ends_with("-thinking") || model.ends_with("-think")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anthropic::types::Message;
+
+    fn request_with_model(model: &str) -> MessagesRequest {
+        MessagesRequest {
+            model: model.to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: serde_json::json!("hello"),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_think_suffix_enables_thinking() {
+        let mut payload = request_with_model("claude-sonnet-4-6-think");
+        override_thinking_from_model_name(&mut payload);
+
+        let thinking = payload.thinking.expect("thinking should be enabled");
+        assert_eq!(thinking.thinking_type, "enabled");
+        assert_eq!(thinking.budget_tokens, 20000);
     }
 }
 

@@ -972,6 +972,43 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_think_suffix_sonnet_4_6() {
+        let result = map_model("claude-sonnet-4-6-think");
+        assert_eq!(result, Some("claude-sonnet-4.6".to_string()));
+    }
+
+    #[test]
+    fn test_convert_request_normalizes_sonnet_4_6_alias() {
+        use super::super::types::Message as AnthropicMessage;
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-6-think".to_string(),
+            max_tokens: 1024,
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hello"),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let result = convert_request(&req).expect("request should convert");
+        assert_eq!(
+            result
+                .conversation_state
+                .current_message
+                .user_input_message
+                .model_id,
+            "claude-sonnet-4.6"
+        );
+    }
+
+    #[test]
     fn test_map_model_thinking_suffix_opus_4_5() {
         // thinking 后缀不应影响 opus 4.5 模型映射
         let result = map_model("claude-opus-4-5-20251101-thinking");

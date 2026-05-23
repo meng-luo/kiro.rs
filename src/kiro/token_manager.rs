@@ -25,6 +25,7 @@ use crate::kiro::diagnostics::{
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 pub use crate::kiro::model::credentials::SchedulerPolicy;
+use crate::kiro::model::credentials::models_for_subscription;
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -602,6 +603,8 @@ pub struct CredentialEntrySnapshot {
     pub last_soft_fallback_at: Option<String>,
     /// 订阅等级
     pub subscription_title: Option<String>,
+    /// 当前账号可用模型列表
+    pub available_models: Option<Vec<String>>,
 }
 
 /// 凭据管理器状态快照
@@ -907,7 +910,7 @@ impl MultiTokenManager {
         let empty_tried = HashSet::new();
         entries
             .iter()
-            .filter(|e| self.entry_schedulable(e, false, &empty_tried))
+            .filter(|e| self.entry_schedulable(e, None, &empty_tried))
             .count()
     }
 
@@ -935,13 +938,10 @@ impl MultiTokenManager {
         tried_account_ids: &HashSet<u64>,
     ) -> u32 {
         let entries = self.entries.lock();
-        let is_opus = model
-            .map(|m| m.to_lowercase().contains("opus"))
-            .unwrap_or(false);
         entries
             .iter()
             .filter(|e| self.entry_policy_matches(e, scheduler_policy))
-            .filter(|e| self.entry_schedulable(e, is_opus, tried_account_ids))
+            .filter(|e| self.entry_schedulable(e, model, tried_account_ids))
             .map(|e| e.max_concurrent.saturating_sub(e.inflight))
             .sum()
     }
@@ -965,12 +965,7 @@ impl MultiTokenManager {
         self.gc_sticky_bindings();
         let entries = self.entries.lock();
 
-        // 检查是否是 opus 模型
-        let is_opus = options
-            .model
-            .as_deref()
-            .map(|m| m.to_lowercase().contains("opus"))
-            .unwrap_or(false);
+        let model = options.model.as_deref();
 
         if let Some(preferred_account_id) = options.preferred_account_id {
             if options.runtime_probe {
@@ -978,7 +973,7 @@ impl MultiTokenManager {
                     e.id == preferred_account_id
                         && self.entry_policy_matches(e, options.scheduler_policy)
                         && !options.tried_account_ids.contains(&e.id)
-                        && (!is_opus || e.credentials.supports_opus())
+                        && self.entry_supports_model(e, model)
                 }) {
                     return Some(SelectionResult {
                         id: entry.id,
@@ -997,7 +992,7 @@ impl MultiTokenManager {
         let available: Vec<_> = entries
             .iter()
             .filter(|e| {
-                if !self.entry_schedulable(e, is_opus, &options.tried_account_ids) {
+                if !self.entry_schedulable(e, model, &options.tried_account_ids) {
                     return false;
                 }
                 self.entry_policy_matches(e, options.scheduler_policy)
@@ -1061,7 +1056,7 @@ impl MultiTokenManager {
 
         self.pick_soft_fallback_entry(
             &entries,
-            is_opus,
+            model,
             &options.tried_account_ids,
             options.scheduler_policy,
         )
@@ -1080,7 +1075,7 @@ impl MultiTokenManager {
     fn entry_schedulable(
         &self,
         entry: &CredentialEntry,
-        is_opus: bool,
+        model: Option<&str>,
         tried_account_ids: &HashSet<u64>,
     ) -> bool {
         if entry.disabled || tried_account_ids.contains(&entry.id) {
@@ -1089,7 +1084,7 @@ impl MultiTokenManager {
         if entry.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
             return false;
         }
-        if is_opus && !entry.credentials.supports_opus() {
+        if !self.entry_supports_model(entry, model) {
             return false;
         }
         if entry
@@ -1146,7 +1141,7 @@ impl MultiTokenManager {
     fn pick_soft_fallback_entry(
         &self,
         entries: &[CredentialEntry],
-        is_opus: bool,
+        model: Option<&str>,
         tried_account_ids: &HashSet<u64>,
         scheduler_policy: Option<SchedulerPolicy>,
     ) -> Option<SelectionResult> {
@@ -1154,7 +1149,7 @@ impl MultiTokenManager {
         let normal_group: Vec<_> = entries
             .iter()
             .filter(|entry| self.entry_policy_matches(entry, scheduler_policy))
-            .filter(|entry| self.soft_fallback_eligible(entry, is_opus, tried_account_ids, now))
+            .filter(|entry| self.soft_fallback_eligible(entry, model, tried_account_ids, now))
             .collect();
 
         if let Some((id, credentials)) = self.pick_round_robin_entry(&normal_group) {
@@ -1174,7 +1169,7 @@ impl MultiTokenManager {
     fn soft_fallback_eligible(
         &self,
         entry: &CredentialEntry,
-        is_opus: bool,
+        model: Option<&str>,
         tried_account_ids: &HashSet<u64>,
         now: DateTime<Utc>,
     ) -> bool {
@@ -1184,7 +1179,7 @@ impl MultiTokenManager {
         if entry.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
             return false;
         }
-        if is_opus && !entry.credentials.supports_opus() {
+        if !self.entry_supports_model(entry, model) {
             return false;
         }
         if entry.inflight >= entry.max_concurrent {
@@ -1197,6 +1192,12 @@ impl MultiTokenManager {
             Some(RateLimitKind::Normal429) => true,
             _ => false,
         }
+    }
+
+    fn entry_supports_model(&self, entry: &CredentialEntry, model: Option<&str>) -> bool {
+        model
+            .map(|model| entry.credentials.supports_model(model))
+            .unwrap_or(true)
     }
 
     fn gc_sticky_bindings(&self) {
@@ -1293,11 +1294,7 @@ impl MultiTokenManager {
                                 && self.entry_policy_matches(e, options.scheduler_policy)
                                 && self.entry_schedulable(
                                     e,
-                                    options
-                                        .model
-                                        .as_deref()
-                                        .map(|m| m.to_lowercase().contains("opus"))
-                                        .unwrap_or(false),
+                                    options.model.as_deref(),
                                     &options.tried_account_ids,
                                 )
                         })
@@ -1352,7 +1349,7 @@ impl MultiTokenManager {
                         let schedulable_count = entries
                             .iter()
                             .filter(|e| self.entry_policy_matches(e, options.scheduler_policy))
-                            .filter(|e| self.entry_schedulable(e, false, &empty_tried))
+                            .filter(|e| self.entry_schedulable(e, None, &empty_tried))
                             .count();
                         anyhow::bail!(
                             "当前没有可直接调度的凭据（启用: {}/{}, 可调度: {}，可能全部处于冷却、阻塞、并发饱和、模型不兼容或本次请求已试过）",
@@ -2156,7 +2153,7 @@ impl MultiTokenManager {
         let enabled_count = entries.iter().filter(|e| !e.disabled).count();
         let schedulable_count = entries
             .iter()
-            .filter(|e| self.entry_schedulable(e, false, &empty_tried))
+            .filter(|e| self.entry_schedulable(e, None, &empty_tried))
             .count();
 
         ManagerSnapshot {
@@ -2246,12 +2243,13 @@ impl MultiTokenManager {
                     dispatch_path: e.last_dispatch_path.map(|path| path.to_string()),
                     soft_fallback_eligible: self.soft_fallback_eligible(
                         e,
-                        false,
+                        None,
                         &HashSet::new(),
                         now,
                     ),
                     last_soft_fallback_at: e.last_soft_fallback_at.clone(),
                     subscription_title: e.credentials.subscription_title.clone(),
+                    available_models: e.credentials.available_models.clone(),
                 })
                 .collect(),
             current_id,
@@ -2493,37 +2491,74 @@ impl MultiTokenManager {
         let usage_limits =
             get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
 
-        // 更新订阅等级到凭据（仅在发生变化时持久化）
-        if let Some(subscription_title) = usage_limits.subscription_title() {
-            let changed = {
-                let mut entries = self.entries.lock();
-                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                    let old_title = entry.credentials.subscription_title.clone();
-                    if old_title.as_deref() != Some(subscription_title) {
-                        entry.credentials.subscription_title = Some(subscription_title.to_string());
-                        tracing::info!(
-                            "凭据 #{} 订阅等级已更新: {:?} -> {}",
-                            id,
-                            old_title,
-                            subscription_title
-                        );
-                        true
-                    } else {
-                        false
-                    }
+        self.update_account_model_capabilities(id, usage_limits.subscription_title());
+
+        Ok(usage_limits)
+    }
+
+    pub async fn warmup_account_model_capabilities(&self) {
+        let ids: Vec<u64> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|entry| !entry.disabled)
+                .map(|entry| entry.id)
+                .collect()
+        };
+
+        if ids.is_empty() {
+            return;
+        }
+
+        tracing::info!("开始预热 {} 个账号的模型能力", ids.len());
+        let mut success_count = 0usize;
+        for id in ids {
+            match self.get_usage_limits_for(id).await {
+                Ok(_) => success_count += 1,
+                Err(err) => tracing::warn!("预热凭据 #{} 模型能力失败: {}", id, err),
+            }
+        }
+        tracing::info!(
+            "账号模型能力预热完成: {}/{} 成功",
+            success_count,
+            self.available_count()
+        );
+    }
+
+    fn update_account_model_capabilities(&self, id: u64, subscription_title: Option<&str>) {
+        let available_models = models_for_subscription(subscription_title);
+        let changed = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                let new_title = subscription_title.map(str::to_string);
+                let old_title = entry.credentials.subscription_title.clone();
+                let title_changed = old_title != new_title;
+                let models_changed =
+                    entry.credentials.available_models.as_ref() != Some(&available_models);
+
+                if title_changed || models_changed {
+                    entry.credentials.subscription_title = new_title.clone();
+                    entry.credentials.available_models = Some(available_models.clone());
+                    tracing::info!(
+                        "凭据 #{} 模型能力已更新: subscription={:?}, models={:?}",
+                        id,
+                        new_title,
+                        available_models
+                    );
+                    true
                 } else {
                     false
                 }
-            };
+            } else {
+                false
+            }
+        };
 
-            if changed {
-                if let Err(e) = self.persist_credentials() {
-                    tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
-                }
+        if changed {
+            if let Err(e) = self.persist_credentials() {
+                tracing::warn!("账号模型能力更新后持久化失败（不影响本次请求）: {}", e);
             }
         }
-
-        Ok(usage_limits)
     }
 
     /// 添加新凭据（Admin API）
@@ -3302,6 +3337,7 @@ mod tests {
         let mut cred2 = KiroCredentials::default();
         cred2.access_token = Some("t2".to_string());
         cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred2.available_models = Some(vec!["claude-opus-4.7".to_string()]);
 
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();

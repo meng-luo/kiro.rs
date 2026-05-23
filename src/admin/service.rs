@@ -239,6 +239,7 @@ impl AdminService {
                     masked_api_key: entry.masked_api_key,
                     email: entry.email,
                     subscription_title: entry.subscription_title,
+                    available_models: entry.available_models,
                     cached_balance,
                     success_count: entry.success_count,
                     last_used_at: entry.last_used_at.clone(),
@@ -634,6 +635,7 @@ impl AdminService {
             machine_id: req.machine_id,
             email: req.email,
             subscription_title: None, // 将在首次获取使用额度时自动更新
+            available_models: None,
             proxy_url: req.proxy_url,
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,

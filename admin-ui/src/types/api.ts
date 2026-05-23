@@ -126,6 +126,7 @@ export interface CredentialStatusItem {
   apiKeyHash?: string
   maskedApiKey?: string
   subscriptionTitle?: string | null
+  availableModels?: string[] | null
   cachedBalance?: CachedBalanceStatus | null
   successCount: number
   lastUsedAt: string | null

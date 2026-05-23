@@ -160,6 +160,33 @@ interface DashboardProps {
   onLogout: () => void
 }
 
+type AccountStatusFilter = 'all' | 'normal' | 'attention' | 'disabled'
+
+function accountStatusGroup(credential: CredentialStatusItem): Exclude<AccountStatusFilter, 'all'> {
+  if (credential.disabled || credential.dispatchState === 'disabled') return 'disabled'
+  if (
+    credential.dispatchState !== 'ready' ||
+    credential.recent429Count > 0 ||
+    credential.recentSuspiciousCount > 0
+  ) {
+    return 'attention'
+  }
+  return 'normal'
+}
+
+function accountStatusFilterLabel(filter: AccountStatusFilter) {
+  switch (filter) {
+    case 'normal':
+      return '正常'
+    case 'attention':
+      return '需要处理'
+    case 'disabled':
+      return '已停用'
+    default:
+      return '全部'
+  }
+}
+
 export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
@@ -184,6 +211,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [activeView, setActiveView] = useState<'accounts' | 'diagnostics'>('accounts')
+  const [statusFilter, setStatusFilter] = useState<AccountStatusFilter>('all')
   const [pageSize, setPageSize] = useState(20)
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -214,15 +242,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const versionActionsBusy = isUpdatingSystem || isRollingBackSystem || isRestartingSystem
 
   const credentials = data?.credentials || []
-  const totalPages = Math.max(1, Math.ceil(credentials.length / pageSize))
+  const filteredCredentials = credentials.filter((credential) => statusFilter === 'all' || accountStatusGroup(credential) === statusFilter)
+  const totalPages = Math.max(1, Math.ceil(filteredCredentials.length / pageSize))
   const startIndex = (currentPage - 1) * pageSize
-  const endIndex = Math.min(startIndex + pageSize, credentials.length)
-  const currentCredentials = credentials.slice(startIndex, endIndex)
-  const disabledCredentialCount = credentials.filter((credential) => credential.disabled).length
+  const endIndex = Math.min(startIndex + pageSize, filteredCredentials.length)
+  const currentCredentials = filteredCredentials.slice(startIndex, endIndex)
+  const normalCredentialCount = credentials.filter((credential) => accountStatusGroup(credential) === 'normal').length
+  const attentionCredentialCount = credentials.filter((credential) => accountStatusGroup(credential) === 'attention').length
+  const disabledCredentialCount = credentials.filter((credential) => accountStatusGroup(credential) === 'disabled').length
   const enabledCredentialCount = data?.enabledCount ?? credentials.filter((credential) => !credential.disabled).length
   const schedulableCredentialCount = data?.schedulableCount ?? data?.available ?? credentials.filter((credential) => credential.dispatchState === 'ready').length
-  const cooldownCredentialCount = credentials.filter((credential) => credential.dispatchState === 'cooldown').length
-  const saturatedCredentialCount = credentials.filter((credential) => credential.dispatchState === 'saturated').length
+  const cooldownCredentialCount = credentials.filter((credential) => !credential.disabled && credential.dispatchState === 'cooldown').length
+  const saturatedCredentialCount = credentials.filter((credential) => !credential.disabled && credential.dispatchState === 'saturated').length
   const blockedCredentialCount = credentials.filter((credential) => credential.dispatchState === 'blocked' && !credential.disabled).length
   const currentPageIds = currentCredentials.map((credential) => credential.id)
   const isCurrentPageAllSelected = currentPageIds.length > 0 && currentPageIds.every((id) => selectedIds.has(id))
@@ -862,10 +893,29 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between gap-3">
               <div className="truncate text-sm text-muted-foreground">
-                {credentials.length === 0 ? '暂无账号' : `显示 ${credentials.length === 0 ? 0 : startIndex + 1}-${endIndex} / ${credentials.length}`}
+                {credentials.length === 0
+                  ? '暂无账号'
+                  : filteredCredentials.length === 0
+                    ? `当前筛选无账号，共 ${credentials.length} 个账号`
+                    : `显示 ${startIndex + 1}-${endIndex} / ${filteredCredentials.length}（共 ${credentials.length}）`}
               </div>
-              <div className="flex items-center gap-2 whitespace-nowrap">
-                <label htmlFor="page-size" className="text-sm text-muted-foreground">每页显示</label>
+              <div className="flex flex-wrap items-center justify-end gap-2 whitespace-nowrap">
+                <label htmlFor="status-filter" className="text-sm text-muted-foreground">状态</label>
+                <select
+                  id="status-filter"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={statusFilter}
+                  onChange={(e) => {
+                    setStatusFilter(e.target.value as AccountStatusFilter)
+                    setCurrentPage(1)
+                  }}
+                >
+                  <option value="all">全部 ({credentials.length})</option>
+                  <option value="normal">正常 ({normalCredentialCount})</option>
+                  <option value="attention">需要处理 ({attentionCredentialCount})</option>
+                  <option value="disabled">已停用 ({disabledCredentialCount})</option>
+                </select>
+                <label htmlFor="page-size" className="text-sm text-muted-foreground">每页</label>
                 <select
                   id="page-size"
                   className="h-9 rounded-md border border-input bg-background px-3 text-sm"
@@ -884,6 +934,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
             {credentials.length === 0 ? (
               <div className="rounded-md border py-10 text-center text-muted-foreground">暂无账号</div>
+            ) : filteredCredentials.length === 0 ? (
+              <div className="rounded-md border py-10 text-center text-muted-foreground">当前没有{accountStatusFilterLabel(statusFilter)}账号</div>
             ) : (
               <div className="overflow-x-auto rounded-md border">
                 <table className="min-w-[1180px] w-full border-collapse">
@@ -922,7 +974,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
             {totalPages > 1 ? (
               <div className="flex items-center justify-between gap-4">
                 <div className="truncate text-sm text-muted-foreground">
-                  第 {currentPage} / {totalPages} 页，共 {credentials.length} 个账号
+                  第 {currentPage} / {totalPages} 页，共 {filteredCredentials.length} 个账号
                 </div>
                 <div className="flex items-center gap-2 whitespace-nowrap">
                   <Button variant="outline" size="sm" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1}>
