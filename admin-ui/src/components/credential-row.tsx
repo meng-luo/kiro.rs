@@ -676,9 +676,9 @@ export function CredentialRow({
   return (
     <>
       {variant === 'card' ? (
-        <div className={cn('rounded-md border p-4', cardTone(credential), selected && 'ring-2 ring-primary/30')}>
-          <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex min-w-0 flex-1 items-center gap-4">
+        <div className={cn('flex h-full flex-col rounded-md border p-4', cardTone(credential), selected && 'ring-2 ring-primary/30')}>
+          <div className="mb-3 flex flex-col gap-3">
+            <div className="flex min-w-0 flex-1 items-start gap-3">
               <Checkbox checked={selected} onCheckedChange={onToggleSelect} />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
@@ -694,11 +694,11 @@ export function CredentialRow({
                   {credential.endpoint} · 最近使用：{formatLastUsed(credential.lastUsedAt)}
                 </div>
               </div>
-              <Badge variant={riskCooldown ? 'outline' : status.variant} title={status.title} className={cn('shrink-0', riskTone?.badge)}>
+              <Badge variant={riskCooldown ? 'outline' : status.variant} title={status.title} className={cn('shrink-0 whitespace-nowrap', riskTone?.badge)}>
                 {riskCooldown ? `${status.text} ${cooldownText}` : status.text}
               </Badge>
             </div>
-            <div className="flex items-center justify-end gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <Button size="icon" variant="outline" onClick={handleRefreshModels} disabled={refreshModels.isPending} title="刷新支持模型">
                 {refreshModels.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
               </Button>
@@ -716,7 +716,7 @@ export function CredentialRow({
             </div>
           </div>
 
-          <div className="grid gap-3 text-sm md:grid-cols-3">
+          <div className="grid flex-1 gap-3 text-sm sm:grid-cols-2">
             <div>
               <div className="mb-1 text-xs text-muted-foreground">已用</div>
               <div className={cn('font-medium', visibleBalance ? 'text-blue-600' : 'text-muted-foreground')}>
@@ -729,8 +729,15 @@ export function CredentialRow({
               {visibleBalance ? (
                 <div className="mt-1 text-xs text-muted-foreground">{balanceFreshText(credential, balance)}</div>
               ) : null}
+              <div className="mt-2 grid gap-2 text-xs text-muted-foreground">
+                <span className="truncate" title={authMethod?.title ?? ''}>接入类型：{authMethod?.text ?? balanceLabel(credential)}</span>
+                <span className="truncate" title={`请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`}>
+                  请求策略：{schedulerPolicyLabel(credential.schedulerPolicy)}
+                </span>
+                <span className="truncate" title={connectionLabel(credential)}>连接：{connectionLabel(credential)}</span>
+              </div>
             </div>
-            <div className="md:col-span-2">
+            <div>
               <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 <span>并发 {credential.currentConcurrent}/{credential.maxConcurrent}</span>
                 {rateLimit ? (
@@ -740,7 +747,7 @@ export function CredentialRow({
                 ) : null}
               </div>
               <Progress value={progressValue} className={progressTone(credential)} />
-              <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-4">
+              <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
                 <span className="truncate" title={credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个活跃会话`}>
                   粘性会话：{credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个`}
                 </span>
@@ -754,33 +761,28 @@ export function CredentialRow({
                 <span className="truncate" title={credential.softFallbackEligible ? '普通限频冷却账号可作为软回退。' : '当前不满足软回退条件。'}>
                   软回退：{credential.softFallbackEligible ? '可用' : '不可用'}
                 </span>
-                <span className="truncate" title={authMethod?.title ?? ''}>接入类型：{authMethod?.text ?? balanceLabel(credential)}</span>
-                <span className="truncate" title={`请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`}>
-                  请求策略：{schedulerPolicyLabel(credential.schedulerPolicy)}
-                </span>
-                <span className="truncate" title={connectionLabel(credential)}>连接：{connectionLabel(credential)}</span>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2" title={modelsLabel(credential)}>
-                <span className="text-xs text-muted-foreground">模型</span>
-                {credential.availableModels ? (
-                  modelCount > 0 ? (
-                    <>
-                      {accountModels.map((model) => (
-                        <Badge key={model} variant="outline" className="max-w-[180px] truncate">
-                          {model}
-                        </Badge>
-                      ))}
-                      {modelCount > accountModels.length ? (
-                        <Badge variant="secondary">+{modelCount - accountModels.length}</Badge>
-                      ) : null}
-                    </>
-                  ) : (
-                    <Badge variant="outline">无可用模型</Badge>
-                  )
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 border-t pt-3 sm:col-span-2" title={modelsLabel(credential)}>
+              <span className="mr-1 text-xs text-muted-foreground">模型</span>
+              {credential.availableModels ? (
+                modelCount > 0 ? (
+                  <>
+                    {accountModels.map((model) => (
+                      <Badge key={model} variant="outline" className="max-w-[140px] truncate">
+                        {model}
+                      </Badge>
+                    ))}
+                    {modelCount > accountModels.length ? (
+                      <Badge variant="secondary">+{modelCount - accountModels.length}</Badge>
+                    ) : null}
+                  </>
                 ) : (
-                  <Badge variant="outline">未刷新</Badge>
-                )}
-              </div>
+                  <Badge variant="outline">无可用模型</Badge>
+                )
+              ) : (
+                <Badge variant="outline">未刷新</Badge>
+              )}
             </div>
           </div>
         </div>

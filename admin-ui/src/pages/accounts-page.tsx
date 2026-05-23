@@ -43,6 +43,7 @@ export function AccountsPage() {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [filter, setFilter] = useState<'all' | 'normal' | 'alert' | 'banned' | 'rate_limited' | 'disabled'>('all')
+  const [modelFilter, setModelFilter] = useState('')
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkMaxConcurrent, setBulkMaxConcurrent] = useState('')
   const [bulkSchedulerPolicy, setBulkSchedulerPolicy] = useState<'' | SchedulerPolicy>('')
@@ -57,15 +58,24 @@ export function AccountsPage() {
   const adminSettings = useAdminSettings()
   const setAdminSettings = useSetAdminSettings()
 
+  const allCredentials = data?.credentials ?? []
+  const modelOptions = useMemo(() => {
+    const models = new Set<string>()
+    allCredentials.forEach((credential) => {
+      credential.availableModels?.forEach((model) => models.add(model))
+    })
+    return Array.from(models).sort((a, b) => a.localeCompare(b))
+  }, [allCredentials])
   const credentials = useMemo(() => {
-    const list = data?.credentials ?? []
+    let list = data?.credentials ?? []
+    if (modelFilter) list = list.filter((item) => item.availableModels?.includes(modelFilter))
     if (filter === 'normal') return list.filter((item) => item.accountStatus === 'normal' && !item.disabled && item.dispatchState === 'ready')
     if (filter === 'banned') return list.filter((item) => item.accountStatus === 'banned')
     if (filter === 'rate_limited') return list.filter((item) => item.accountStatus === 'rate_limited')
     if (filter === 'disabled') return list.filter((item) => item.accountStatus === 'disabled')
     if (filter === 'alert') return list.filter((item) => item.disabled || item.dispatchState !== 'ready')
     return list
-  }, [data?.credentials, filter])
+  }, [data?.credentials, filter, modelFilter])
   const totalPages = Math.max(1, Math.ceil(credentials.length / pageSize))
   const startIndex = (currentPage - 1) * pageSize
   const endIndex = Math.min(startIndex + pageSize, credentials.length)
@@ -77,6 +87,13 @@ export function AccountsPage() {
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages)
   }, [currentPage, totalPages])
+
+  useEffect(() => {
+    if (modelFilter && !modelOptions.includes(modelFilter)) {
+      setModelFilter('')
+      setCurrentPage(1)
+    }
+  }, [modelFilter, modelOptions])
 
   useEffect(() => {
     const nextPageSize = adminSettings.data?.accountsPageSize
@@ -243,7 +260,6 @@ export function AccountsPage() {
   if (isLoading) return <div className="rounded-md border py-16 text-center text-muted-foreground">正在加载账号</div>
   if (error) return <div className="rounded-md border py-16 text-center text-destructive">{extractErrorMessage(error)}</div>
 
-  const allCredentials = data?.credentials ?? []
   const normalCount = allCredentials.filter((item) => item.accountStatus === 'normal' && !item.disabled && item.dispatchState === 'ready').length
   const alertCount = allCredentials.filter((item) => item.disabled || item.dispatchState !== 'ready').length
   const bannedCount = allCredentials.filter((item) => item.accountStatus === 'banned').length
@@ -321,6 +337,17 @@ export function AccountsPage() {
                 {item.label}
               </Button>
             ))}
+            <select
+              className="h-9 min-w-[220px] max-w-full rounded-md border border-input bg-background px-3 text-sm"
+              value={modelFilter}
+              onChange={(event) => { setModelFilter(event.target.value); setCurrentPage(1) }}
+              title="按支持模型筛选账号"
+            >
+              <option value="">全部模型</option>
+              {modelOptions.map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -330,7 +357,7 @@ export function AccountsPage() {
               <span>全选当前页</span>
             </label>
           </div>
-          <div className="space-y-2">
+          <div className="grid items-stretch gap-3 lg:grid-cols-2 2xl:grid-cols-3">
             {currentCredentials.map((credential: CredentialStatusItem) => (
               <CredentialRow
                 key={credential.id}

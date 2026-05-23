@@ -2356,6 +2356,9 @@ impl MultiTokenManager {
             }
         };
         self.save_stats_debounced();
+        if let Err(e) = self.persist_credentials() {
+            tracing::warn!("额度耗尽状态持久化失败（内存状态已生效）: {}", e);
+        }
         result
     }
 
@@ -4144,6 +4147,36 @@ mod tests {
         // 再禁用第二个后，无可用凭据
         assert!(!manager.report_quota_exhausted(2));
         assert_eq!(manager.available_count(), 0);
+    }
+
+    #[test]
+    fn test_report_quota_exhausted_persists_disabled_state() {
+        let credentials_path =
+            std::env::temp_dir().join(format!("kiro-credentials-{}.json", uuid::Uuid::new_v4()));
+        let credentials = vec![KiroCredentials::default(), KiroCredentials::default()];
+        std::fs::write(
+            &credentials_path,
+            serde_json::to_string_pretty(&credentials).unwrap(),
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, credentials, Some(credentials_path.clone()), true)
+                .unwrap();
+
+        assert!(manager.report_quota_exhausted(1));
+
+        let persisted = std::fs::read_to_string(&credentials_path).unwrap();
+        let persisted: Vec<KiroCredentials> = serde_json::from_str(&persisted).unwrap();
+        assert!(persisted[0].disabled);
+        assert_eq!(
+            persisted[0].disabled_reason.as_deref(),
+            Some("QuotaExceeded")
+        );
+        assert!(!persisted[1].disabled);
+
+        std::fs::remove_file(&credentials_path).unwrap();
     }
 
     #[tokio::test]
