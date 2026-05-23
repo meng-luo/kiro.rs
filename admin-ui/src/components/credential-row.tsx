@@ -387,6 +387,7 @@ export function CredentialRow({
   const visibleBalance = displayBalance(credential, balance)
   const riskCooldown = isRiskCooldown(credential)
   const cooldownText = credential.cooldownRemainingMs ? formatCooldown(credential.cooldownRemainingMs) : '无需等待'
+  const isolationText = credential.isolationRemainingMs ? formatCooldown(credential.isolationRemainingMs) : '未隔离'
   const riskTone = riskCooldown ? riskCooldownTone(credential.cooldownRemainingMs) : null
   const label = accountLabel(credential)
 
@@ -424,6 +425,21 @@ export function CredentialRow({
         label: '最近调度',
         value: dispatchPathMeta.text,
         title: dispatchPathMeta.title,
+      },
+      {
+        label: '健康权重',
+        value: `${credential.healthScore}/100 · ${credential.dispatchWeight.toFixed(2)}`,
+        title: credential.weightReason,
+      },
+      {
+        label: '风控隔离',
+        value: credential.suspiciousIsolated ? isolationText : '未隔离',
+        title: credential.suspiciousIsolated ? '账号正在 suspicious 隔离期内。' : '账号当前没有 suspicious 隔离。',
+      },
+      {
+        label: '软回退',
+        value: credential.softFallbackEligible ? '可兜底' : '不可用',
+        title: credential.softFallbackEligible ? '普通限频冷却账号可作为软回退。' : '当前不满足软回退条件。',
       },
       {
         label: '接入类型',
@@ -705,6 +721,15 @@ export function CredentialRow({
                   粘性会话：{credential.stickyDetached ? '已解除绑定' : `${credential.stickySessionCount} 个`}
                 </span>
                 <span className="truncate" title={dispatchPathMeta.title}>最近调度：{dispatchPathMeta.text}</span>
+                <span className="truncate" title={credential.weightReason}>
+                  健康：{credential.healthScore}/100 · 权重 {credential.dispatchWeight.toFixed(2)}
+                </span>
+                <span className="truncate" title={credential.suspiciousIsolated ? '账号正在 suspicious 隔离期内。' : '账号当前没有 suspicious 隔离。'}>
+                  隔离：{credential.suspiciousIsolated ? isolationText : '未隔离'}
+                </span>
+                <span className="truncate" title={credential.softFallbackEligible ? '普通限频冷却账号可作为软回退。' : '当前不满足软回退条件。'}>
+                  软回退：{credential.softFallbackEligible ? '可用' : '不可用'}
+                </span>
                 <span className="truncate" title={authMethod?.title ?? ''}>接入类型：{authMethod?.text ?? balanceLabel(credential)}</span>
                 <span className="truncate" title={`请求策略：${schedulerPolicyLabel(credential.schedulerPolicy)}`}>
                   请求策略：{schedulerPolicyLabel(credential.schedulerPolicy)}

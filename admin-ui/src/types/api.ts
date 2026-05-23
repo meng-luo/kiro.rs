@@ -107,12 +107,18 @@ export interface SchedulerConfig {
   hedgeEnabled: boolean
   hedgeDelayMs: number
   hedgeMaxExtraPerRequest: number
+  softFallbackEnabled: boolean
+  suspiciousIsolationEnabled: boolean
+  healthWeightedSchedulingEnabled: boolean
+  suspiciousIsolationSeconds: number
+  suspiciousStopRetry: boolean
   modelOverrides: Record<string, SchedulerModelOverrideConfig>
 }
 
 export interface SchedulerModelState {
   model: string
   upstreamModel: string
+  schedulerPolicy: SchedulerPolicy
   window: number
   inflight: number
   successStreak: number
@@ -167,6 +173,11 @@ export interface CredentialStatusItem {
   dispatchPath?: 'preferred' | 'sticky' | 'balanced' | 'soft_fallback'
   softFallbackEligible: boolean
   lastSoftFallbackAt?: string | null
+  suspiciousIsolated: boolean
+  isolationRemainingMs?: number
+  healthScore: number
+  dispatchWeight: number
+  weightReason: string
 }
 
 // 余额响应

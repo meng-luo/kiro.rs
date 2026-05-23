@@ -278,6 +278,11 @@ impl AdminService {
                     dispatch_path: entry.dispatch_path,
                     soft_fallback_eligible: entry.soft_fallback_eligible,
                     last_soft_fallback_at: entry.last_soft_fallback_at,
+                    suspicious_isolated: entry.suspicious_isolated,
+                    isolation_remaining_ms: entry.isolation_remaining_ms,
+                    health_score: entry.health_score,
+                    dispatch_weight: entry.dispatch_weight,
+                    weight_reason: entry.weight_reason,
                 }
             })
             .collect();

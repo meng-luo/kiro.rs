@@ -389,7 +389,34 @@ impl KiroProvider {
             }
 
             // 瞬态错误
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+            if status.as_u16() == 429 {
+                let kind = if Self::is_suspicious_activity(&body) {
+                    RateLimitKind::SuspiciousActivity
+                } else {
+                    RateLimitKind::Normal429
+                };
+                self.token_manager.report_rate_limited(ctx.id, kind);
+                tracing::warn!(
+                    "MCP 请求被限频（{}，尝试 {}/{}）: {} {}",
+                    Self::rate_limit_kind_label(kind),
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                if kind == RateLimitKind::SuspiciousActivity
+                    && self.token_manager.config().scheduler.suspicious_stop_retry
+                {
+                    break;
+                }
+                if attempt + 1 < max_retries {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
+            if status.as_u16() == 408 || status.is_server_error() {
                 tracing::warn!(
                     "MCP 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -505,8 +532,7 @@ impl KiroProvider {
             } else {
                 SchedulerPolicy::Stable
             };
-            let use_model_scheduler =
-                scheduler_config.enabled && scheduler_policy == SchedulerPolicy::Canary;
+            let use_model_scheduler = scheduler_config.enabled;
 
             let mut model_lease = loop {
                 if !use_model_scheduler {
@@ -953,6 +979,11 @@ impl KiroProvider {
                 }
                 tried_account_ids.insert(ctx.id);
                 last_error = Some(err);
+                if kind == RateLimitKind::SuspiciousActivity
+                    && scheduler_config.suspicious_stop_retry
+                {
+                    break;
+                }
                 if model_backoff_ms > 0 && attempt + 1 < max_retries {
                     let remaining_budget = request_budget.saturating_sub(started_instant.elapsed());
                     let wait = Duration::from_millis(model_backoff_ms).min(remaining_budget);

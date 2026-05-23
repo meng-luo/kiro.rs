@@ -251,6 +251,45 @@ export function SettingsPage() {
                   />
                 </label>
 
+                <div className="grid gap-3 md:grid-cols-3">
+                  <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <span>
+                      <span className="block text-sm font-medium">允许软回退</span>
+                      <span className="block text-xs text-muted-foreground">普通限频账号可短暂兜底。</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={schedulerForm.softFallbackEnabled}
+                      onChange={(event) => setSchedulerForm({ ...schedulerForm, softFallbackEnabled: event.target.checked })}
+                      className="h-4 w-4"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <span>
+                      <span className="block text-sm font-medium">隔离风控账号</span>
+                      <span className="block text-xs text-muted-foreground">suspicious 后暂停参与调度。</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={schedulerForm.suspiciousIsolationEnabled}
+                      onChange={(event) => setSchedulerForm({ ...schedulerForm, suspiciousIsolationEnabled: event.target.checked })}
+                      className="h-4 w-4"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <span>
+                      <span className="block text-sm font-medium">健康权重调度</span>
+                      <span className="block text-xs text-muted-foreground">均衡模式优先选择健康账号。</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={schedulerForm.healthWeightedSchedulingEnabled}
+                      onChange={(event) => setSchedulerForm({ ...schedulerForm, healthWeightedSchedulingEnabled: event.target.checked })}
+                      className="h-4 w-4"
+                    />
+                  </label>
+                </div>
+
                 <div className="grid gap-3 md:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">加速试探等待（毫秒）</label>
@@ -260,6 +299,22 @@ export function SettingsPage() {
                     <label className="text-sm font-medium">额外尝试次数</label>
                     <Input type="number" min="0" max="1" value={schedulerForm.hedgeMaxExtraPerRequest} onChange={(event) => updateSchedulerNumber('hedgeMaxExtraPerRequest', event.target.value)} />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">风控隔离时间（秒）</label>
+                    <Input type="number" min="1" value={schedulerForm.suspiciousIsolationSeconds} onChange={(event) => updateSchedulerNumber('suspiciousIsolationSeconds', event.target.value)} />
+                  </div>
+                  <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <span>
+                      <span className="block text-sm font-medium">风控后停止重试</span>
+                      <span className="block text-xs text-muted-foreground">避免同一请求继续切换账号。</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={schedulerForm.suspiciousStopRetry}
+                      onChange={(event) => setSchedulerForm({ ...schedulerForm, suspiciousStopRetry: event.target.checked })}
+                      className="h-4 w-4"
+                    />
+                  </label>
                 </div>
 
                 <Button onClick={saveScheduler} disabled={setScheduler.isPending}>

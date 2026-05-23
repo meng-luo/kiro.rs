@@ -198,6 +198,16 @@ pub struct SchedulerConfig {
     pub hedge_delay_ms: u64,
     #[serde(default = "default_scheduler_hedge_max_extra_per_request")]
     pub hedge_max_extra_per_request: u32,
+    #[serde(default = "default_scheduler_soft_fallback_enabled")]
+    pub soft_fallback_enabled: bool,
+    #[serde(default = "default_scheduler_suspicious_isolation_enabled")]
+    pub suspicious_isolation_enabled: bool,
+    #[serde(default)]
+    pub health_weighted_scheduling_enabled: bool,
+    #[serde(default = "default_scheduler_suspicious_isolation_seconds")]
+    pub suspicious_isolation_seconds: i64,
+    #[serde(default = "default_scheduler_suspicious_stop_retry")]
+    pub suspicious_stop_retry: bool,
     #[serde(default)]
     pub model_overrides: HashMap<String, SchedulerModelOverrideConfig>,
 }
@@ -221,6 +231,11 @@ impl Default for SchedulerConfig {
             hedge_enabled: default_scheduler_hedge_enabled(),
             hedge_delay_ms: default_scheduler_hedge_delay_ms(),
             hedge_max_extra_per_request: default_scheduler_hedge_max_extra_per_request(),
+            soft_fallback_enabled: default_scheduler_soft_fallback_enabled(),
+            suspicious_isolation_enabled: default_scheduler_suspicious_isolation_enabled(),
+            health_weighted_scheduling_enabled: false,
+            suspicious_isolation_seconds: default_scheduler_suspicious_isolation_seconds(),
+            suspicious_stop_retry: default_scheduler_suspicious_stop_retry(),
             model_overrides: HashMap::new(),
         }
     }
@@ -499,6 +514,22 @@ fn default_scheduler_hedge_delay_ms() -> u64 {
 
 fn default_scheduler_hedge_max_extra_per_request() -> u32 {
     1
+}
+
+fn default_scheduler_soft_fallback_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_suspicious_isolation_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_suspicious_isolation_seconds() -> i64 {
+    default_suspicious_repeated_cooldown_seconds()
+}
+
+fn default_scheduler_suspicious_stop_retry() -> bool {
+    true
 }
 
 fn default_update_channel() -> String {

@@ -179,6 +179,17 @@ pub struct CredentialStatusItem {
     /// 最近一次软回退时间（RFC3339）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_soft_fallback_at: Option<String>,
+    /// 是否处于 suspicious 隔离
+    pub suspicious_isolated: bool,
+    /// suspicious 隔离剩余时间（毫秒）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation_remaining_ms: Option<u64>,
+    /// 账号健康分（0-100）
+    pub health_score: u32,
+    /// 当前调度权重（0.0-1.0）
+    pub dispatch_weight: f64,
+    /// 权重/健康分说明
+    pub weight_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

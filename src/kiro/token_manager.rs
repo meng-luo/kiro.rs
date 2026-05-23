@@ -504,6 +504,8 @@ struct CredentialEntry {
     recent_suspicious_count: u32,
     /// 最近一次 suspicious 触发时间
     last_suspicious_at: Option<DateTime<Utc>>,
+    /// suspicious 隔离截止时间
+    suspicious_isolation_until: Option<DateTime<Utc>>,
     /// 最近一次被绑定的活跃时间
     sticky_detached: bool,
     /// 最近一次选号路径
@@ -657,6 +659,16 @@ pub struct CredentialEntrySnapshot {
     pub soft_fallback_eligible: bool,
     /// 最近一次软回退时间
     pub last_soft_fallback_at: Option<String>,
+    /// 是否处于 suspicious 隔离
+    pub suspicious_isolated: bool,
+    /// suspicious 隔离剩余时间（毫秒）
+    pub isolation_remaining_ms: Option<u64>,
+    /// 账号健康分（0-100）
+    pub health_score: u32,
+    /// 当前调度权重（0.0-1.0）
+    pub dispatch_weight: f64,
+    /// 权重/健康分说明
+    pub weight_reason: String,
     /// 订阅等级
     pub subscription_title: Option<String>,
     /// 当前账号可用模型列表
@@ -863,6 +875,7 @@ impl MultiTokenManager {
                     recent_429_count: 0,
                     recent_suspicious_count: 0,
                     last_suspicious_at: None,
+                    suspicious_isolation_until: None,
                     sticky_detached: false,
                     last_dispatch_path: None,
                     last_soft_fallback_at: None,
@@ -1103,11 +1116,14 @@ impl MultiTokenManager {
 
         if !available.is_empty() {
             let selected = match mode {
+                "balanced" if self.config.scheduler.health_weighted_scheduling_enabled => {
+                    self.pick_health_weighted_entry(&available)
+                }
                 "balanced" => self.pick_round_robin_entry(&available),
                 _ => self.pick_priority_entry(&available),
             };
 
-            if let Some((id, credentials)) = selected {
+            if let Some((id, credentials, _, _)) = selected {
                 let entry = available.iter().find(|entry| entry.id == id)?;
                 return Some(SelectionResult {
                     id,
@@ -1146,6 +1162,9 @@ impl MultiTokenManager {
         if entry.disabled || tried_account_ids.contains(&entry.id) {
             return false;
         }
+        if self.entry_suspicious_isolated(entry, Utc::now()) {
+            return false;
+        }
         if entry.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
             return false;
         }
@@ -1167,7 +1186,7 @@ impl MultiTokenManager {
     fn pick_priority_entry(
         &self,
         available: &[&CredentialEntry],
-    ) -> Option<(u64, KiroCredentials)> {
+    ) -> Option<(u64, KiroCredentials, u32, String)> {
         let min_priority = available.iter().map(|e| e.credentials.priority).min()?;
         let group: Vec<_> = available
             .iter()
@@ -1180,7 +1199,7 @@ impl MultiTokenManager {
     fn pick_round_robin_entry(
         &self,
         available: &[&CredentialEntry],
-    ) -> Option<(u64, KiroCredentials)> {
+    ) -> Option<(u64, KiroCredentials, u32, String)> {
         self.pick_round_robin_from_group(u32::MAX, available)
     }
 
@@ -1188,7 +1207,7 @@ impl MultiTokenManager {
         &self,
         priority: u32,
         group: &[&CredentialEntry],
-    ) -> Option<(u64, KiroCredentials)> {
+    ) -> Option<(u64, KiroCredentials, u32, String)> {
         if group.is_empty() {
             return None;
         }
@@ -1198,9 +1217,31 @@ impl MultiTokenManager {
         let cursor = cursor_map.entry(priority).or_insert(0);
         let index = *cursor % sorted.len();
         *cursor = (*cursor + 1) % sorted.len();
-        sorted
-            .get(index)
-            .map(|entry| (entry.id, entry.credentials.clone()))
+        sorted.get(index).map(|entry| {
+            let (score, reason) = self.health_score(entry, Utc::now());
+            (entry.id, entry.credentials.clone(), score, reason)
+        })
+    }
+
+    fn pick_health_weighted_entry(
+        &self,
+        available: &[&CredentialEntry],
+    ) -> Option<(u64, KiroCredentials, u32, String)> {
+        let now = Utc::now();
+        available
+            .iter()
+            .copied()
+            .map(|entry| {
+                let (score, reason) = self.health_score(entry, now);
+                (entry, score, reason)
+            })
+            .max_by(|(left, left_score, _), (right, right_score, _)| {
+                left_score
+                    .cmp(right_score)
+                    .then_with(|| right.credentials.priority.cmp(&left.credentials.priority))
+                    .then_with(|| right.id.cmp(&left.id))
+            })
+            .map(|(entry, score, reason)| (entry.id, entry.credentials.clone(), score, reason))
     }
 
     fn pick_soft_fallback_entry(
@@ -1210,6 +1251,10 @@ impl MultiTokenManager {
         tried_account_ids: &HashSet<u64>,
         scheduler_policy: Option<SchedulerPolicy>,
     ) -> Option<SelectionResult> {
+        if !self.config.scheduler.soft_fallback_enabled {
+            return None;
+        }
+
         let now = Utc::now();
         let normal_group: Vec<_> = entries
             .iter()
@@ -1217,7 +1262,9 @@ impl MultiTokenManager {
             .filter(|entry| self.soft_fallback_eligible(entry, model, tried_account_ids, now))
             .collect();
 
-        if let Some((id, credentials)) = self.pick_round_robin_entry(&normal_group) {
+        if let Some((id, credentials, _, _)) =
+            self.pick_round_robin_entry(&normal_group)
+        {
             let entry = normal_group.iter().find(|entry| entry.id == id)?;
             return Some(SelectionResult {
                 id,
@@ -1238,7 +1285,13 @@ impl MultiTokenManager {
         tried_account_ids: &HashSet<u64>,
         now: DateTime<Utc>,
     ) -> bool {
+        if !self.config.scheduler.soft_fallback_enabled {
+            return false;
+        }
         if entry.disabled || tried_account_ids.contains(&entry.id) {
+            return false;
+        }
+        if self.entry_suspicious_isolated(entry, now) {
             return false;
         }
         if entry.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
@@ -1257,6 +1310,59 @@ impl MultiTokenManager {
             Some(RateLimitKind::Normal429) => true,
             _ => false,
         }
+    }
+
+    fn entry_suspicious_isolated(&self, entry: &CredentialEntry, now: DateTime<Utc>) -> bool {
+        self.config.scheduler.suspicious_isolation_enabled
+            && entry
+                .suspicious_isolation_until
+                .is_some_and(|deadline| deadline > now)
+    }
+
+    fn health_score(&self, entry: &CredentialEntry, now: DateTime<Utc>) -> (u32, String) {
+        if entry.disabled {
+            return (0, "disabled".to_string());
+        }
+        if self.entry_suspicious_isolated(entry, now) {
+            return (0, "suspicious isolated".to_string());
+        }
+        if entry.cooldown_until.is_some_and(|deadline| deadline > now) {
+            return (0, "cooldown".to_string());
+        }
+        if entry.inflight >= entry.max_concurrent {
+            return (0, "saturated".to_string());
+        }
+
+        let available_slots = entry.max_concurrent.saturating_sub(entry.inflight);
+        let mut score = 100_i32;
+        if entry.max_concurrent > 0 {
+            let slot_ratio = available_slots as f64 / entry.max_concurrent as f64;
+            score = score.min((slot_ratio * 100.0).round() as i32 + 20);
+        }
+        score -= (entry.recent_429_count.min(5) as i32) * 8;
+        score -= (entry.recent_suspicious_count.min(5) as i32) * 20;
+        let sticky_count = self.sticky_count_for(entry.id);
+        score -= (sticky_count.min(5) as i32) * 2;
+        if entry.success_count > 0 {
+            score += 5;
+        }
+        match entry.credentials.proxy_mode.as_deref() {
+            Some("proxy") if entry.credentials.proxy_id.is_some() => score += 3,
+            Some("direct") => {}
+            _ if entry.credentials.proxy_url.is_some() => score += 2,
+            _ => {}
+        }
+
+        let score = score.clamp(1, 100) as u32;
+        let reason = format!(
+            "slots {}/{}, 429 {}, suspicious {}, sticky {}",
+            available_slots,
+            entry.max_concurrent,
+            entry.recent_429_count,
+            entry.recent_suspicious_count,
+            sticky_count
+        );
+        (score, reason)
     }
 
     fn entry_supports_model(&self, entry: &CredentialEntry, model: Option<&str>) -> bool {
@@ -1363,12 +1469,15 @@ impl MultiTokenManager {
                                     &options.tried_account_ids,
                                 )
                         })
-                        .map(|e| SelectionResult {
-                            id: e.id,
-                            credentials: e.credentials.clone(),
-                            dispatch_path: DispatchPath::Balanced,
-                            used_soft_fallback: false,
-                            account_state_at_start: self.dispatch_state_of(e, Utc::now()),
+                        .map(|e| {
+                            let now = Utc::now();
+                            SelectionResult {
+                                id: e.id,
+                                credentials: e.credentials.clone(),
+                                dispatch_path: DispatchPath::Balanced,
+                                used_soft_fallback: false,
+                                account_state_at_start: self.dispatch_state_of(e, now),
+                            }
                         })
                 };
 
@@ -1431,7 +1540,7 @@ impl MultiTokenManager {
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
                 Ok(mut ctx) => {
-                    self.acquire_slot(id, options.runtime_probe || selection.used_soft_fallback)?;
+                    self.acquire_slot(id, options.runtime_probe, selection.used_soft_fallback)?;
                     if let Some(session_key) = options.session_key.as_deref() {
                         self.bind_session(session_key, id);
                     }
@@ -1783,23 +1892,28 @@ impl MultiTokenManager {
         }
     }
 
-    fn acquire_slot(&self, id: u64, runtime_probe: bool) -> anyhow::Result<()> {
+    fn acquire_slot(
+        &self,
+        id: u64,
+        runtime_probe: bool,
+        allow_cooldown_bypass: bool,
+    ) -> anyhow::Result<()> {
         let mut entries = self.entries.lock();
         let entry = entries
             .iter_mut()
             .find(|e| e.id == id)
             .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
 
-        if !runtime_probe {
-            if entry
+        if !runtime_probe
+            && !allow_cooldown_bypass
+            && entry
                 .cooldown_until
                 .is_some_and(|deadline| deadline > Utc::now())
-            {
-                anyhow::bail!("凭据 #{} 仍在冷却中", id);
-            }
-            if entry.inflight >= entry.max_concurrent {
-                anyhow::bail!("凭据 #{} 并发已满", id);
-            }
+        {
+            anyhow::bail!("凭据 #{} 仍在冷却中", id);
+        }
+        if entry.inflight >= entry.max_concurrent {
+            anyhow::bail!("凭据 #{} 并发已满", id);
         }
         entry.inflight += 1;
         Ok(())
@@ -1865,6 +1979,22 @@ impl MultiTokenManager {
                     entry.recent_suspicious_count += 1;
                     entry.sticky_detached = true;
                     entry.last_suspicious_at = Some(now);
+                    if self.config.scheduler.suspicious_isolation_enabled {
+                        let isolation_deadline = now
+                            + Duration::seconds(
+                                self.config
+                                    .scheduler
+                                    .suspicious_isolation_seconds
+                                    .max(cooldown_secs)
+                                    .max(1),
+                            );
+                        entry.suspicious_isolation_until = Some(
+                            entry
+                                .suspicious_isolation_until
+                                .map(|current| current.max(isolation_deadline))
+                                .unwrap_or(isolation_deadline),
+                        );
+                    }
                     self.detach_session_binding_for_account(id);
                 }
                 RateLimitKind::Refresh429 => {
@@ -1881,9 +2011,15 @@ impl MultiTokenManager {
         entry.cooldown_until = None;
         entry.last_rate_limit_kind = None;
         entry.recent_429_count = 0;
-        entry.recent_suspicious_count = 0;
-        entry.last_suspicious_at = None;
         entry.sticky_detached = false;
+        if entry
+            .suspicious_isolation_until
+            .is_some_and(|deadline| deadline <= Utc::now())
+        {
+            entry.suspicious_isolation_until = None;
+            entry.recent_suspicious_count = 0;
+            entry.last_suspicious_at = None;
+        }
     }
 
     fn dispatch_state_of(&self, entry: &CredentialEntry, now: DateTime<Utc>) -> DispatchState {
@@ -2287,7 +2423,18 @@ impl MultiTokenManager {
         ManagerSnapshot {
             entries: entries
                 .iter()
-                .map(|e| CredentialEntrySnapshot {
+                .map(|e| {
+                    let suspicious_isolated = self.entry_suspicious_isolated(e, now);
+                    let isolation_remaining_ms = e.suspicious_isolation_until.and_then(|deadline| {
+                        if deadline > now {
+                            Some((deadline - now).num_milliseconds().max(0) as u64)
+                        } else {
+                            None
+                        }
+                    });
+                    let (health_score, weight_reason) = self.health_score(e, now);
+                    let dispatch_weight = health_score as f64 / 100.0;
+                    CredentialEntrySnapshot {
                     id: e.id,
                     priority: e.credentials.priority,
                     scheduler_policy: e.credentials.scheduler_policy,
@@ -2367,8 +2514,14 @@ impl MultiTokenManager {
                         now,
                     ),
                     last_soft_fallback_at: e.last_soft_fallback_at.clone(),
+                    suspicious_isolated,
+                    isolation_remaining_ms,
+                    health_score,
+                    dispatch_weight,
+                    weight_reason,
                     subscription_title: e.credentials.subscription_title.clone(),
                     available_models: e.credentials.available_models.clone(),
+                    }
                 })
                 .collect(),
             current_id,
@@ -2814,6 +2967,7 @@ impl MultiTokenManager {
                 recent_429_count: 0,
                 recent_suspicious_count: 0,
                 last_suspicious_at: None,
+                suspicious_isolation_until: None,
                 sticky_detached: false,
                 last_dispatch_path: None,
                 last_soft_fallback_at: None,
@@ -3483,6 +3637,9 @@ mod tests {
             first.last_rate_limit_kind.as_deref(),
             Some("suspicious_activity")
         );
+        assert!(first.suspicious_isolated);
+        assert!(first.isolation_remaining_ms.is_some());
+        assert_eq!(first.dispatch_weight, 0.0);
         assert_eq!(second.dispatch_state, DispatchState::Ready.to_string());
         assert_eq!(snapshot.enabled_count, 2);
         assert_eq!(snapshot.schedulable_count, 1);
@@ -3511,6 +3668,71 @@ mod tests {
         assert_eq!(ctx.id, 1);
         assert!(ctx.used_soft_fallback);
         assert_eq!(ctx.dispatch_path.to_string(), "soft_fallback");
+    }
+
+    #[tokio::test]
+    async fn test_soft_fallback_can_be_disabled() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+        config.scheduler.soft_fallback_enabled = false;
+
+        let mut cred = KiroCredentials::default();
+        cred.access_token = Some("t1".to_string());
+        cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        assert!(manager.report_rate_limited(1, RateLimitKind::Normal429));
+
+        let result = manager.acquire_context(None).await;
+        assert!(result.is_err());
+        let snapshot = manager.snapshot();
+        assert!(!snapshot.entries[0].soft_fallback_eligible);
+    }
+
+    #[tokio::test]
+    async fn test_soft_fallback_does_not_exceed_max_concurrent() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred = KiroCredentials::default();
+        cred.access_token = Some("t1".to_string());
+        cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred.max_concurrent = Some(1);
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        let first = manager.acquire_context(None).await.unwrap();
+        assert!(manager.report_rate_limited(1, RateLimitKind::Normal429));
+
+        let result = manager.acquire_context(None).await;
+        assert!(result.is_err());
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn test_health_weighted_balanced_prefers_healthier_credential() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+        config.scheduler.health_weighted_scheduling_enabled = true;
+
+        let mut risky = KiroCredentials::default();
+        risky.access_token = Some("risky".to_string());
+        risky.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut healthy = KiroCredentials::default();
+        healthy.access_token = Some("healthy".to_string());
+        healthy.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![risky, healthy], None, None, false).unwrap();
+        assert!(manager.report_normal_429_short_cooldown(1, 1));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|entry| entry.id == 1).unwrap();
+        let second = snapshot.entries.iter().find(|entry| entry.id == 2).unwrap();
+        assert!(second.health_score > first.health_score);
+        assert_eq!(first.dispatch_weight, first.health_score as f64 / 100.0);
+
+        let ctx = manager.acquire_context(None).await.unwrap();
+        assert_eq!(ctx.id, 2);
     }
 
     #[tokio::test]
