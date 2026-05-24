@@ -430,6 +430,7 @@ export interface AddCredentialRequest {
   authRegion?: string
   apiRegion?: string
   machineId?: string
+  email?: string
   kiroApiKey?: string
   endpoint?: string
 }

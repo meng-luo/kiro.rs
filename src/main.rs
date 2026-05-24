@@ -138,6 +138,7 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
+    token_manager.start_email_backfill_task();
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
         endpoints,

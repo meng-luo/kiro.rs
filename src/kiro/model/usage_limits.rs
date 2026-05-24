@@ -12,6 +12,10 @@ pub struct UsageLimitsResponse {
     #[serde(default)]
     pub next_date_reset: Option<f64>,
 
+    /// 用户信息
+    #[serde(default)]
+    pub user_info: Option<UserInfo>,
+
     /// 订阅信息
     #[serde(default)]
     pub subscription_info: Option<SubscriptionInfo>,
@@ -19,6 +23,20 @@ pub struct UsageLimitsResponse {
     /// 使用量明细列表
     #[serde(default)]
     pub usage_breakdown_list: Vec<UsageBreakdown>,
+}
+
+/// 用户信息
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct UserInfo {
+    /// 用户邮箱
+    #[serde(default)]
+    pub email: Option<String>,
+
+    /// 用户 ID
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// 订阅信息
@@ -134,6 +152,13 @@ impl FreeTrialInfo {
 }
 
 impl UsageLimitsResponse {
+    /// 获取用户邮箱
+    pub fn email(&self) -> Option<&str> {
+        self.user_info
+            .as_ref()
+            .and_then(|info| info.email.as_deref())
+    }
+
     /// 获取订阅标题
     pub fn subscription_title(&self) -> Option<&str> {
         self.subscription_info

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Clock3, Database, Gauge, RefreshCw, Users } from 'lucide-react'
 import { Area, AreaChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Button } from '@/components/ui/button'
@@ -103,6 +103,17 @@ export function MonitorPage() {
   useCredentialsStream()
   const summary = useDiagnosticsSummary({ since: timeRange, limit: 200 })
   const credentials = data?.credentials ?? []
+  const credentialLabels = useMemo(() => {
+    const map = new Map<number, string>()
+    credentials.forEach((item) => {
+      map.set(item.id, item.email || `账号 #${item.id}`)
+    })
+    return map
+  }, [credentials])
+  const credentialKeyLabel = (key: string) => {
+    const id = Number(key.replace(/^#/, ''))
+    return Number.isFinite(id) && id > 0 ? credentialLabels.get(id) || `账号 #${id}` : key
+  }
   const alertAccounts = credentials
     .filter((item) => item.disabled || item.dispatchState !== 'ready' || item.recent429Count > 0 || item.recentSuspiciousCount > 0)
     .slice(0, 8)
@@ -134,7 +145,10 @@ export function MonitorPage() {
   }))
 
   // 账号使用趋势数据（Top 8）
-  const credentialPerformance = (summary.data?.credentialPerformance ?? []).slice(0, 8)
+  const credentialPerformance = (summary.data?.credentialPerformance ?? []).slice(0, 8).map((item) => ({
+    ...item,
+    label: credentialKeyLabel(item.key),
+  }))
   const credentialKeys = new Set(credentialPerformance.map((item) => item.key))
   const credentialTrendMap = new Map<string, Record<string, string | number>>()
   trend.forEach((bucket) => {
@@ -344,7 +358,7 @@ export function MonitorPage() {
                       key={cred.key}
                       type="monotone"
                       dataKey={cred.key}
-                      name={cred.key}
+                      name={cred.label}
                       stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
                       strokeWidth={2}
                       dot={false}

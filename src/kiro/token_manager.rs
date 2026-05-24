@@ -7,6 +7,7 @@ use anyhow::bail;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -62,6 +63,15 @@ fn sha256_hex(input: &str) -> String {
     format!("{:x}", result)
 }
 
+fn normalize_email(value: &str) -> Option<String> {
+    let email = value.trim().to_ascii_lowercase();
+    if email.is_empty() { None } else { Some(email) }
+}
+
+fn credential_email_key(credentials: &KiroCredentials) -> Option<String> {
+    credentials.email.as_deref().and_then(normalize_email)
+}
+
 /// 生成 API Key 脱敏展示(前 4 + ... + 后 4,长度不足或非 ASCII 回退 ***)
 fn mask_api_key(key: &str) -> String {
     if key.is_ascii() && key.len() > 16 {
@@ -73,6 +83,8 @@ fn mask_api_key(key: &str) -> String {
 
 const DEFAULT_MAX_CONCURRENT: u32 = 3;
 const STICKY_SESSION_TTL_SECS: i64 = 30 * 60;
+const KIRO_WEB_PORTAL_API_BASE: &str =
+    "https://app.kiro.dev/service/KiroWebPortalService/operation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateLimitKind {
@@ -466,6 +478,78 @@ pub(crate) async fn get_usage_limits(
     }
 
     let data: UsageLimitsResponse = response.json().await?;
+    Ok(data)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UserInfoResponse {
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+/// 获取当前账号用户信息
+pub(crate) async fn get_user_info(
+    credentials: &KiroCredentials,
+    config: &Config,
+    access_token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<UserInfoResponse> {
+    tracing::debug!("正在获取账号用户信息...");
+
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
+    let kiro_version = &config.kiro_version;
+    let url = format!("{}/GetUserInfo", KIRO_WEB_PORTAL_API_BASE);
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let body = json!({ "origin": "KIRO_IDE" });
+    let mut body_bytes = Vec::new();
+    ciborium::into_writer(&body, &mut body_bytes)?;
+
+    let idp = "BuilderId";
+
+    let mut request = client
+        .post(&url)
+        .header("accept", "application/cbor")
+        .header("content-type", "application/cbor")
+        .header("smithy-protocol", "rpc-v2-cbor")
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=1")
+        .header(
+            "x-amz-user-agent",
+            format!("aws-sdk-js/1.0.18 KiroIDE {} {}", kiro_version, machine_id),
+        )
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header(
+            "Cookie",
+            format!("Idp={}; AccessToken={}", idp, access_token),
+        )
+        .body(body_bytes);
+
+    if credentials.is_api_key_credential() {
+        request = request.header("tokentype", "API_KEY");
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    let response_bytes = response.bytes().await?;
+
+    if !status.is_success() {
+        let mut cursor = std::io::Cursor::new(response_bytes.as_ref());
+        let error_detail = ciborium::from_reader::<serde_json::Value, _>(&mut cursor)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| Some(value.to_string()))
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&response_bytes).to_string());
+        bail!("获取账号用户信息失败: {} {}", status, error_detail);
+    }
+
+    let mut cursor = std::io::Cursor::new(response_bytes.as_ref());
+    let data: UserInfoResponse = ciborium::from_reader(&mut cursor)?;
     Ok(data)
 }
 
@@ -1072,6 +1156,39 @@ impl MultiTokenManager {
     /// 获取配置的引用
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn start_email_backfill_task(self: &Arc<Self>) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            manager.backfill_missing_emails().await;
+        });
+    }
+
+    async fn backfill_missing_emails(&self) {
+        let ids = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|entry| !entry.disabled)
+                .filter(|entry| credential_email_key(&entry.credentials).is_none())
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        };
+
+        if ids.is_empty() {
+            return;
+        }
+
+        tracing::info!("启动时发现 {} 个账号缺少邮箱，开始补全", ids.len());
+        for id in ids {
+            match self.refresh_email_for(id).await {
+                Ok(Some(email)) => tracing::info!("凭据 #{} 邮箱已补全: {}", id, email),
+                Ok(None) => tracing::warn!("凭据 #{} 未能从账号信息 API 获取邮箱", id),
+                Err(err) => tracing::warn!("凭据 #{} 邮箱补全失败: {}", id, err),
+            }
+            tokio::time::sleep(StdDuration::from_millis(500)).await;
+        }
     }
 
     fn random_proxy_from_pool(&self) -> Option<ProxyConfig> {
@@ -2765,66 +2882,7 @@ impl MultiTokenManager {
 
     /// 获取指定凭据的使用额度（Admin API）
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
-        let credentials = {
-            let entries = self.entries.lock();
-            entries
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.credentials.clone())
-                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-        };
-
-        // API Key 凭据直接使用 kiro_api_key，无需刷新
-        let token = if credentials.is_api_key_credential() {
-            credentials
-                .kiro_api_key
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
-        } else {
-            // 检查是否需要刷新 token
-            let needs_refresh =
-                is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
-
-            if needs_refresh {
-                let _guard = self.refresh_lock.lock().await;
-                let current_creds = {
-                    let entries = self.entries.lock();
-                    entries
-                        .iter()
-                        .find(|e| e.id == id)
-                        .map(|e| e.credentials.clone())
-                        .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-                };
-
-                if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                    let effective_proxy = self.random_proxy_from_pool();
-                    let new_creds =
-                        refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
-                            .await?;
-                    {
-                        let mut entries = self.entries.lock();
-                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            entry.credentials = new_creds.clone();
-                        }
-                    }
-                    // 持久化失败只记录警告，不影响本次请求
-                    if let Err(e) = self.persist_credentials() {
-                        tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
-                    }
-                    new_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
-                } else {
-                    current_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-                }
-            } else {
-                credentials
-                    .access_token
-                    .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-            }
-        };
+        let token = self.ensure_token_for(id).await?;
 
         let credentials = {
             let entries = self.entries.lock();
@@ -2838,6 +2896,9 @@ impl MultiTokenManager {
         let effective_proxy = self.random_proxy_from_pool();
         let usage_limits =
             get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
+        if let Some(email) = usage_limits.email() {
+            self.update_account_email_if_missing_or_changed(id, email);
+        }
 
         let available_models = match get_available_models(
             &credentials,
@@ -2866,8 +2927,7 @@ impl MultiTokenManager {
         Ok(usage_limits)
     }
 
-    /// 刷新指定凭据的可用模型列表（Admin API）
-    pub async fn refresh_available_models_for(&self, id: u64) -> anyhow::Result<Vec<String>> {
+    async fn ensure_token_for(&self, id: u64) -> anyhow::Result<String> {
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2877,57 +2937,81 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        let token = if credentials.is_api_key_credential() {
-            credentials
+        if credentials.is_api_key_credential() {
+            return credentials
                 .kiro_api_key
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
-        } else {
-            let needs_refresh =
-                is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
+                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"));
+        }
 
-            if needs_refresh {
-                let _guard = self.refresh_lock.lock().await;
-                let current_creds = {
-                    let entries = self.entries.lock();
-                    entries
-                        .iter()
-                        .find(|e| e.id == id)
-                        .map(|e| e.credentials.clone())
-                        .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-                };
+        let needs_refresh = is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
+        if !needs_refresh {
+            return credentials
+                .access_token
+                .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"));
+        }
 
-                if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                    let effective_proxy = self.random_proxy_from_pool();
-                    let new_creds =
-                        refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
-                            .await?;
-                    let token = new_creds
-                        .access_token
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?;
-                    {
-                        let mut entries = self.entries.lock();
-                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            entry.credentials = new_creds;
-                            entry.refresh_failure_count = 0;
-                        }
-                    }
-                    if let Err(e) = self.persist_credentials() {
-                        tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
-                    }
-                    token
-                } else {
-                    current_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-                }
-            } else {
-                credentials
-                    .access_token
-                    .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-            }
+        let _guard = self.refresh_lock.lock().await;
+        let current_creds = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
+
+        if !(is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds)) {
+            return current_creds
+                .access_token
+                .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"));
+        }
+
+        let effective_proxy = self.random_proxy_from_pool();
+        let new_creds =
+            refresh_token(&current_creds, &self.config, effective_proxy.as_ref()).await?;
+        let token = new_creds
+            .access_token
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?;
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.credentials = new_creds;
+                entry.refresh_failure_count = 0;
+            }
+        }
+        if let Err(e) = self.persist_credentials() {
+            tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
+        }
+
+        Ok(token)
+    }
+
+    async fn refresh_email_for(&self, id: u64) -> anyhow::Result<Option<String>> {
+        let token = self.ensure_token_for(id).await?;
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+        let effective_proxy = self.random_proxy_from_pool();
+        let user_info =
+            get_user_info(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
+        if let Some(email) = user_info.email.as_deref().and_then(normalize_email) {
+            self.update_account_email_if_missing_or_changed(id, &email);
+            Ok(Some(email))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 刷新指定凭据的可用模型列表（Admin API）
+    pub async fn refresh_available_models_for(&self, id: u64) -> anyhow::Result<Vec<String>> {
+        let token = self.ensure_token_for(id).await?;
 
         let credentials = {
             let entries = self.entries.lock();
@@ -3008,12 +3092,50 @@ impl MultiTokenManager {
         }
     }
 
+    fn update_account_email_if_missing_or_changed(&self, id: u64, email: &str) {
+        let Some(email) = normalize_email(email) else {
+            return;
+        };
+
+        let changed = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                if credential_email_key(&entry.credentials).as_deref() != Some(email.as_str()) {
+                    entry.credentials.email = Some(email.clone());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if changed {
+            tracing::info!("凭据 #{} 邮箱已更新: {}", id, email);
+            if let Err(e) = self.persist_credentials() {
+                tracing::warn!("账号邮箱更新后持久化失败（不影响本次请求）: {}", e);
+            }
+        }
+    }
+
+    fn duplicate_email_exists(&self, email: &str, exclude_id: Option<u64>) -> bool {
+        let Some(email) = normalize_email(email) else {
+            return false;
+        };
+        let entries = self.entries.lock();
+        entries.iter().any(|entry| {
+            exclude_id.is_none_or(|id| entry.id != id)
+                && credential_email_key(&entry.credentials).as_deref() == Some(email.as_str())
+        })
+    }
+
     /// 添加新凭据（Admin API）
     ///
     /// # 流程
     /// 1. 验证凭据基本字段（API Key: kiroApiKey 不为空; OAuth: refreshToken 不为空）
-    /// 2. 基于 kiroApiKey 或 refreshToken 的 SHA-256 哈希检测重复
-    /// 3. OAuth: 尝试刷新 Token 验证凭据有效性; API Key: 跳过
+    /// 2. OAuth: 尝试刷新 Token 验证凭据有效性; API Key: 跳过刷新
+    /// 3. 调用账号信息 API 获取邮箱，按邮箱检测重复
     /// 4. 分配新 ID（当前最大 ID + 1）
     /// 5. 添加到 entries 列表
     /// 6. 持久化到配置文件
@@ -3035,58 +3157,59 @@ impl MultiTokenManager {
             validate_refresh_token(&new_cred)?;
         }
 
-        // 2. 基于哈希检测重复
-        if new_cred.is_api_key_credential() {
-            let new_api_key = new_cred
-                .kiro_api_key
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("缺少 kiroApiKey"))?;
-            let new_api_key_hash = sha256_hex(new_api_key);
-            let duplicate_exists = {
-                let entries = self.entries.lock();
-                entries.iter().any(|entry| {
-                    entry
-                        .credentials
-                        .kiro_api_key
-                        .as_deref()
-                        .map(sha256_hex)
-                        .as_deref()
-                        == Some(new_api_key_hash.as_str())
-                })
-            };
-            if duplicate_exists {
-                anyhow::bail!("凭据已存在（kiroApiKey 重复）");
-            }
-        } else {
-            let new_refresh_token = new_cred
-                .refresh_token
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("缺少 refreshToken"))?;
-            let new_refresh_token_hash = sha256_hex(new_refresh_token);
-            let duplicate_exists = {
-                let entries = self.entries.lock();
-                entries.iter().any(|entry| {
-                    entry
-                        .credentials
-                        .refresh_token
-                        .as_deref()
-                        .map(sha256_hex)
-                        .as_deref()
-                        == Some(new_refresh_token_hash.as_str())
-                })
-            };
-            if duplicate_exists {
-                anyhow::bail!("凭据已存在（refreshToken 重复）");
+        if let Some(email) = credential_email_key(&new_cred) {
+            if self.duplicate_email_exists(&email, None) {
+                anyhow::bail!("账号已存在（邮箱重复: {}）", email);
             }
         }
 
-        // 3. 验证凭据有效性（API Key 无需网络刷新）
+        // 2. 验证凭据有效性（API Key 无需网络刷新）
         let mut validated_cred = if new_cred.is_api_key_credential() {
             new_cred.clone()
         } else {
             let effective_proxy = self.random_proxy_from_pool();
             refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?
         };
+
+        let token = if validated_cred.is_api_key_credential() {
+            validated_cred
+                .kiro_api_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
+        } else {
+            validated_cred
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
+        };
+
+        // 3. 添加账号时主动请求账号邮箱，并按邮箱去重
+        let effective_proxy = self.random_proxy_from_pool();
+        let fetched_email = match get_user_info(
+            &validated_cred,
+            &self.config,
+            &token,
+            effective_proxy.as_ref(),
+        )
+        .await
+        {
+            Ok(info) => info.email.and_then(|email| normalize_email(&email)),
+            Err(err) => {
+                tracing::warn!("添加凭据时获取邮箱失败，保留输入邮箱: {}", err);
+                None
+            }
+        };
+        validated_cred.email = fetched_email
+            .clone()
+            .or_else(|| credential_email_key(&new_cred));
+
+        if let Some(email) = validated_cred.email.as_deref() {
+            if self.duplicate_email_exists(email, None) {
+                anyhow::bail!("账号已存在（邮箱重复: {}）", email);
+            }
+        } else {
+            tracing::warn!("添加凭据时未获取到邮箱，无法执行邮箱去重");
+        }
 
         // 4. 分配新 ID
         let new_id = {
@@ -3110,7 +3233,6 @@ impl MultiTokenManager {
         validated_cred.auth_region = new_cred.auth_region;
         validated_cred.api_region = new_cred.api_region;
         validated_cred.machine_id = new_cred.machine_id;
-        validated_cred.email = new_cred.email;
         validated_cred.proxy_url = None;
         validated_cred.proxy_username = None;
         validated_cred.proxy_password = None;
@@ -3382,6 +3504,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_duplicate_email_exists_normalizes_case_and_space() {
+        let config = Config::default();
+        let mut existing = KiroCredentials::default();
+        existing.email = Some(" User@Example.COM ".to_string());
+
+        let manager = MultiTokenManager::new(config, vec![existing], None, false).unwrap();
+
+        assert!(manager.duplicate_email_exists("user@example.com", None));
+        assert!(!manager.duplicate_email_exists("other@example.com", None));
+    }
+
     #[tokio::test]
     async fn test_refresh_token_rejects_api_key_credential() {
         let config = Config::default();
@@ -3401,20 +3535,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_credential_reject_duplicate_refresh_token() {
+    async fn test_add_credential_reject_duplicate_email() {
         let config = Config::default();
 
         let mut existing = KiroCredentials::default();
         existing.refresh_token = Some("a".repeat(150));
+        existing.email = Some("user@example.com".to_string());
 
         let manager = MultiTokenManager::new(config, vec![existing], None, false).unwrap();
 
         let mut duplicate = KiroCredentials::default();
-        duplicate.refresh_token = Some("a".repeat(150));
+        duplicate.refresh_token = Some("b".repeat(150));
+        duplicate.email = Some(" USER@example.com ".to_string());
 
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("凭据已存在"));
+        assert!(result.err().unwrap().to_string().contains("邮箱重复"));
     }
 
     #[tokio::test]
@@ -3435,28 +3571,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_credential_reject_duplicate_api_key() {
+    async fn test_add_credential_reject_duplicate_api_key_email() {
         let config = Config::default();
 
         let mut existing = KiroCredentials::default();
         existing.kiro_api_key = Some("ksk_existing_key".to_string());
         existing.auth_method = Some("api_key".to_string());
+        existing.email = Some("user@example.com".to_string());
 
         let manager = MultiTokenManager::new(config, vec![existing], None, false).unwrap();
 
         let mut duplicate = KiroCredentials::default();
-        duplicate.kiro_api_key = Some("ksk_existing_key".to_string());
+        duplicate.kiro_api_key = Some("ksk_different_key".to_string());
         duplicate.auth_method = Some("api_key".to_string());
+        duplicate.email = Some("user@example.com".to_string());
 
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("kiroApiKey 重复")
-        );
+        assert!(result.err().unwrap().to_string().contains("邮箱重复"));
     }
 
     #[tokio::test]

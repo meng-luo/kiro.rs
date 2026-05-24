@@ -11,7 +11,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { useCredentials, useAddCredential, useDeleteCredential } from '@/hooks/use-credentials'
 import { getCredentialBalance, setCredentialDisabled } from '@/api/credentials'
-import { extractErrorMessage, sha256Hex } from '@/lib/utils'
+import { extractErrorMessage } from '@/lib/utils'
 
 interface BatchImportDialogProps {
   open: boolean
@@ -30,6 +30,7 @@ interface CredentialInput {
   kiroApiKey?: string
   authMethod?: string
   endpoint?: string
+  email?: string
 }
 
 interface VerificationResult {
@@ -111,16 +112,11 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
       }))
       setResults(initialResults)
 
-      // 3. 检测重复：OAuth 与 API Key 分别使用对应的 hash 集合
-      const existingOauthHashes = new Set(
+      // 3. 本地只按已有邮箱做轻量预检，最终去重以服务端账号信息 API 获取到的邮箱为准
+      const existingEmails = new Set(
         existingCredentials?.credentials
-          .map(c => c.refreshTokenHash)
-          .filter((hash): hash is string => Boolean(hash)) || []
-      )
-      const existingApiKeyHashes = new Set(
-        existingCredentials?.credentials
-          .map(c => c.apiKeyHash)
-          .filter((hash): hash is string => Boolean(hash)) || []
+          .map(c => c.email?.trim().toLowerCase())
+          .filter((email): email is string => Boolean(email)) || []
       )
 
       let successCount = 0
@@ -143,8 +139,24 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           return newResults
         })
 
-        // 客户端去重：OAuth 基于 refreshToken hash，API Key 基于 kiroApiKey hash
-        let credHash = ''
+        const inputEmail = cred.email?.trim().toLowerCase()
+        if (inputEmail && existingEmails.has(inputEmail)) {
+          duplicateCount++
+          const existingCred = existingCredentials?.credentials.find(c => c.email?.trim().toLowerCase() === inputEmail)
+          setResults(prev => {
+            const newResults = [...prev]
+            newResults[i] = {
+              ...newResults[i],
+              status: 'duplicate',
+              error: '该邮箱已存在',
+              email: existingCred?.email || inputEmail,
+            }
+            return newResults
+          })
+          setProgress({ current: i + 1, total: credentials.length })
+          continue
+        }
+
         if (isApiKeyCred) {
           const apiKey = cred.kiroApiKey?.trim() || ''
           if (!apiKey) {
@@ -161,23 +173,6 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             setProgress({ current: i + 1, total: credentials.length })
             continue
           }
-          credHash = await sha256Hex(apiKey)
-          if (existingApiKeyHashes.has(credHash)) {
-            duplicateCount++
-            const existingCred = existingCredentials?.credentials.find(c => c.apiKeyHash === credHash)
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'duplicate',
-                error: '该凭据已存在',
-                email: existingCred?.email || undefined
-              }
-              return newResults
-            })
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
         } else {
           const token = cred.refreshToken?.trim() || ''
           if (!token) {
@@ -191,23 +186,6 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               return newResults
             })
             failCount++
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
-          credHash = await sha256Hex(token)
-          if (existingOauthHashes.has(credHash)) {
-            duplicateCount++
-            const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === credHash)
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'duplicate',
-                error: '该凭据已存在',
-                email: existingCred?.email || undefined
-              }
-              return newResults
-            })
             setProgress({ current: i + 1, total: credentials.length })
             continue
           }
@@ -233,6 +211,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
               apiRegion: cred.apiRegion?.trim() || undefined,
               machineId: cred.machineId?.trim() || undefined,
+              email: cred.email?.trim() || undefined,
               endpoint: cred.endpoint?.trim() || undefined,
             })
 
@@ -245,7 +224,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             const balance = await getCredentialBalance(addedCred.credentialId)
 
             successCount++
-            existingApiKeyHashes.add(credHash)
+            if (addedCred.email) existingEmails.add(addedCred.email.trim().toLowerCase())
             setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
             setResults(prev => {
               const newResults = [...prev]
@@ -282,6 +261,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             clientSecret,
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
+            email: cred.email?.trim() || undefined,
             endpoint: cred.endpoint?.trim() || undefined,
           })
 
@@ -295,7 +275,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
           // 验活成功
           successCount++
-          existingOauthHashes.add(credHash)
+          if (addedCred.email) existingEmails.add(addedCred.email.trim().toLowerCase())
           setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
           setResults(prev => {
             const newResults = [...prev]

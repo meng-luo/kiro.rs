@@ -29,6 +29,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [clientSecret, setClientSecret] = useState('')
   const [priority, setPriority] = useState('0')
   const [machineId, setMachineId] = useState('')
+  const [email, setEmail] = useState('')
   const [endpoint, setEndpoint] = useState('')
 
   const { mutate, isPending } = useAddCredential()
@@ -43,6 +44,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setClientSecret('')
     setPriority('0')
     setMachineId('')
+    setEmail('')
     setEndpoint('')
   }
 
@@ -80,6 +82,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         clientSecret: isApiKey ? undefined : clientSecret.trim() || undefined,
         priority: parseInt(priority) || 0,
         machineId: machineId.trim() || undefined,
+        email: email.trim() || undefined,
         endpoint: endpoint.trim() || undefined,
       },
       {
@@ -248,6 +251,24 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               />
               <p className="text-xs text-muted-foreground">
                 可选，64 位十六进制字符串，留空使用配置中字段, 否则由刷新Token自动派生
+              </p>
+            </div>
+
+            {/* 邮箱 */}
+            <div className="space-y-2">
+              <label htmlFor="email" className="text-sm font-medium">
+                邮箱
+              </label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="留空自动从 API 获取"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={isPending}
+              />
+              <p className="text-xs text-muted-foreground">
+                添加时会自动请求账号信息 API 获取邮箱；这里仅作为 API 获取失败时的备用值
               </p>
             </div>
 

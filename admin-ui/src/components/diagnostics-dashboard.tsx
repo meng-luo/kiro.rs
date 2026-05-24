@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import {
   useDiagnosticsCli, useDiagnosticsSummary,
+  useCredentials,
 } from '@/hooks/use-credentials'
 import { cn } from '@/lib/utils'
 import type {
@@ -464,9 +465,14 @@ function buildFilters(ui: UiFilters, limit: number, cursor?: number): Diagnostic
   }
 }
 
-function activeFilterChips(ui: UiFilters): Array<{ key: keyof UiFilters; label: string }> {
+function parseCredentialKey(key: string): number | null {
+  const id = Number(key.replace(/^#/, ''))
+  return Number.isFinite(id) && id > 0 ? id : null
+}
+
+function activeFilterChips(ui: UiFilters, credentialLabel: (id?: number | null) => string): Array<{ key: keyof UiFilters; label: string }> {
   const chips: Array<{ key: keyof UiFilters; label: string }> = []
-  if (ui.credentialId) chips.push({ key: 'credentialId', label: `账号 #${ui.credentialId}` })
+  if (ui.credentialId) chips.push({ key: 'credentialId', label: credentialLabel(Number(ui.credentialId)) })
   if (ui.model) chips.push({ key: 'model', label: `模型 ${ui.model}` })
   if (ui.rateLimitKind) chips.push({ key: 'rateLimitKind', label: rateLimitLabel(ui.rateLimitKind) })
   if (ui.rateLimitOnly) chips.push({ key: 'rateLimitOnly', label: '只看限频' })
@@ -494,7 +500,21 @@ export function DiagnosticsDashboard() {
 
   const summary = useDiagnosticsSummary(summaryFilters)
   const cli = useDiagnosticsCli(summaryFilters)
+  const credentials = useCredentials()
   const data = summary.data
+  const credentialLabels = useMemo(() => {
+    const map = new Map<number, string>()
+    ;(credentials.data?.credentials ?? []).forEach((item) => {
+      map.set(item.id, item.email || `账号 #${item.id}`)
+    })
+    return map
+  }, [credentials.data?.credentials])
+  const credentialLabel = (id?: number | null) => (id ? credentialLabels.get(id) || `账号 #${id}` : '-')
+  const credentialKeyLabel = (key: string) => credentialLabel(parseCredentialKey(key))
+  const pickCredentialKey = (key: string) => {
+    const id = parseCredentialKey(key)
+    if (id) updateFilter('credentialId', String(id))
+  }
 
   // 自动刷新
   useEffect(() => {
@@ -544,7 +564,7 @@ export function DiagnosticsDashboard() {
     : 0
   const tokenTotal = tokenInputTotal + (data?.outputTokens ?? 0)
 
-  const chips = activeFilterChips(ui)
+  const chips = activeFilterChips(ui, credentialLabel)
 
   return (
     <div className="space-y-6">
@@ -556,7 +576,7 @@ export function DiagnosticsDashboard() {
               <Input
                 value={keywordInput}
                 onChange={(e) => setKeywordInput(e.target.value)}
-                placeholder="搜索 requestId / 错误码 / 错误消息 / 模型 / 账号 ID"
+                placeholder="搜索 requestId / 错误码 / 错误消息 / 模型 / 账号"
                 className="pl-9"
               />
             </div>
@@ -602,7 +622,7 @@ export function DiagnosticsDashboard() {
           </div>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             <div className="space-y-1">
-              <label className="text-xs text-muted-foreground">账号 ID</label>
+              <label className="text-xs text-muted-foreground">账号</label>
               <Input value={ui.credentialId} onChange={(e) => updateFilter('credentialId', e.target.value)} placeholder="例如 1" />
             </div>
             <div className="space-y-1">
@@ -750,7 +770,8 @@ export function DiagnosticsDashboard() {
         <RankList
           title="账号命中排行"
           items={data?.credentialRank ?? []}
-          onPick={(key) => updateFilter('credentialId', key.replace(/^#/, ''))}
+          formatter={credentialKeyLabel}
+          onPick={pickCredentialKey}
         />
         <RankList
           title="错误排行"
@@ -781,7 +802,8 @@ export function DiagnosticsDashboard() {
         <PerformanceChart
           title="账号性能分析"
           items={data?.credentialPerformance ?? []}
-          onPick={(key) => updateFilter('credentialId', key.replace(/^#/, ''))}
+          formatter={credentialKeyLabel}
+          onPick={pickCredentialKey}
         />
         <PerformanceChart
           title="模型性能对比"
@@ -794,7 +816,8 @@ export function DiagnosticsDashboard() {
         <PerformanceTable
           title="账号明细"
           items={data?.credentialPerformance ?? []}
-          onPick={(key) => updateFilter('credentialId', key.replace(/^#/, ''))}
+          formatter={credentialKeyLabel}
+          onPick={pickCredentialKey}
         />
         <PerformanceTable
           title="模型明细"
@@ -806,6 +829,5 @@ export function DiagnosticsDashboard() {
     </div>
   )
 }
-
 
 

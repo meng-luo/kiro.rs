@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Clipboard, Copy, Download, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -111,6 +111,14 @@ export function RecordsPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const start = total === 0 ? 0 : (currentPage - 1) * pageSize + 1
   const end = Math.min(currentPage * pageSize, total)
+  const credentialLabels = useMemo(() => {
+    const map = new Map<number, string>()
+    ;(credentials.data?.credentials ?? []).forEach((item) => {
+      map.set(item.id, item.email || `账号 #${item.id}`)
+    })
+    return map
+  }, [credentials.data?.credentials])
+  const credentialLabel = (id?: number | null) => (id ? credentialLabels.get(id) || `账号 #${id}` : '-')
 
   const resetCursor = () => setCursor(undefined)
 
@@ -149,7 +157,7 @@ export function RecordsPage() {
       item.requestId,
       item.originalModel || '',
       item.mappedModel || '',
-      item.credentialId ? `#${item.credentialId}` : '',
+      credentialLabel(item.credentialId),
       dispatchLabel(item.dispatchPath),
       item.stickyHit ? '是' : '否',
       item.success ? '成功' : item.rateLimitKind ? '限频' : '失败',
@@ -249,7 +257,11 @@ export function RecordsPage() {
                         {item.mappedModel || '-'}
                       </div>
                     </td>
-                    <td className="px-4 py-3"><Badge variant="outline">{item.credentialId ? `#${item.credentialId}` : '-'}</Badge></td>
+                    <td className="px-4 py-3">
+                      <Badge variant="outline" title={item.credentialId ? `账号 #${item.credentialId}` : undefined}>
+                        {credentialLabel(item.credentialId)}
+                      </Badge>
+                    </td>
                     <td className="px-4 py-3">
                       <div className="flex max-w-[220px] flex-wrap gap-1">
                         <Badge variant={item.dispatchPath === 'soft_fallback' ? 'warning' : 'outline'}>{dispatchLabel(item.dispatchPath)}</Badge>
@@ -329,7 +341,7 @@ export function RecordsPage() {
               <DetailRow label="耗时" value={formatDuration(detail.data.durationMs)} />
               <DetailRow label="原始模型" value={detail.data.originalModel} />
               <DetailRow label="映射模型" value={detail.data.mappedModel} />
-              <DetailRow label="账号" value={detail.data.credentialId ? `#${detail.data.credentialId}` : null} />
+              <DetailRow label="账号" value={credentialLabel(detail.data.credentialId)} />
               <DetailRow
                 label="调度路径"
                 value={

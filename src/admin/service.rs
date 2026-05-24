@@ -628,8 +628,6 @@ impl AdminService {
             }
         }
 
-        // 构建凭据对象
-        let email = req.email.clone();
         let new_cred = KiroCredentials {
             id: None,
             access_token: None,
@@ -671,6 +669,14 @@ impl AdminService {
         if let Err(e) = self.token_manager.get_usage_limits_for(credential_id).await {
             tracing::warn!("添加凭据后获取订阅等级失败（不影响凭据添加）: {}", e);
         }
+
+        let email = self
+            .token_manager
+            .snapshot()
+            .entries
+            .into_iter()
+            .find(|entry| entry.id == credential_id)
+            .and_then(|entry| entry.email);
 
         Ok(AddCredentialResponse {
             success: true,
