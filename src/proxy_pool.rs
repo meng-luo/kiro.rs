@@ -8,6 +8,7 @@ use crate::http_client::ProxyConfig;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyPoolItem {
+    name: Option<String>,
     protocol: String,
     host: String,
     port: u16,
@@ -28,6 +29,12 @@ pub struct ProxyPool {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct SelectedProxy {
+    pub name: String,
+    pub config: ProxyConfig,
+}
+
 impl ProxyPool {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -40,6 +47,11 @@ impl ProxyPool {
     }
 
     pub fn random_enabled_proxy(&self) -> Option<ProxyConfig> {
+        self.random_enabled_proxy_with_name()
+            .map(|proxy| proxy.config)
+    }
+
+    pub fn random_enabled_proxy_with_name(&self) -> Option<SelectedProxy> {
         let data = self.load().ok()?;
         let enabled = data
             .proxies
@@ -51,7 +63,10 @@ impl ProxyPool {
         }
         enabled
             .get(fastrand::usize(..enabled.len()))
-            .map(Self::proxy_config_from_item)
+            .map(|proxy| SelectedProxy {
+                name: Self::proxy_display_name(proxy),
+                config: Self::proxy_config_from_item(proxy),
+            })
     }
 
     fn load(&self) -> anyhow::Result<ProxyPoolData> {
@@ -78,5 +93,22 @@ impl ProxyPool {
             }
             _ => config,
         }
+    }
+
+    fn proxy_display_name(proxy: &ProxyPoolItem) -> String {
+        proxy
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "{}://{}:{}",
+                    proxy.protocol.trim().to_lowercase(),
+                    proxy.host.trim(),
+                    proxy.port
+                )
+            })
     }
 }

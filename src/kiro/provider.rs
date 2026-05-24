@@ -143,15 +143,20 @@ impl KiroProvider {
     }
 
     /// 从代理池随机获取（或创建并缓存）对应的 reqwest::Client，池空时直连。
-    fn client_for(&self, _credentials: &KiroCredentials) -> anyhow::Result<Client> {
-        let effective = self.proxy_pool.random_enabled_proxy();
+    fn client_for(&self, _credentials: &KiroCredentials) -> anyhow::Result<(Client, String)> {
+        let selected_proxy = self.proxy_pool.random_enabled_proxy_with_name();
+        let proxy_name = selected_proxy
+            .as_ref()
+            .map(|proxy| proxy.name.clone())
+            .unwrap_or_else(|| "直连".to_string());
+        let effective = selected_proxy.map(|proxy| proxy.config);
         let mut cache = self.client_cache.lock();
         if let Some(client) = cache.get(&effective) {
-            return Ok(client.clone());
+            return Ok((client.clone(), proxy_name));
         }
         let client = build_client(effective.as_ref(), 720, self.tls_backend)?;
         cache.insert(effective, client.clone());
-        Ok(client)
+        Ok((client, proxy_name))
     }
 
     /// 根据凭据选择 endpoint 实现
@@ -292,8 +297,8 @@ impl KiroProvider {
             let url = endpoint.mcp_url(&rctx);
             let body = endpoint.transform_mcp_body(request_body, &rctx);
 
-            let base = self
-                .client_for(&ctx.credentials)?
+            let (client, _proxy_name) = self.client_for(&ctx.credentials)?;
+            let base = client
                 .post(&url)
                 .body(body)
                 .header("content-type", "application/json")
@@ -643,8 +648,8 @@ impl KiroProvider {
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
 
-            let base = self
-                .client_for(&ctx.credentials)?
+            let (client, proxy_name) = self.client_for(&ctx.credentials)?;
+            let base = client
                 .post(&url)
                 .body(body)
                 .header("content-type", "application/json")
@@ -725,6 +730,7 @@ impl KiroProvider {
                     original_model: original_model.clone(),
                     mapped_model: model.clone(),
                     credential_id: Some(ctx.id),
+                    proxy_name: Some(proxy_name.clone()),
                     dispatch_path: Some(ctx.dispatch_path.to_string()),
                     sticky_hit: ctx.dispatch_path.to_string() == "sticky",
                     sticky_detached: false,
@@ -777,6 +783,7 @@ impl KiroProvider {
                     model.clone(),
                     input_tokens,
                     &session_hash,
+                    &proxy_name,
                     &ctx,
                     status.as_u16(),
                     "quota_exhausted",
@@ -812,6 +819,7 @@ impl KiroProvider {
                     model.clone(),
                     input_tokens,
                     &session_hash,
+                    &proxy_name,
                     &ctx,
                     status.as_u16(),
                     "bad_request",
@@ -843,6 +851,7 @@ impl KiroProvider {
                         model.clone(),
                         input_tokens,
                         &session_hash,
+                        &proxy_name,
                         &ctx,
                         status.as_u16(),
                         "account_banned",
@@ -893,6 +902,7 @@ impl KiroProvider {
                     model.clone(),
                     input_tokens,
                     &session_hash,
+                    &proxy_name,
                     &ctx,
                     status.as_u16(),
                     "credential_error",
@@ -951,6 +961,7 @@ impl KiroProvider {
                     model.clone(),
                     input_tokens,
                     &session_hash,
+                    &proxy_name,
                     &ctx,
                     status.as_u16(),
                     kind_text,
@@ -1001,6 +1012,7 @@ impl KiroProvider {
                     model.clone(),
                     input_tokens,
                     &session_hash,
+                    &proxy_name,
                     &ctx,
                     status.as_u16(),
                     "upstream_transient",
@@ -1031,6 +1043,7 @@ impl KiroProvider {
                     model.clone(),
                     input_tokens,
                     &session_hash,
+                    &proxy_name,
                     &ctx,
                     status.as_u16(),
                     "client_error",
@@ -1058,6 +1071,7 @@ impl KiroProvider {
                 model.clone(),
                 input_tokens,
                 &session_hash,
+                &proxy_name,
                 &ctx,
                 status.as_u16(),
                 "unknown_error",
@@ -1130,6 +1144,7 @@ impl KiroProvider {
             credential_id = update.credential_id,
             original_model = update.original_model.as_deref().unwrap_or("-"),
             mapped_model = update.mapped_model.as_deref().unwrap_or("-"),
+            proxy_name = update.proxy_name.as_deref().unwrap_or("直连"),
             dispatch_path = update.dispatch_path.as_deref().unwrap_or("-"),
             success = update.success,
             upstream_status = update.upstream_status,
@@ -1148,6 +1163,7 @@ impl KiroProvider {
         mapped_model: Option<String>,
         input_tokens: Option<i32>,
         session_hash: &Option<String>,
+        proxy_name: &str,
         ctx: &CallContext,
         status: u16,
         error_code: &str,
@@ -1164,6 +1180,7 @@ impl KiroProvider {
             original_model,
             mapped_model,
             credential_id: Some(ctx.id),
+            proxy_name: Some(proxy_name.to_string()),
             dispatch_path: Some(ctx.dispatch_path.to_string()),
             sticky_hit: ctx.dispatch_path.to_string() == "sticky",
             sticky_detached: rate_limit_kind.as_deref() == Some("suspicious_activity"),

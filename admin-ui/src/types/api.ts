@@ -256,6 +256,7 @@ export interface RequestDiagnosticEntry {
   originalModel?: string | null
   mappedModel?: string | null
   credentialId?: number | null
+  proxyName?: string | null
   dispatchPath?: 'preferred' | 'sticky' | 'balanced' | 'soft_fallback' | string | null
   stickyHit: boolean
   stickyDetached: boolean

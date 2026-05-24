@@ -53,6 +53,10 @@ function dispatchLabel(path?: string | null) {
   }
 }
 
+function proxyLabel(name?: string | null) {
+  return name?.trim() || '直连'
+}
+
 function copyText(text: string, hint = '已复制') {
   if (!text) return
   navigator.clipboard.writeText(text).then(() => toast.success(hint)).catch(() => toast.error('复制失败'))
@@ -151,13 +155,14 @@ export function RecordsPage() {
   }
 
   const exportCsv = () => {
-    const header = ['时间', '请求 ID', '原始模型', '映射模型', '账号', '调度', '粘性命中', '结果', '限频类型', '上游状态', '错误码', '错误消息', '耗时', '输入 Token', '缓存写入 Token', '缓存命中 Token', '未命中 Token', '输出 Token']
+    const header = ['时间', '请求 ID', '原始模型', '映射模型', '账号', '代理', '调度', '粘性命中', '结果', '限频类型', '上游状态', '错误码', '错误消息', '耗时', '输入 Token', '缓存写入 Token', '缓存命中 Token', '未命中 Token', '输出 Token']
     const rows = items.map((item) => [
       formatTime(item.startedAt),
       item.requestId,
       item.originalModel || '',
       item.mappedModel || '',
       credentialLabel(item.credentialId),
+      proxyLabel(item.proxyName),
       dispatchLabel(item.dispatchPath),
       item.stickyHit ? '是' : '否',
       item.success ? '成功' : item.rateLimitKind ? '限频' : '失败',
@@ -229,13 +234,14 @@ export function RecordsPage() {
       <Card className="rounded-md">
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1360px] text-sm">
+            <table className="w-full min-w-[1480px] text-sm">
               <thead className="border-b bg-muted/30">
                 <tr className="text-left text-xs text-muted-foreground">
                   <th className="px-4 py-3 font-medium">时间</th>
                   <th className="px-4 py-3 font-medium">请求 ID</th>
                   <th className="px-4 py-3 font-medium">模型</th>
                   <th className="px-4 py-3 font-medium">账号</th>
+                  <th className="px-4 py-3 font-medium">代理</th>
                   <th className="px-4 py-3 font-medium">调度</th>
                   <th className="px-4 py-3 font-medium">结果</th>
                   <th className="px-4 py-3 font-medium">上游返回</th>
@@ -261,6 +267,11 @@ export function RecordsPage() {
                       <Badge variant="outline" title={item.credentialId ? `账号 #${item.credentialId}` : undefined}>
                         {credentialLabel(item.credentialId)}
                       </Badge>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="max-w-[180px] truncate" title={proxyLabel(item.proxyName)}>
+                        {proxyLabel(item.proxyName)}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex max-w-[220px] flex-wrap gap-1">
@@ -290,7 +301,7 @@ export function RecordsPage() {
                 ))}
                 {items.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-12 text-center text-muted-foreground">暂无记录</td>
+                    <td colSpan={11} className="px-4 py-12 text-center text-muted-foreground">暂无记录</td>
                   </tr>
                 ) : null}
               </tbody>
@@ -342,6 +353,7 @@ export function RecordsPage() {
               <DetailRow label="原始模型" value={detail.data.originalModel} />
               <DetailRow label="映射模型" value={detail.data.mappedModel} />
               <DetailRow label="账号" value={credentialLabel(detail.data.credentialId)} />
+              <DetailRow label="代理" value={proxyLabel(detail.data.proxyName)} />
               <DetailRow
                 label="调度路径"
                 value={

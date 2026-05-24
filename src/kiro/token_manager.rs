@@ -1166,7 +1166,7 @@ impl MultiTokenManager {
     }
 
     async fn backfill_missing_emails(&self) {
-        let ids = {
+        let mut pending_ids = {
             let entries = self.entries.lock();
             entries
                 .iter()
@@ -1176,19 +1176,119 @@ impl MultiTokenManager {
                 .collect::<Vec<_>>()
         };
 
-        if ids.is_empty() {
+        if pending_ids.is_empty() {
+            self.deduplicate_existing_credentials_by_email();
             return;
         }
 
-        tracing::info!("启动时发现 {} 个账号缺少邮箱，开始补全", ids.len());
+        tracing::info!("启动时发现 {} 个账号缺少邮箱，开始补全", pending_ids.len());
+        let failed_ids = self
+            .backfill_email_batch(pending_ids.drain(..).collect())
+            .await;
+
+        if !failed_ids.is_empty() {
+            tracing::info!("{} 个账号邮箱补全失败，开始重试一次", failed_ids.len());
+            let retry_failed_ids = self.backfill_email_batch(failed_ids).await;
+            for id in retry_failed_ids {
+                tracing::warn!("凭据 #{} 重试后仍未获取到邮箱", id);
+            }
+        }
+
+        self.deduplicate_existing_credentials_by_email();
+    }
+
+    async fn backfill_email_batch(&self, ids: Vec<u64>) -> Vec<u64> {
+        let mut failed_ids = Vec::new();
         for id in ids {
             match self.refresh_email_for(id).await {
                 Ok(Some(email)) => tracing::info!("凭据 #{} 邮箱已补全: {}", id, email),
-                Ok(None) => tracing::warn!("凭据 #{} 未能从账号信息 API 获取邮箱", id),
-                Err(err) => tracing::warn!("凭据 #{} 邮箱补全失败: {}", id, err),
+                Ok(None) => {
+                    tracing::warn!("凭据 #{} 未能从账号信息 API 获取邮箱", id);
+                    failed_ids.push(id);
+                }
+                Err(err) => {
+                    tracing::warn!("凭据 #{} 邮箱补全失败: {}", id, err);
+                    failed_ids.push(id);
+                }
             }
             tokio::time::sleep(StdDuration::from_millis(500)).await;
         }
+        failed_ids
+    }
+
+    fn deduplicate_existing_credentials_by_email(&self) {
+        let current_id = *self.current_id.lock();
+        let duplicate_ids = {
+            let entries = self.entries.lock();
+            let mut ordered = entries
+                .iter()
+                .filter_map(|entry| {
+                    credential_email_key(&entry.credentials).map(|email| {
+                        (
+                            email,
+                            entry.id,
+                            entry.credentials.priority,
+                            entry.id == current_id,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            ordered.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| b.3.cmp(&a.3))
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+
+            let mut seen_emails = HashSet::new();
+            ordered
+                .into_iter()
+                .filter_map(|(email, id, _, _)| {
+                    if seen_emails.insert(email) {
+                        None
+                    } else {
+                        Some(id)
+                    }
+                })
+                .collect::<HashSet<_>>()
+        };
+
+        if duplicate_ids.is_empty() {
+            tracing::info!("邮箱补全完成，未发现重复账号");
+            return;
+        }
+
+        let removed = {
+            let mut entries = self.entries.lock();
+            let before = entries.len();
+            entries.retain(|entry| !duplicate_ids.contains(&entry.id));
+            before - entries.len()
+        };
+
+        let current_still_available = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .any(|entry| entry.id == current_id && !entry.disabled)
+        };
+        if !current_still_available {
+            self.select_highest_priority();
+        }
+
+        if self.entries.lock().is_empty() {
+            let mut current_id = self.current_id.lock();
+            *current_id = 0;
+        }
+
+        if let Err(err) = self.persist_credentials() {
+            tracing::warn!("邮箱去重后持久化失败: {}", err);
+        }
+        self.save_stats();
+
+        let mut ids = duplicate_ids.into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        tracing::info!("邮箱补全完成，已删除 {} 个重复账号: {:?}", removed, ids);
     }
 
     fn random_proxy_from_pool(&self) -> Option<ProxyConfig> {
@@ -3514,6 +3614,58 @@ mod tests {
 
         assert!(manager.duplicate_email_exists("user@example.com", None));
         assert!(!manager.duplicate_email_exists("other@example.com", None));
+    }
+
+    #[test]
+    fn test_deduplicate_existing_credentials_by_email_removes_later_duplicates() {
+        let config = Config::default();
+        let mut first = KiroCredentials::default();
+        first.id = Some(1);
+        first.email = Some("user@example.com".to_string());
+        first.priority = 1;
+        let mut duplicate = KiroCredentials::default();
+        duplicate.id = Some(2);
+        duplicate.email = Some(" USER@example.com ".to_string());
+        duplicate.priority = 2;
+        let mut unique = KiroCredentials::default();
+        unique.id = Some(3);
+        unique.email = Some("other@example.com".to_string());
+
+        let manager =
+            MultiTokenManager::new(config, vec![first, duplicate, unique], None, false).unwrap();
+
+        manager.deduplicate_existing_credentials_by_email();
+
+        let ids = manager
+            .snapshot()
+            .entries
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_deduplicate_existing_credentials_by_email_prefers_current_account() {
+        let config = Config::default();
+        let mut first = KiroCredentials::default();
+        first.id = Some(1);
+        first.email = Some("user@example.com".to_string());
+        first.priority = 0;
+        let mut current = KiroCredentials::default();
+        current.id = Some(2);
+        current.email = Some("user@example.com".to_string());
+        current.priority = 1;
+
+        let manager = MultiTokenManager::new(config, vec![first, current], None, false).unwrap();
+        *manager.current_id.lock() = 2;
+
+        manager.deduplicate_existing_credentials_by_email();
+
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].id, 2);
+        assert_eq!(snapshot.current_id, 2);
     }
 
     #[tokio::test]
