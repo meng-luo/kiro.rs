@@ -57,6 +57,10 @@ function proxyLabel(name?: string | null) {
   return name?.trim() || '直连'
 }
 
+function shortRequestId(id: string) {
+  return id.length > 18 ? `${id.slice(0, 8)}...${id.slice(-6)}` : id
+}
+
 function copyText(text: string, hint = '已复制') {
   if (!text) return
   navigator.clipboard.writeText(text).then(() => toast.success(hint)).catch(() => toast.error('复制失败'))
@@ -234,7 +238,20 @@ export function RecordsPage() {
       <Card className="rounded-md">
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1480px] text-sm">
+            <table className="w-full min-w-[1280px] table-fixed text-sm">
+              <colgroup>
+                <col className="w-[150px]" />
+                <col className="w-[150px]" />
+                <col className="w-[220px]" />
+                <col className="w-[190px]" />
+                <col className="w-[170px]" />
+                <col className="w-[180px]" />
+                <col className="w-[90px]" />
+                <col className="w-[230px]" />
+                <col className="w-[90px]" />
+                <col className="w-[180px]" />
+                <col className="w-[80px]" />
+              </colgroup>
               <thead className="border-b bg-muted/30">
                 <tr className="text-left text-xs text-muted-foreground">
                   <th className="px-4 py-3 font-medium">时间</th>
@@ -254,7 +271,11 @@ export function RecordsPage() {
                 {items.map((item) => (
                   <tr key={item.requestId} className="hover:bg-muted/20">
                     <td className="px-4 py-3 whitespace-nowrap">{formatTime(item.startedAt)}</td>
-                    <td className="px-4 py-3 font-mono text-xs">{item.requestId}</td>
+                    <td className="px-4 py-3">
+                      <div className="font-mono text-xs text-muted-foreground" title={item.requestId}>
+                        {shortRequestId(item.requestId)}
+                      </div>
+                    </td>
                     <td className="px-4 py-3">
                       <div className="max-w-[220px] truncate font-medium" title={item.originalModel ?? '-'}>
                         {item.originalModel || '-'}
@@ -264,12 +285,19 @@ export function RecordsPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <Badge variant="outline" title={item.credentialId ? `账号 #${item.credentialId}` : undefined}>
-                        {credentialLabel(item.credentialId)}
+                      <Badge
+                        variant="outline"
+                        className="max-w-[160px] justify-start"
+                        title={item.credentialId ? credentialLabel(item.credentialId) : undefined}
+                      >
+                        <span className="min-w-0 truncate">{credentialLabel(item.credentialId)}</span>
                       </Badge>
+                      {item.credentialId ? (
+                        <div className="mt-1 text-xs text-muted-foreground">#{item.credentialId}</div>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="max-w-[180px] truncate" title={proxyLabel(item.proxyName)}>
+                      <div className="truncate" title={proxyLabel(item.proxyName)}>
                         {proxyLabel(item.proxyName)}
                       </div>
                     </td>
