@@ -1,6 +1,6 @@
 services:
   kiro-rs-cache-test:
-    image: ghcr.io/${IMAGE_OWNER:-shusfun}/kiro-rs:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-meng-luo}/kiro-rs:${IMAGE_TAG:-latest}
     container_name: kiro-rs-cache-test
     extra_hosts:
       - "host.docker.internal:host-gateway"
