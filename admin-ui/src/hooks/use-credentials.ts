@@ -10,6 +10,7 @@ import {
   resetCredentialFailure,
   forceRefreshToken,
   refreshCredentialModels,
+  refreshCredentialEmail,
   getCredentialBalance,
   addCredential,
   deleteCredential,
@@ -220,6 +221,16 @@ export function useRefreshCredentialModels() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: number) => refreshCredentialModels(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useRefreshCredentialEmail() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => refreshCredentialEmail(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

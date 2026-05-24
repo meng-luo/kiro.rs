@@ -482,6 +482,16 @@ pub struct AvailableModelsResponse {
     pub available_models: Vec<String>,
 }
 
+/// 邮箱刷新响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialEmailResponse {
+    /// 凭据 ID
+    pub id: u64,
+    /// 当前账号邮箱
+    pub email: String,
+}
+
 // ============ 负载均衡配置 ============
 
 /// 负载均衡模式响应

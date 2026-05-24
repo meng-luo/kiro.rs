@@ -3,6 +3,7 @@ import { storage } from '@/lib/storage'
 import type {
   CredentialsStatusResponse,
   AvailableModelsResponse,
+  CredentialEmailResponse,
   BalanceResponse,
   SuccessResponse,
   SetMaxConcurrentRequest,
@@ -211,6 +212,12 @@ export async function forceRefreshToken(
 // 刷新凭据可用模型列表
 export async function refreshCredentialModels(id: number): Promise<AvailableModelsResponse> {
   const { data } = await api.post<AvailableModelsResponse>(`/credentials/${id}/models/refresh`)
+  return data
+}
+
+// 刷新凭据邮箱
+export async function refreshCredentialEmail(id: number): Promise<CredentialEmailResponse> {
+  const { data } = await api.post<CredentialEmailResponse>(`/credentials/${id}/email/refresh`)
   return data
 }
 

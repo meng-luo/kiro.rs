@@ -679,6 +679,7 @@ impl KiroProvider {
                         original_model: original_model.clone(),
                         mapped_model: model.clone(),
                         credential_id: Some(ctx.id),
+                        proxy_name: Some(proxy_name.clone()),
                         dispatch_path: Some(ctx.dispatch_path.to_string()),
                         sticky_hit: ctx.dispatch_path.to_string() == "sticky",
                         sticky_detached: false,

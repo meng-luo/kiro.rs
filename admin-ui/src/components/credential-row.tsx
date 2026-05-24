@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import {
   Activity,
   Bot,
+  Mail,
   MoreHorizontal,
   Loader2,
   PlugZap,
@@ -26,7 +27,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
-import { useBatchUpdateCredentials, useDeleteCredential, useForceRefreshToken, useRecoverCredential, useRefreshCredentialModels, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
+import { useBatchUpdateCredentials, useDeleteCredential, useForceRefreshToken, useRecoverCredential, useRefreshCredentialEmail, useRefreshCredentialModels, useSetDisabled, useSetMaxConcurrent, useSetPriority } from '@/hooks/use-credentials'
 import { testCredential } from '@/api/credentials'
 import { cn } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem, CredentialTestEvent, SchedulerPolicy } from '@/types/api'
@@ -398,6 +399,7 @@ export function CredentialRow({
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
   const refreshModels = useRefreshCredentialModels()
+  const refreshEmail = useRefreshCredentialEmail()
   const updateCredential = useBatchUpdateCredentials()
 
   const status = statusMeta(credential)
@@ -406,6 +408,7 @@ export function CredentialRow({
   const dispatchPathMeta = dispatchPathLabel(credential.dispatchPath)
   const canRecover = credential.dispatchState === 'blocked'
   const canRefresh = !credential.disabled && credential.authMethod !== 'api_key'
+  const canRefreshEmail = !credential.email?.trim()
   const progressValue = credential.maxConcurrent > 0
     ? Math.min(100, (credential.currentConcurrent / credential.maxConcurrent) * 100)
     : 0
@@ -576,6 +579,13 @@ export function CredentialRow({
     })
   }
 
+  const handleRefreshEmail = () => {
+    refreshEmail.mutate(credential.id, {
+      onSuccess: (res) => toast.success(`邮箱已获取：${res.email}`),
+      onError: (err) => toast.error(`获取邮箱失败: ${(err as Error).message}`),
+    })
+  }
+
   const handleDelete = () => {
     deleteCredential.mutate(credential.id, {
       onSuccess: (res) => {
@@ -662,6 +672,15 @@ export function CredentialRow({
       >
         刷新用量
       </button>
+      {canRefreshEmail ? (
+        <button
+          className="block w-full rounded px-3 py-2 text-left hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={refreshEmail.isPending}
+          onClick={() => { setActionsOpen(false); handleRefreshEmail() }}
+        >
+          获取邮箱
+        </button>
+      ) : null}
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" disabled={!canRecover || recoverCredential.isPending} onClick={() => { setActionsOpen(false); handleRecover() }}>重置失败</button>
       <div className="my-1 border-t" />
       <button className="block w-full rounded px-3 py-2 text-left hover:bg-muted" onClick={() => { setActionsOpen(false); setShowTestDialog(true) }}>测试连接</button>
@@ -689,6 +708,18 @@ export function CredentialRow({
                     {loadingBalance ? '查询中...' : subscriptionLabel(credential, visibleBalance)}
                   </Badge>
                   {credential.isCurrent ? <Badge variant="success">当前</Badge> : null}
+                  {canRefreshEmail ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleRefreshEmail}
+                      disabled={refreshEmail.isPending}
+                      title="从账号信息 API 获取邮箱"
+                    >
+                      {refreshEmail.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                      获取邮箱
+                    </Button>
+                  ) : null}
                 </div>
                 <div className="mt-1 truncate text-sm text-muted-foreground" title={`${credential.endpoint} · 最近使用：${formatLastUsed(credential.lastUsedAt)}`}>
                   {credential.endpoint} · 最近使用：{formatLastUsed(credential.lastUsedAt)}
@@ -917,6 +948,11 @@ export function CredentialRow({
                 <RefreshCw className={cn('h-4 w-4', forceRefresh.isPending && 'animate-spin')} />
               </Button>
             )}
+            {canRefreshEmail ? (
+              <Button size="icon" variant="ghost" onClick={handleRefreshEmail} disabled={refreshEmail.isPending} title="获取邮箱">
+                {refreshEmail.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+              </Button>
+            ) : null}
             <Button size="icon" variant="ghost" onClick={handleRefreshModels} disabled={refreshModels.isPending} title="刷新支持模型">
               {refreshModels.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
             </Button>

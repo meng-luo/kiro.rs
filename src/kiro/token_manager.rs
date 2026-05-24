@@ -3088,7 +3088,7 @@ impl MultiTokenManager {
         Ok(token)
     }
 
-    async fn refresh_email_for(&self, id: u64) -> anyhow::Result<Option<String>> {
+    pub async fn refresh_email_for(&self, id: u64) -> anyhow::Result<Option<String>> {
         let token = self.ensure_token_for(id).await?;
         let credentials = {
             let entries = self.entries.lock();

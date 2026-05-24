@@ -41,11 +41,11 @@ use super::types::{
     AddCredentialRequest, AddCredentialResponse, AdminSettingsRequest, AdminSettingsResponse,
     AvailableModelsResponse, BalanceResponse, BatchBalanceResponse, BatchCredentialUpdateRequest,
     BatchDisabledRequest, BatchIdsRequest, BatchOperationResponse, CachedBalanceStatus,
-    CredentialStatusItem, CredentialTestRequest, CredentialsStatusResponse, DiagnosticsCliResponse,
-    DiagnosticsQueryRequest, LoadBalancingModeResponse, PromptCacheConfigRequest,
-    PromptCacheConfigResponse, ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest,
-    SetMaxConcurrentRequest, SystemOperationJobResponse, SystemRollbackRequest,
-    SystemUpdateRequest, SystemVersionResponse,
+    CredentialEmailResponse, CredentialStatusItem, CredentialTestRequest,
+    CredentialsStatusResponse, DiagnosticsCliResponse, DiagnosticsQueryRequest,
+    LoadBalancingModeResponse, PromptCacheConfigRequest, PromptCacheConfigResponse,
+    ProxyListResponse, ProxyUpsertRequest, SetLoadBalancingModeRequest, SetMaxConcurrentRequest,
+    SystemOperationJobResponse, SystemRollbackRequest, SystemUpdateRequest, SystemVersionResponse,
 };
 
 pub type TestEventStream =
@@ -512,6 +512,26 @@ impl AdminService {
             id,
             available_models: models,
         })
+    }
+
+    /// 刷新指定凭据邮箱
+    pub async fn refresh_credential_email(
+        &self,
+        id: u64,
+    ) -> Result<CredentialEmailResponse, AdminServiceError> {
+        let email = self
+            .token_manager
+            .refresh_email_for(id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?
+            .ok_or_else(|| {
+                AdminServiceError::InvalidCredential(format!(
+                    "凭据 #{} 未能从账号信息 API 获取邮箱",
+                    id
+                ))
+            })?;
+
+        Ok(CredentialEmailResponse { id, email })
     }
 
     /// 从上游获取余额（无缓存）

@@ -351,6 +351,18 @@ pub async fn refresh_credential_models(
     }
 }
 
+/// POST /api/admin/credentials/:id/email/refresh
+/// 刷新指定凭据邮箱
+pub async fn refresh_credential_email(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.refresh_credential_email(id).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// POST /api/admin/credentials/:id/test
 /// 对单个账号发起真实流式测试
 pub async fn test_credential(

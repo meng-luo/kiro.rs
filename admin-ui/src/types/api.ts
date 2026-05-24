@@ -183,6 +183,11 @@ export interface AvailableModelsResponse {
   availableModels: string[]
 }
 
+export interface CredentialEmailResponse {
+  id: number
+  email: string
+}
+
 export interface CachedBalanceStatus {
   cachedAt: string
   fresh: boolean
