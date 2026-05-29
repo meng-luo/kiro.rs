@@ -39,6 +39,11 @@ struct PublicModelSpec {
 
 const PUBLIC_MODEL_SPECS: &[PublicModelSpec] = &[
     PublicModelSpec {
+        id: "claude-opus-4-8",
+        created: 1780012800, // May 29, 2026
+        display_name: "Claude Opus 4.8",
+    },
+    PublicModelSpec {
         id: "claude-opus-4-7",
         created: 1776276000, // Apr 16, 2026
         display_name: "Claude Opus 4.7",
@@ -874,6 +879,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "claude-opus-4-8",
                 "claude-opus-4-7",
                 "claude-opus-4-6",
                 "claude-sonnet-4-6",

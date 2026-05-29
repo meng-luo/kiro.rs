@@ -9,6 +9,8 @@ import {
   RefreshCw,
   Settings,
   Activity,
+  Scale,
+  SlidersHorizontal,
   Sun,
   Users,
 } from 'lucide-react'
@@ -111,9 +113,17 @@ export function AppLayout({ onLogout }: AppLayoutProps) {
               size="sm"
               onClick={handleMode}
               disabled={isLoadingMode || setLoadBalancingMode.isPending}
-              className="hidden sm:inline-flex"
+              title="切换负载均衡模式"
+              className="px-2 sm:px-3"
             >
-              {loadBalancingData?.mode === 'balanced' ? '均衡负载' : '优先级模式'}
+              {loadBalancingData?.mode === 'balanced' ? (
+                <Scale className="h-4 w-4" />
+              ) : (
+                <SlidersHorizontal className="h-4 w-4" />
+              )}
+              <span className="hidden sm:inline">
+                {loadBalancingData?.mode === 'balanced' ? '均衡负载' : '优先级模式'}
+              </span>
             </Button>
             <Button variant="ghost" size="icon" onClick={handleTheme} title="切换主题">
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}

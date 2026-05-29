@@ -169,6 +169,9 @@ fn normalize_kiro_model_id(model_id: &str) -> Option<&'static str> {
             return Some("claude-sonnet-4.5");
         }
     } else if model.contains("opus") {
+        if model.contains("4-8") || model.contains("4.8") {
+            return Some("claude-opus-4.8");
+        }
         if model.contains("4-7") || model.contains("4.7") {
             return Some("claude-opus-4.7");
         }
@@ -242,6 +245,10 @@ mod tests {
         assert_eq!(
             normalize_kiro_model_id("claude-sonnet-4-6-thinking"),
             Some("claude-sonnet-4.6")
+        );
+        assert_eq!(
+            normalize_kiro_model_id("claude-opus-4-8-thinking"),
+            Some("claude-opus-4.8")
         );
     }
 

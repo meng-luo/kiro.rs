@@ -314,6 +314,9 @@ pub fn normalize_model_for_capability(model: &str) -> String {
         .unwrap_or(&lower);
 
     if lower.contains("opus") {
+        if lower.contains("4-8") || lower.contains("4.8") {
+            return "claude-opus-4.8".to_string();
+        }
         if lower.contains("4-7") || lower.contains("4.7") {
             return "claude-opus-4.7".to_string();
         }
@@ -710,6 +713,7 @@ mod tests {
     fn test_unknown_model_capabilities_do_not_filter_models() {
         let creds = KiroCredentials::default();
 
+        assert!(creds.supports_model("claude-opus-4-8"));
         assert!(creds.supports_model("claude-opus-4-7"));
         assert!(creds.supports_model("claude-sonnet-4-6"));
     }
@@ -717,9 +721,9 @@ mod tests {
     #[test]
     fn test_available_models_are_used_for_capability_check() {
         let mut creds = KiroCredentials::default();
-        creds.available_models = Some(vec!["claude-opus-4.7".to_string()]);
+        creds.available_models = Some(vec!["claude-opus-4.8".to_string()]);
 
-        assert!(creds.supports_model("claude-opus-4-7-thinking"));
+        assert!(creds.supports_model("claude-opus-4-8-thinking"));
         assert!(!creds.supports_model("claude-sonnet-4-6"));
     }
 

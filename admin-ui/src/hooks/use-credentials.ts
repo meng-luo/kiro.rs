@@ -272,7 +272,8 @@ export function useSetLoadBalancingMode() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: setLoadBalancingMode,
-    onSuccess: () => {
+    onSuccess: (response) => {
+      queryClient.setQueryData(['loadBalancingMode'], response)
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
     },
   })
