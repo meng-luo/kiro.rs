@@ -23,8 +23,10 @@
 - 本项目拿不到 Kiro 上游的真实 KV 张量缓存，只能在 provider 未返回精确 usage 时，
   按请求前缀模拟 Anthropic 的 `cache_creation_input_tokens` 与
   `cache_read_input_tokens`；该模拟不会降低上游推理成本。
-- 只有顶层自动缓存或显式 block `cache_control` 才写入条目；自动断点落在最后一个
-  合格 block，显式断点最多 4 个，读取从各断点回溯最多 20 个位置。
+- 顶层自动缓存或显式 block `cache_control` 会写入条目；完全未声明时兜底启用
+  5 分钟自动缓存（本地兼容扩展）。自动断点优先落在最新普通 user 提问之前的
+  最后一个合格 block，无其他合格 block 时落在当前输入；最多 4 个断点，
+  读取从各断点回溯最多 20 个位置。非法显式声明不触发兜底。
 - 连续 `tool_use` 和连续 `tool_result` 块分别只占一个回溯位置；断点只匹配此前真实
   写入的前缀，不为未声明的中间 block 建条目。
 - 每个条目独立保存 5 分钟或 1 小时 TTL，命中后按自身 TTL 续期；混用时 1 小时

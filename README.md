@@ -709,6 +709,12 @@ data/
 - `cache_read_input_tokens`
 - `output_tokens`
 
+完全未声明顶层或 block 级 `cache_control` 时，兜底使用 5 分钟自动缓存：
+优先缓存最新普通用户提问之前的历史前缀，无其他合格 block 时缓存当前输入。
+显式声明保持原有规则，非法声明不触发兜底；总开关和 Key/session 隔离仍然生效，
+共享系统 Key 缺少可识别 session 时不模拟缓存。该兜底仅用于本地用量估算，
+不减少 Kiro 上游推理成本；上游返回精确 usage 时仍优先采用上游值。
+
 <a id="admin-ui"></a>
 ## 🖥️ Admin UI
 

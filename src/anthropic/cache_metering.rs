@@ -9,12 +9,12 @@
 //! # 官方 Prompt Caching 语义对齐
 //! 1. **断点声明模式**：
 //!    - **顶层 auto-caching (`MessagesRequest.cache_control`)**：自动缓存开启，
-//!      断点自动落在整个 prompt 的最后一个可缓存 block，随多轮对话向前移动
-//!      （首轮写入最后一条 User，次轮从上一轮最后一条 User 读取）。自动断点占用 1 个断点槽。
+//!      断点优先落在最新普通 user 提问之前的最后一个合格 block，随多轮对话向前移动；
+//!      无其他合格 block 时回退到当前输入。自动断点占用 1 个断点槽。
 //!    - **显式 block 级缓存 (`cache_control`)**：仅在标记了 cache_control 的 block
 //!      处写入缓存 entry。
-//!    - **无 cache_control**：若无顶层且无任何 block 级 cache_control，则不模拟任何缓存，
-//!      全部计入 uncached input。
+//!    - **无 cache_control**：若无顶层且无任何 block 级 cache_control，则兜底使用
+//!      5 分钟自动断点；仍受计量开关和 Key/session 隔离约束。这是本地兼容扩展。
 //! 2. **20-Block Lookback 回溯查找**：
 //!    - 读取匹配时，从每个断点向后（回溯）最多检查 20 个 block，寻找此前真正写入过的
 //!      最长前缀断点。只能命中此前实际写入过的断点，未声明断点的中间 block 不会写入或命中。
@@ -820,13 +820,30 @@ fn resolve_breakpoints(
         }
     }
 
-    // 2. 顶层自动缓存：若有多轮对话且最后一条是当前 user 提问，断点优先挂在当前提问之前的上一轮会话末尾，
-    // 确保当前最新提问 100% 诚实作为未缓存 input_tokens，杜绝 input 归零。
-    if let Some(top_cc) = top_cache_control {
+    // 未声明任何 cache_control 时，兜底使用 5 分钟自动缓存。
+    // 非法显式声明已经在上面返回，不得被兜底逻辑掩盖。
+    let fallback_control = CacheControl {
+        cache_type: "ephemeral".to_string(),
+        ttl: None,
+    };
+    let auto_control = top_cache_control.or_else(|| {
+        if breakpoints.is_empty() {
+            Some(&fallback_control)
+        } else {
+            None
+        }
+    });
+
+    // 2. 自动缓存：若最后一条是当前 user 提问，断点优先挂在当前提问之前的合格 block，
+    // 有历史或 tools/system 前缀时，将最新普通提问保留为未缓存 input_tokens。
+    if let Some(top_cc) = auto_control {
         let Some(auto_ttl) = validated_ttl(top_cc) else {
             return Vec::new();
         };
-        let target_idx = if blocks.iter().any(|b| !b.is_current_turn_input && b.cacheable) {
+        let target_idx = if blocks
+            .iter()
+            .any(|b| !b.is_current_turn_input && b.cacheable)
+        {
             blocks
                 .iter()
                 .enumerate()
@@ -897,7 +914,7 @@ pub async fn compute_cache_usage(
     // 解析断点（显式 + 顶层自动）
     let breakpoints = resolve_breakpoints(&blocks, req.cache_control.as_ref());
     if breakpoints.is_empty() {
-        // 无断点：官方不会缓存，全部计入 input
+        // 无合法断点或无合格 block：全部计入 input
         return CacheUsage {
             prompt_total_est: prompt_total_est as i32,
             ..Default::default()
@@ -1388,9 +1405,9 @@ mod tests {
         assert_eq!(u.split_against_total(500), (500, 0, 0));
     }
 
-    #[test]
-    fn no_cache_control_does_not_cache_at_all() {
-        // 无顶层且无 block 级 cache_control：不模拟缓存，全部计入 input，不写入 CacheMeter
+    #[tokio::test]
+    async fn no_cache_control_falls_back_to_auto_cache() {
+        // 无声明时缓存历史前缀，最新 user 提问留在未缓存尾部。
         use super::super::types::{Message, MessagesRequest};
         let cache = CacheMeter::new(None);
         let req1 = MessagesRequest {
@@ -1419,16 +1436,56 @@ mod tests {
             metadata: None,
             cache_control: None,
         };
-        let u1 = compute_cache_usage_sync(&cache, &req1, 1);
-        assert_eq!(u1.cache_covered_est, 0);
+        let u1 = compute_cache_usage(&cache, &req1, 1).await;
+        let expected_prefix =
+            estimate_tokens(&"Question 1".repeat(50)) + estimate_tokens(&"Answer 1".repeat(50));
+        assert_eq!(u1.cache_covered_est, expected_prefix);
         assert_eq!(u1.cache_read, 0);
-        assert_eq!(cache.len(), 0, "无 cache_control 不得写入任何条目");
+        assert_eq!(cache.len(), 1);
+        assert!(
+            cache
+                .inner
+                .lock()
+                .entries
+                .values()
+                .all(|e| e.ttl_secs == 300)
+        );
+        let cold = u1.split_against_total(10_000);
+        assert!(cold.0 > 0 && cold.1 > 0);
+        assert_eq!(cold.0 + cold.1 + cold.2, 10_000);
 
-        // 第二轮相同前缀请求依然不缓存
-        let u2 = compute_cache_usage_sync(&cache, &req1, 1);
-        assert_eq!(u2.cache_covered_est, 0);
-        assert_eq!(u2.cache_read, 0);
-        assert_eq!(cache.len(), 0);
+        // 改变最新提问仍命中历史，且与显式顶层 auto 的覆盖范围一致。
+        let mut req2 = req1;
+        req2.messages[2].content = serde_json::json!("A different question".repeat(50));
+        let u2 = compute_cache_usage(&cache, &req2, 1).await;
+        assert_eq!(u2.cache_read, expected_prefix);
+        assert_eq!(u2.split_against_total(10_000).1, 0);
+        req2.cache_control = Some(CacheControl {
+            cache_type: "ephemeral".into(),
+            ttl: None,
+        });
+        let explicit = compute_cache_usage_sync(&cache, &req2, 1);
+        assert_eq!(explicit.cache_covered_est, u2.cache_covered_est);
+        assert_eq!(explicit.cache_read, u2.cache_read);
+
+        // 兜底不绕过共享 Key 的 session 要求和总开关。
+        req2.cache_control = None;
+        let isolated = CacheMeter::new(None);
+        assert_eq!(
+            compute_cache_usage(&isolated, &req2, 0)
+                .await
+                .cache_covered_est,
+            0
+        );
+        assert_eq!(isolated.len(), 0);
+        isolated.set_enabled(false);
+        assert_eq!(
+            compute_cache_usage(&isolated, &req2, 1)
+                .await
+                .cache_covered_est,
+            0
+        );
+        assert_eq!(isolated.len(), 0);
     }
 
     #[test]
