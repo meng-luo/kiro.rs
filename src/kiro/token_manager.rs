@@ -30,7 +30,7 @@ use crate::kiro::model::token_refresh::{
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::kiro::session_affinity::{RouteDecision, SessionAffinity, StickyOutcome};
-use crate::model::config::Config;
+use crate::model::config::{ApiDomain, Config};
 
 /// 检查 Token 是否在指定时间内过期
 pub(crate) fn is_token_expiring_within(
@@ -471,6 +471,10 @@ fn rest_api_region_candidates(sso_region: &str) -> [&'static str; 2] {
     }
 }
 
+fn is_builder_id_unsupported(status: u16, body: &str) -> bool {
+    status == 403 && body.contains("AWS Builder ID is not supported")
+}
+
 fn profile_arn_query(profile_arn: Option<&str>) -> String {
     match profile_arn {
         Some(arn) => format!("&profileArn={}", urlencoding::encode(arn)),
@@ -495,6 +499,27 @@ fn usage_api_attempts<'a>(
         attempts.push((*region, None));
     }
     attempts
+}
+
+/// 判断带真实 profileArn 的用量请求是否应回退到旧版无 ARN 形态。
+///
+/// 上游对不同租户的灰度行为不一致：有的租户缺 ARN 返回 403，有的租户
+/// 在携带已缓存 ARN 时返回 400 `Improperly formed request.` 或
+/// `Invalid profileArn.`。只有当前请求确实携带了 ARN 时才允许该回退，
+/// 避免把无 ARN 请求本身的客户端错误重复发送到其他候选端点。
+fn should_retry_usage_api_without_profile_arn(
+    status: u16,
+    body: &str,
+    profile_arn: Option<&str>,
+) -> bool {
+    if profile_arn.is_none() {
+        return false;
+    }
+
+    status == 403
+        || (status == 400
+            && (body.contains("Improperly formed request")
+                || body.contains("Invalid profileArn")))
 }
 
 fn usage_limits_url(host: &str, profile_arn: Option<&str>) -> String {
@@ -594,11 +619,19 @@ pub(crate) async fn get_usage_limits(
             return Err(error.into());
         }
 
-        // 403 时依次回退：带 profileArn → 不带 → 备用区域端点
-        if status.as_u16() == 403 && idx + 1 < attempts.len() {
+        // 带 ARN 遇到租户兼容性错误时回退：带 profileArn → 不带 → 备用区域端点。
+        // 无 ARN 请求的 403 仍需保留原有的跨区域回退行为。
+        let should_try_next = status.as_u16() == 403
+            || should_retry_usage_api_without_profile_arn(
+                status.as_u16(),
+                &body_text,
+                *profile_arn,
+            );
+        if should_try_next && idx + 1 < attempts.len() {
             tracing::debug!(
-                "getUsageLimits 在 {} 返回 403（profileArn={}），尝试下一候选",
+                "getUsageLimits 在 {} 返回 {}（profileArn={}），尝试下一候选",
                 region,
+                status,
                 profile_arn.is_some()
             );
             last_error = Some(format!("{} {}", status, body_text));
@@ -689,11 +722,19 @@ pub(crate) async fn get_available_models(
             return Err(error.into());
         }
 
-        // 403 时依次回退：带 profileArn → 不带 → 备用区域端点
-        if status.as_u16() == 403 && idx + 1 < attempts.len() {
+        // 带 ARN 遇到租户兼容性错误时回退：带 profileArn → 不带 → 备用区域端点。
+        // 无 ARN 请求的 403 仍需保留原有的跨区域回退行为。
+        let should_try_next = status.as_u16() == 403
+            || should_retry_usage_api_without_profile_arn(
+                status.as_u16(),
+                &body_text,
+                *profile_arn,
+            );
+        if should_try_next && idx + 1 < attempts.len() {
             tracing::debug!(
-                "ListAvailableModels 在 {} 返回 403（profileArn={}），尝试下一候选",
+                "ListAvailableModels 在 {} 返回 {}（profileArn={}），尝试下一候选",
                 region,
+                status,
                 profile_arn.is_some()
             );
             last_error = Some(format!("{} {}", status, body_text));
@@ -796,6 +837,12 @@ pub(crate) async fn list_available_profiles(
         let body_text = response.text().await.unwrap_or_default();
         if let Some(error) = rate_limit_error {
             return Err(error.into());
+        }
+        // BuilderID 账号上游固定 403 拒绝该操作：属于确定结果（无 Enterprise profile），
+        // 另一区域也会同样拒绝，直接按"无 profile"处理，避免每个请求都重查两次。
+        if is_builder_id_unsupported(status.as_u16(), &body_text) {
+            empty_seen = true;
+            break;
         }
         last_error = Some(format!("{} {}", status, body_text));
         // 403 等错误继续尝试下一个候选端点
@@ -1195,12 +1242,16 @@ pub struct MultiTokenManager {
     is_multiple_format: AtomicBool,
     /// 负载均衡模式（运行时可修改）
     load_balancing_mode: Mutex<String>,
+    /// 对话 / MCP 上游域名（运行时可修改）
+    api_domain: Mutex<ApiDomain>,
     /// 会话粘性路由：会话 → 上一轮成功凭据 的绑定表（运行时可开关 / 改 TTL）
     session_affinity: SessionAffinity,
-    /// 账号级 429 风控故障转移开关（运行时可修改）
+    /// 账号级 429 限流故障转移开关（运行时可修改）
     account_throttle_failover: AtomicBool,
-    /// 账号级风控冷却时长（秒，运行时可修改）
+    /// 账号级 429 限流冷却时长（秒，运行时可修改）
     account_throttle_cooldown_secs: AtomicU64,
+    /// 普通模型 API 429 自动重试开关（运行时可修改）
+    model_api_429_retry_enabled: AtomicBool,
     /// 单账号 RPM 主动限流开关（运行时可修改）
     account_rpm_limit_enabled: AtomicBool,
     /// 单账号每分钟请求次数上限（运行时可修改）
@@ -1213,6 +1264,8 @@ pub struct MultiTokenManager {
     self_heal_min_interval_secs: AtomicU64,
     /// 连续自愈最大轮数（0=不限，运行时可修改）
     self_heal_max_consecutive_rounds: AtomicU32,
+    /// 月度额度重置后自动恢复 QuotaExceeded 凭据（运行时可修改）
+    quota_reset_recovery_enabled: AtomicBool,
     /// 最近一次统计持久化时间（用于 debounce）
     last_stats_save_at: Mutex<Option<Instant>>,
     /// 统计数据是否有未落盘更新
@@ -1227,7 +1280,17 @@ pub struct MultiTokenManager {
     model_cache_generations: Mutex<HashMap<u64, u64>>,
     /// 全局代理变化时递增，阻止所有在途旧请求回填缓存。
     model_cache_epoch: AtomicU64,
+    /// 测试替身：替换 ListAvailableModels 的上游请求，使模型缓存相关测试不走网络。
+    #[cfg(test)]
+    test_models_fetcher: Mutex<Option<TestModelsFetcher>>,
 }
+
+#[cfg(test)]
+type TestModelsFetcher = Arc<
+    dyn Fn(u64) -> futures::future::BoxFuture<'static, anyhow::Result<ListAvailableModelsResponse>>
+        + Send
+        + Sync,
+>;
 
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
@@ -1425,18 +1488,21 @@ impl MultiTokenManager {
             .unwrap_or(0);
 
         let load_balancing_mode = config.load_balancing_mode.clone();
+        let api_domain = config.api_domain;
         let session_affinity = SessionAffinity::new(
             config.session_affinity_enabled,
             config.session_affinity_ttl_secs,
         );
         let throttle_failover = config.account_throttle_failover;
         let throttle_cooldown_secs = config.account_throttle_cooldown_secs;
+        let model_api_429_retry_enabled = config.model_api_429_retry_enabled;
         let rpm_limit_enabled = config.account_rpm_limit_enabled;
         let rpm_limit = config.account_rpm_limit;
         let suspended_detection_enabled = config.suspended_detection_enabled;
         let self_heal_enabled = config.self_heal_enabled;
         let self_heal_min_interval_secs = config.self_heal_min_interval_secs;
         let self_heal_max_consecutive_rounds = config.self_heal_max_consecutive_rounds;
+        let quota_reset_recovery_enabled = config.quota_reset_recovery_enabled;
         let manager = Self {
             config,
             proxy: Mutex::new(proxy),
@@ -1450,15 +1516,18 @@ impl MultiTokenManager {
             runtime_config_update_lock: Mutex::new(()),
             is_multiple_format: AtomicBool::new(is_multiple_format),
             load_balancing_mode: Mutex::new(load_balancing_mode),
+            api_domain: Mutex::new(api_domain),
             session_affinity,
             account_throttle_failover: AtomicBool::new(throttle_failover),
             account_throttle_cooldown_secs: AtomicU64::new(throttle_cooldown_secs),
+            model_api_429_retry_enabled: AtomicBool::new(model_api_429_retry_enabled),
             account_rpm_limit_enabled: AtomicBool::new(rpm_limit_enabled),
             account_rpm_limit: AtomicU32::new(rpm_limit),
             suspended_detection_enabled: AtomicBool::new(suspended_detection_enabled),
             self_heal_enabled: AtomicBool::new(self_heal_enabled),
             self_heal_min_interval_secs: AtomicU64::new(self_heal_min_interval_secs),
             self_heal_max_consecutive_rounds: AtomicU32::new(self_heal_max_consecutive_rounds),
+            quota_reset_recovery_enabled: AtomicBool::new(quota_reset_recovery_enabled),
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
             model_cache: Mutex::new(HashMap::new()),
@@ -1466,6 +1535,8 @@ impl MultiTokenManager {
             model_refresh_semaphore: Semaphore::new(4),
             model_cache_generations: Mutex::new(HashMap::new()),
             model_cache_epoch: AtomicU64::new(0),
+            #[cfg(test)]
+            test_models_fetcher: Mutex::new(None),
         };
 
         // 单凭据格式自动迁移：升级为数组格式，确保 token rotation 能写盘
@@ -1626,22 +1697,7 @@ impl MultiTokenManager {
         let generation = self.model_cache_generation(id);
         let epoch = self.model_cache_epoch.load(Ordering::Relaxed);
         let _permit = self.model_refresh_semaphore.acquire().await?;
-        let (token, mut credentials) = self.prepare_request_token(id).await?;
-
-        // 同 get_usage_limits_for：先解析回填真实 profileArn。
-        match self.resolve_profile_arn_for(id, &token).await {
-            Ok(Some(arn)) => credentials.profile_arn = Some(arn),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!("凭据 #{} 查询模型列表前解析 profileArn 失败: {}", id, error)
-            }
-        }
-
-        let global_proxy = self.proxy.lock().clone();
-        let effective_proxy = credentials.effective_proxy(global_proxy.as_ref());
-        let response =
-            get_available_models(&credentials, &self.config, &token, effective_proxy.as_ref())
-                .await?;
+        let response = self.fetch_available_models(id).await?;
 
         let generations = self.model_cache_generations.lock();
         if generation == generations.get(&id).copied().unwrap_or(0) {
@@ -1657,6 +1713,52 @@ impl MultiTokenManager {
             }
         }
         Ok(response)
+    }
+
+    /// 请求指定凭据的模型列表（不读写缓存）。测试构建下改走替身，不访问上游。
+    async fn fetch_available_models(&self, id: u64) -> anyhow::Result<ListAvailableModelsResponse> {
+        #[cfg(test)]
+        return self.fetch_available_models_for_test(id).await;
+        #[cfg(not(test))]
+        return self.fetch_available_models_upstream(id).await;
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    async fn fetch_available_models_upstream(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<ListAvailableModelsResponse> {
+        let (token, mut credentials) = self.prepare_request_token(id).await?;
+
+        // 同 get_usage_limits_for：先解析回填真实 profileArn。
+        match self.resolve_profile_arn_for(id, &token).await {
+            Ok(Some(arn)) => credentials.profile_arn = Some(arn),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!("凭据 #{} 查询模型列表前解析 profileArn 失败: {}", id, error)
+            }
+        }
+
+        let global_proxy = self.proxy.lock().clone();
+        let effective_proxy = credentials.effective_proxy(global_proxy.as_ref());
+        get_available_models(&credentials, &self.config, &token, effective_proxy.as_ref()).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_models_fetcher(&self, fetcher: TestModelsFetcher) {
+        *self.test_models_fetcher.lock() = Some(fetcher);
+    }
+
+    #[cfg(test)]
+    async fn fetch_available_models_for_test(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<ListAvailableModelsResponse> {
+        let fetcher = self.test_models_fetcher.lock().clone();
+        match fetcher {
+            Some(fetcher) => fetcher(id).await,
+            None => anyhow::bail!("测试中未设置模型列表替身，拒绝访问上游"),
+        }
     }
 
     async fn cached_or_refresh_models_for(
@@ -1749,6 +1851,29 @@ impl MultiTokenManager {
                     tracing::debug!("没有可用于模型缓存预热的凭据")
                 }
                 Err(error) => tracing::warn!("模型缓存预热失败: {}", error),
+            }
+        });
+    }
+
+    /// 在后台拉取单个凭据的模型列表写入缓存，不阻塞调用方。
+    ///
+    /// 业务请求不会写模型缓存，运行时新增的凭据若不主动拉取会一直是 Unknown：
+    /// 它其实不支持的模型也不会被标记为 Unsupported，选号时照样会分到这些
+    /// 模型的请求并返回 400。拉取失败时保持 Unknown，与改动前行为一致。
+    fn warm_model_cache_for(self: &Arc<Self>, id: u64) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            match manager.refresh_model_cache_for(id, false).await {
+                Ok(response) => tracing::info!(
+                    credential_id = id,
+                    models = response.models.len(),
+                    "新增凭据模型缓存预热完成"
+                ),
+                Err(error) => tracing::warn!(
+                    credential_id = id,
+                    error = %error,
+                    "新增凭据模型缓存预热失败，暂按 Unknown 参与调度"
+                ),
             }
         });
     }
@@ -1927,7 +2052,10 @@ impl MultiTokenManager {
     /// 根据负载均衡模式选择下一个凭据
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
-    /// - balanced 模式：均衡选择可用凭据
+    /// - balanced 模式：在可用凭据中均匀随机选择一个
+    ///
+    /// 会话粘性由调用方在此之前处理（见 [`Self::sticky_candidate`]），这里只负责
+    /// 粘性未命中 / 无会话时的选号。
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
@@ -1939,16 +2067,10 @@ impl MultiTokenManager {
         let entries = self.entries.lock();
         let now = Instant::now();
 
-        // 过滤可用凭据
-        let available: Vec<_> = entries
+        // 过滤可用凭据（已排除模型缓存明确不支持的凭据）
+        let available: Vec<&CredentialEntry> = entries
             .iter()
-            .filter_map(|e| {
-                if !self.entry_available_for_request(e, model, group, now) {
-                    return None;
-                }
-                let model_support = self.cached_model_support(e.id, model);
-                Some((e, model_support))
-            })
+            .filter(|e| self.entry_available_for_request(e, model, group, now))
             .collect();
 
         if available.is_empty() {
@@ -1958,31 +2080,26 @@ impl MultiTokenManager {
         let mode = self.load_balancing_mode.lock().clone();
         let mode = mode.as_str();
 
-        match mode {
+        let entry = match mode {
             "balanced" => {
-                // Least-Used 策略：选择成功次数最少的凭据
-                // 平局时按优先级排序（数字越小优先级越高）
-                let (entry, _) = available.iter().min_by_key(|(e, support)| {
-                    let discovery_rank = usize::from(*support != CachedModelSupport::Confirmed);
-                    (
-                        discovery_rank,
-                        e.success_count,
-                        e.credentials.priority,
-                        e.id,
-                    )
-                })?;
-
-                Some((entry.id, entry.credentials.clone()))
+                // 均匀随机，不按历史 success_count / 模型缓存状态排序：
+                // - 按 success_count 取最小会让新加入的凭据（计数为 0）独占流量，
+                //   直到追平老凭据的累计值；
+                // - 优先模型缓存 Confirmed 会让缓存为 Unknown 的凭据（运行时新增、
+                //   缓存被清空后）在有 Confirmed 凭据可用时永远选不到，缓存也就永远
+                //   不会因为被使用而变成 Confirmed。
+                available[fastrand::usize(..available.len())]
             }
             _ => {
                 // priority 模式（默认）：严格选择数字最小的有效凭据。
                 // 同优先级按 ID 升序固定顺序，保证后端调度与前端预览一致。
-                let (entry, _) = available
+                available
                     .iter()
-                    .min_by_key(|(e, _)| (e.credentials.priority, e.id))?;
-                Some((entry.id, entry.credentials.clone()))
+                    .copied()
+                    .min_by_key(|e| (e.credentials.priority, e.id))?
             }
-        }
+        };
+        Some((entry.id, entry.credentials.clone()))
     }
 
     /// 获取 API 调用上下文
@@ -3245,10 +3362,10 @@ impl MultiTokenManager {
         Ok(())
     }
 
-    /// 标记凭据进入临时冷却期（账号级 429 风控触发）
+    /// 标记凭据进入临时冷却期（账号级 429 限流触发）
     ///
-    /// 与 `report_failure` 不同：不计入永久禁用，到期自动恢复，可用于"`suspicious activity` 429"
-    /// 这种短期账号级风控——当前凭据先冷却 N 分钟，故障转移到其它凭据。
+    /// 与 `report_failure` 不同：不计入永久禁用，到期自动恢复。账号级限流时
+    /// 当前凭据先冷却 N 分钟，再故障转移到其它凭据。
     ///
     /// 标记凭据冷却，并在同一锁临界区内返回当前请求范围的剩余凭据数。
     pub fn report_account_throttled_for_request(
@@ -3268,10 +3385,10 @@ impl MultiTokenManager {
                     Some(prev) if prev > until => prev,
                     _ => until,
                 });
-                // 计入累计失败（账号风控不动连续 failure_count，避免冷却结束后误禁用）
+                // 计入累计失败（账号限流不动连续 failure_count，避免冷却结束后误禁用）
                 entry.total_failure_count += 1;
                 tracing::warn!(
-                    "凭据 #{} 触发账号级风控，冷却 {} 秒",
+                    "凭据 #{} 触发账号级限流，冷却 {} 秒",
                     id,
                     cooldown.as_secs()
                 );
@@ -3302,7 +3419,7 @@ impl MultiTokenManager {
             .find(|e| e.id == id)
             .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
         entry.throttled_until = None;
-        tracing::info!("凭据 #{} 风控冷却已被手动解除", id);
+        tracing::info!("凭据 #{} 限流冷却已被手动解除", id);
         Ok(())
     }
 
@@ -3321,6 +3438,58 @@ impl MultiTokenManager {
             entry.clear_self_heal_streak();
         }
         self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 在上游计费周期重置后恢复此前因额度耗尽而禁用的凭据。
+    ///
+    /// 这是一个严格的状态转换：只允许 `QuotaExceeded` → 可用，绝不影响手动
+    /// 禁用、账号封禁、Token 失效等其它禁用原因。调用方必须已从上游余额接口
+    /// 确认该凭据恢复了可用额度。
+    pub fn recover_quota_exceeded(&self, id: u64) -> anyhow::Result<bool> {
+        let recovered = {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            if !entry.disabled || entry.disabled_reason != Some(DisabledReason::QuotaExceeded) {
+                return Ok(false);
+            }
+            entry.disabled = false;
+            entry.disabled_reason = None;
+            entry.failure_count = 0;
+            entry.refresh_failure_count = 0;
+            entry.throttled_until = None;
+            entry.clear_self_heal_streak();
+            true
+        };
+        if recovered {
+            self.persist_credentials()?;
+            tracing::info!("凭据 #{} 额度已恢复，重新加入调度", id);
+        }
+        Ok(recovered)
+    }
+
+    /// 是否允许在上游月度额度重置后自动恢复 QuotaExceeded 凭据。
+    pub fn quota_reset_recovery_enabled(&self) -> bool {
+        self.quota_reset_recovery_enabled.load(Ordering::Relaxed)
+    }
+
+    /// 更新月度额度自动恢复开关，并持久化到 config.json。
+    pub fn set_quota_reset_recovery_enabled(&self, enabled: bool) -> anyhow::Result<()> {
+        let previous = self.quota_reset_recovery_enabled.swap(enabled, Ordering::Relaxed);
+        if previous == enabled {
+            return Ok(());
+        }
+        if let Err(error) = self.update_config_file(move |config| {
+            config.quota_reset_recovery_enabled = enabled;
+        }) {
+            self.quota_reset_recovery_enabled
+                .store(previous, Ordering::Relaxed);
+            return Err(error);
+        }
+        tracing::info!(enabled, "月度额度自动恢复配置已更新");
         Ok(())
     }
 
@@ -3823,7 +3992,7 @@ impl MultiTokenManager {
     /// # 返回
     /// - `Ok(u64)` - 新凭据 ID
     /// - `Err(_)` - 验证失败或添加失败
-    pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+    pub async fn add_credential(self: &Arc<Self>, new_cred: KiroCredentials) -> anyhow::Result<u64> {
         // 1. 基本验证
         if new_cred.is_api_key_credential() {
             let api_key = new_cred
@@ -3995,6 +4164,10 @@ impl MultiTokenManager {
         // 6. 升级为多凭据格式（确保后续 token rotation 能写盘）并持久化
         self.is_multiple_format.store(true, Ordering::Relaxed);
         self.persist_credentials()?;
+
+        // 7. 后台拉取模型列表：入库后它已参与调度，缓存越早就绪，越早避开它
+        //    不支持的模型。所有添加路径都经过这里，不必在各调用方重复触发。
+        self.warm_model_cache_for(new_id);
 
         tracing::info!("成功添加凭据 #{}", new_id);
         Ok(new_id)
@@ -4368,6 +4541,27 @@ impl MultiTokenManager {
         self.load_balancing_mode.lock().clone()
     }
 
+    /// 当前对话 / MCP 上游域名
+    pub fn api_domain(&self) -> ApiDomain {
+        *self.api_domain.lock()
+    }
+
+    /// 设置对话 / MCP 上游域名（运行时生效 + 持久化 config.json，持久化失败则回滚）
+    pub fn set_api_domain(&self, domain: ApiDomain) -> anyhow::Result<()> {
+        let _update_guard = self.runtime_config_update_lock.lock();
+        let previous = self.api_domain();
+        if previous == domain {
+            return Ok(());
+        }
+        *self.api_domain.lock() = domain;
+        if let Err(err) = self.update_config_file(move |config| config.api_domain = domain) {
+            *self.api_domain.lock() = previous;
+            return Err(err);
+        }
+        tracing::info!("上游域名已设置为: {:?}", domain);
+        Ok(())
+    }
+
     fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
         let mode = mode.to_string();
         self.update_config_file(move |config| config.load_balancing_mode = mode)
@@ -4400,17 +4594,17 @@ impl MultiTokenManager {
         Ok(())
     }
 
-    /// 获取账号级风控故障转移配置（Admin API）
+    /// 获取账号级 429 限流故障转移配置（Admin API）
     pub fn get_account_throttle_failover(&self) -> bool {
         self.account_throttle_failover.load(Ordering::Relaxed)
     }
 
-    /// 获取账号级风控冷却时长秒数（Admin API）
+    /// 获取账号级 429 限流冷却时长秒数（Admin API）
     pub fn get_account_throttle_cooldown_secs(&self) -> u64 {
         self.account_throttle_cooldown_secs.load(Ordering::Relaxed)
     }
 
-    /// 设置账号级风控故障转移配置（Admin API）
+    /// 设置账号级 429 限流故障转移配置（Admin API）
     ///
     /// 任一参数传 `None` 表示不修改该字段。
     pub fn set_account_throttle_config(
@@ -4451,7 +4645,7 @@ impl MultiTokenManager {
         }
 
         tracing::info!(
-            "账号级风控配置已更新: failover={}, cooldown_secs={}",
+            "账号级 429 限流配置已更新: failover={}, cooldown_secs={}",
             new_failover,
             new_cooldown
         );
@@ -4511,6 +4705,33 @@ impl MultiTokenManager {
             new_enabled,
             new_ttl
         );
+        Ok(())
+    }
+
+    /// 获取普通模型 API 429 自动重试配置（Admin API）。
+    pub fn get_model_api_429_retry_enabled(&self) -> bool {
+        self.model_api_429_retry_enabled.load(Ordering::Relaxed)
+    }
+
+    /// 设置普通模型 API 429 自动重试配置（Admin API）。
+    pub fn set_model_api_429_retry_enabled(&self, enabled: bool) -> anyhow::Result<()> {
+        let _update_guard = self.runtime_config_update_lock.lock();
+        let previous = self.get_model_api_429_retry_enabled();
+        if previous == enabled {
+            return Ok(());
+        }
+
+        self.model_api_429_retry_enabled
+            .store(enabled, Ordering::Relaxed);
+        if let Err(err) = self.update_config_file(move |config| {
+            config.model_api_429_retry_enabled = enabled;
+        }) {
+            self.model_api_429_retry_enabled
+                .store(previous, Ordering::Relaxed);
+            return Err(err);
+        }
+
+        tracing::info!("普通模型 API 429 自动重试已设置为: {}", enabled);
         Ok(())
     }
 
@@ -5032,7 +5253,7 @@ mod tests {
         let mut existing = KiroCredentials::default();
         existing.refresh_token = Some("a".repeat(150));
 
-        let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![existing], None, None, false).unwrap());
 
         let mut duplicate = KiroCredentials::default();
         duplicate.refresh_token = Some("a".repeat(150));
@@ -5045,7 +5266,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_credential_api_key_success() {
         let config = Config::default();
-        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![], None, None, false).unwrap());
 
         let mut api_key_cred = KiroCredentials::default();
         api_key_cred.kiro_api_key = Some("ksk_test_key_123".to_string());
@@ -5069,7 +5290,7 @@ mod tests {
         existing.auth_method = Some("api_key".to_string());
         existing.priority = 1000;
 
-        let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![existing], None, None, false).unwrap());
         let original_id = manager.snapshot().current_id;
 
         let mut higher_priority = KiroCredentials::default();
@@ -5092,7 +5313,7 @@ mod tests {
         existing.auth_method = Some("api_key".to_string());
         existing.priority = 0;
 
-        let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![existing], None, None, false).unwrap());
         let original_id = manager.snapshot().current_id;
 
         let mut lower_priority = KiroCredentials::default();
@@ -5111,7 +5332,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_credential_sets_created_at() {
         let config = Config::default();
-        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![], None, None, false).unwrap());
 
         let mut api_key_cred = KiroCredentials::default();
         api_key_cred.kiro_api_key = Some("ksk_created_at_probe".to_string());
@@ -5139,7 +5360,7 @@ mod tests {
         existing.kiro_api_key = Some("ksk_existing_key".to_string());
         existing.auth_method = Some("api_key".to_string());
 
-        let manager = MultiTokenManager::new(config, vec![existing], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![existing], None, None, false).unwrap());
 
         let mut duplicate = KiroCredentials::default();
         duplicate.kiro_api_key = Some("ksk_existing_key".to_string());
@@ -5159,7 +5380,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_credential_api_key_empty_rejected() {
         let config = Config::default();
-        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![], None, None, false).unwrap());
 
         let mut cred = KiroCredentials::default();
         cred.kiro_api_key = Some(String::new());
@@ -5179,7 +5400,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_credential_api_key_missing_key_rejected() {
         let config = Config::default();
-        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![], None, None, false).unwrap());
 
         let mut cred = KiroCredentials::default();
         cred.auth_method = Some("api_key".to_string());
@@ -5203,7 +5424,7 @@ mod tests {
         let mut oauth_cred = KiroCredentials::default();
         oauth_cred.refresh_token = Some("a".repeat(150));
 
-        let manager = MultiTokenManager::new(config, vec![oauth_cred], None, None, false).unwrap();
+        let manager = Arc::new( MultiTokenManager::new(config, vec![oauth_cred], None, None, false).unwrap());
 
         let mut api_key_cred = KiroCredentials::default();
         api_key_cred.kiro_api_key = Some("ksk_new_key".to_string());
@@ -5505,6 +5726,40 @@ mod tests {
         // 手动重置可恢复（误判逃生途径）
         manager.reset_and_enable(1).unwrap();
         assert_eq!(manager.available_count(), 1);
+    }
+
+    #[test]
+    fn quota_exceeded_recovers_only_from_quota_disabled_state() {
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![KiroCredentials::default(), KiroCredentials::default()],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        manager.report_quota_exhausted(1);
+        assert!(manager.recover_quota_exceeded(1).unwrap());
+        let first = manager
+            .snapshot()
+            .entries
+            .into_iter()
+            .find(|entry| entry.id == 1)
+            .unwrap();
+        assert!(!first.disabled);
+        assert_eq!(first.disabled_reason, None);
+
+        manager.report_suspended(2);
+        assert!(!manager.recover_quota_exceeded(2).unwrap());
+        let second = manager
+            .snapshot()
+            .entries
+            .into_iter()
+            .find(|entry| entry.id == 2)
+            .unwrap();
+        assert!(second.disabled);
+        assert_eq!(second.disabled_reason.as_deref(), Some("Suspended"));
     }
 
     #[test]
@@ -5897,6 +6152,124 @@ mod tests {
     }
 
     #[test]
+    fn api_domain_update_persists_and_survives_restart() {
+        let config_path =
+            std::env::temp_dir().join(format!("kiro-api-domain-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &config_path,
+            r#"{"apiDomain":"amazonaws","region":"eu-central-1"}"#,
+        )
+        .unwrap();
+        let manager = MultiTokenManager::new(
+            Config::load(&config_path).unwrap(),
+            vec![KiroCredentials::default()],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        for domain in [ApiDomain::Kiro, ApiDomain::Amazonaws, ApiDomain::Kiro] {
+            manager.set_api_domain(domain).unwrap();
+            assert_eq!(manager.api_domain(), domain);
+            let persisted = Config::load(&config_path).unwrap();
+            assert_eq!(persisted.api_domain, domain);
+            assert_eq!(persisted.region, "eu-central-1");
+        }
+        let restarted = MultiTokenManager::new(
+            Config::load(&config_path).unwrap(),
+            vec![KiroCredentials::default()],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(restarted.api_domain(), ApiDomain::Kiro);
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
+    fn api_domain_update_rolls_back_on_config_reload_and_write_errors() {
+        let config_path =
+            std::env::temp_dir().join(format!("kiro-api-domain-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&config_path, "{}").unwrap();
+        let manager = MultiTokenManager::new(
+            Config::load(&config_path).unwrap(),
+            vec![KiroCredentials::default()],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        std::fs::write(&config_path, "invalid json").unwrap();
+        assert!(manager.set_api_domain(ApiDomain::Kiro).is_err());
+        assert_eq!(manager.api_domain(), ApiDomain::Amazonaws);
+        std::fs::write(&config_path, "{}").unwrap();
+        #[cfg(windows)]
+        {
+            let permissions = std::fs::metadata(&config_path).unwrap().permissions();
+            let mut readonly_permissions = permissions.clone();
+            readonly_permissions.set_readonly(true);
+            std::fs::set_permissions(&config_path, readonly_permissions).unwrap();
+            let result = manager.set_api_domain(ApiDomain::Kiro);
+            std::fs::set_permissions(&config_path, permissions).unwrap();
+            assert!(result.is_err());
+            assert_eq!(manager.api_domain(), ApiDomain::Amazonaws);
+            assert_eq!(
+                Config::load(&config_path).unwrap().api_domain,
+                ApiDomain::Amazonaws
+            );
+        }
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
+    fn api_domain_concurrent_update_cannot_acknowledge_a_rolled_back_value() {
+        let config_path =
+            std::env::temp_dir().join(format!("kiro-api-domain-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&config_path, "{}").unwrap();
+        let manager = std::sync::Arc::new(
+            MultiTokenManager::new(
+                Config::load(&config_path).unwrap(),
+                vec![KiroCredentials::default()],
+                None,
+                None,
+                false,
+            )
+            .unwrap(),
+        );
+        std::fs::write(&config_path, "invalid json").unwrap();
+        let file_guard = manager.config_write_lock.lock();
+        let first_manager = manager.clone();
+        let first = std::thread::spawn(move || first_manager.set_api_domain(ApiDomain::Kiro));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while manager.api_domain() != ApiDomain::Kiro && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let second_manager = manager.clone();
+        let second = std::thread::spawn(move || {
+            sender
+                .send(second_manager.set_api_domain(ApiDomain::Kiro))
+                .unwrap();
+        });
+        let early_result = receiver
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .ok();
+        drop(file_guard);
+        let first_result = first.join().unwrap();
+        second.join().unwrap();
+        let second_result = early_result.unwrap_or_else(|| receiver.recv().unwrap());
+        let actual = manager.api_domain();
+        std::fs::remove_file(config_path).unwrap();
+        assert!(first_result.is_err());
+        assert!(
+            second_result.is_err(),
+            "a concurrent caller acknowledged a domain that was rolled back"
+        );
+        assert_eq!(actual, ApiDomain::Amazonaws);
+    }
+
+    #[test]
     fn test_set_load_balancing_mode_persists_to_config_file() {
         let config_path =
             std::env::temp_dir().join(format!("kiro-load-balancing-{}.json", uuid::Uuid::new_v4()));
@@ -5914,6 +6287,29 @@ mod tests {
         let persisted = Config::load(&config_path).unwrap();
         assert_eq!(persisted.load_balancing_mode, "balanced");
         assert_eq!(manager.get_load_balancing_mode(), "balanced");
+
+        std::fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn model_api_429_retry_update_is_immediate_and_persisted() {
+        let config_path = std::env::temp_dir().join(format!(
+            "kiro-model-api-429-retry-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&config_path, "{}").unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        assert!(manager.get_model_api_429_retry_enabled());
+        manager.set_model_api_429_retry_enabled(false).unwrap();
+        assert!(!manager.get_model_api_429_retry_enabled());
+        assert!(!Config::load(&config_path)
+            .unwrap()
+            .model_api_429_retry_enabled);
 
         std::fs::remove_file(&config_path).unwrap();
     }
@@ -5991,20 +6387,23 @@ mod tests {
             MultiTokenManager::new(config, vec![first, second], None, None, false).unwrap();
 
         assert_eq!(manager.snapshot().current_id, 1);
-        manager.report_success(1);
 
-        let (context, is_balanced, _) = manager
-            .acquire_context_impl(None, None, None, false)
-            .await
-            .unwrap();
+        // balanced 随机选号：多次只读选择，其中必然会选到 #2，但 current_id 始终不动
+        let mut picked_other = false;
+        for _ in 0..64 {
+            let (context, is_balanced, _) = manager
+                .acquire_context_impl(None, None, None, false)
+                .await
+                .unwrap();
+            assert!(is_balanced);
+            picked_other |= context.id == 2;
+            assert_eq!(manager.snapshot().current_id, 1);
+        }
+        assert!(picked_other, "64 次随机选号应至少选到一次 #2");
 
-        assert!(is_balanced);
-        assert_eq!(context.id, 2);
-        assert_eq!(manager.snapshot().current_id, 1);
-
+        // 真实业务请求才更新 current_id
         let context = manager.acquire_context(None, None).await.unwrap();
-        assert_eq!(context.id, 2);
-        assert_eq!(manager.snapshot().current_id, 2);
+        assert_eq!(manager.snapshot().current_id, context.id);
     }
 
     #[tokio::test]
@@ -6027,9 +6426,15 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![first, second], None, None, false).unwrap();
 
-        manager.report_success(1);
-        let context = manager.acquire_context(None, None).await.unwrap();
-        assert_eq!(context.id, 2);
+        // balanced 下先让 current_id 落到低优先级的 #2
+        let mut on_second = false;
+        for _ in 0..64 {
+            if manager.acquire_context(None, None).await.unwrap().id == 2 {
+                on_second = true;
+                break;
+            }
+        }
+        assert!(on_second, "64 次随机选号应至少选到一次 #2");
         assert_eq!(manager.snapshot().current_id, 2);
 
         manager
@@ -6239,13 +6644,13 @@ mod tests {
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
-        credentials.region = Some("eu-west-1".to_string());
+        credentials.region = Some("eu-central-1".to_string());
 
-        // 凭据.region 不参与 api_region 回退链
+        // 未显式指定 api_region 时，凭据.region 优先于全局区域。
         let api_region = credentials.effective_api_region(&config);
         let api_host = format!("q.{}.amazonaws.com", api_region);
 
-        assert_eq!(api_host, "q.us-west-2.amazonaws.com");
+        assert_eq!(api_host, "q.eu-central-1.amazonaws.com");
     }
 
     #[test]
@@ -6350,7 +6755,7 @@ mod tests {
             )
         );
 
-        // 每个区域端点先试带 ARN，403 时回退到不带
+        // 每个区域端点先试带 ARN，遇到兼容性错误时回退到不带
         assert_eq!(
             usage_api_attempts(&credentials, &["us-east-1", "eu-central-1"]),
             vec![
@@ -6360,6 +6765,43 @@ mod tests {
                 ("eu-central-1", None),
             ]
         );
+    }
+
+    #[test]
+    fn test_builder_id_unsupported_is_definitive() {
+        let body = r#"{"__type":"com.amazon.aws.codewhisperer#AccessDeniedException","message":"AWS Builder ID is not supported for this operation."}"#;
+        assert!(is_builder_id_unsupported(403, body));
+        assert!(!is_builder_id_unsupported(403, r#"{"message":"Invalid token"}"#));
+        assert!(!is_builder_id_unsupported(500, body));
+    }
+
+    #[test]
+    fn test_usage_api_profile_arn_error_fallback_only_for_arn_attempt() {
+        assert!(should_retry_usage_api_without_profile_arn(
+            403,
+            "User is not authorized to make this call.",
+            Some("arn:aws:codewhisperer:us-east-1:123:profile/REAL"),
+        ));
+        assert!(should_retry_usage_api_without_profile_arn(
+            400,
+            "{\"message\":\"Improperly formed request.\"}",
+            Some("arn:aws:codewhisperer:us-east-1:123:profile/REAL"),
+        ));
+        assert!(should_retry_usage_api_without_profile_arn(
+            400,
+            "{\"message\":\"Invalid profileArn.\"}",
+            Some("arn:aws:codewhisperer:us-east-1:123:profile/REAL"),
+        ));
+        assert!(!should_retry_usage_api_without_profile_arn(
+            400,
+            "{\"message\":\"Improperly formed request.\"}",
+            None,
+        ));
+        assert!(!should_retry_usage_api_without_profile_arn(
+            500,
+            "server error",
+            Some("arn:aws:codewhisperer:us-east-1:123:profile/REAL"),
+        ));
     }
 
     #[test]
@@ -6516,9 +6958,9 @@ mod tests {
         let path = tmp_creds_path("add_cred_upgrade");
         std::fs::write(&path, "[]").unwrap();
 
-        let manager =
+        let manager = Arc::new(
             MultiTokenManager::new(Config::default(), vec![], None, Some(path.clone()), false)
-                .unwrap();
+                .unwrap());
 
         assert!(!manager.is_multiple_format.load(Ordering::Relaxed));
 
@@ -6555,14 +6997,14 @@ mod tests {
         cred2.kiro_api_key = Some("ksk_existing_2".to_string());
         cred2.auth_method = Some("api_key".to_string());
 
-        let manager = MultiTokenManager::new(
+        let manager = Arc::new( MultiTokenManager::new(
             Config::default(),
             vec![cred1, cred2],
             None,
             Some(path.clone()),
             true,
         )
-        .unwrap();
+        .unwrap());
 
         manager.delete_credential(2).unwrap();
 
@@ -6855,6 +7297,163 @@ mod tests {
         let response = manager.cached_or_refresh_models_for(1).await.unwrap();
         assert_eq!(response.models[0].model_id, "deepseek-3.2");
         assert!(manager.cached_model_response(1, false).is_some());
+    }
+
+    fn api_key_cred(key: &str) -> KiroCredentials {
+        KiroCredentials {
+            kiro_api_key: Some(key.to_string()),
+            auth_method: Some("api_key".to_string()),
+            ..KiroCredentials::default()
+        }
+    }
+
+    /// 模型列表替身：每次调用计数，并按 `respond` 生成结果。
+    fn test_fetcher<F, Fut>(calls: Arc<std::sync::atomic::AtomicUsize>, respond: F) -> TestModelsFetcher
+    where
+        F: Fn(u64) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<ListAvailableModelsResponse>>
+            + Send
+            + 'static,
+    {
+        Arc::new(move |id| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(respond(id))
+        })
+    }
+
+    /// 轮询等待条件成立（后台 task 需要若干次调度才能跑完）。
+    async fn wait_until(mut cond: impl FnMut() -> bool) {
+        tokio::time::timeout(StdDuration::from_secs(2), async {
+            while !cond() {
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("等待后台模型缓存预热超时");
+    }
+
+    /// 新增凭据后立即在后台拉取模型列表：它不支持的模型被标为 Unsupported，
+    /// 之后这些模型的请求不会再分给它；支持的模型照常分配。
+    #[tokio::test]
+    async fn add_credential_warms_model_cache_and_excludes_unsupported_models() {
+        let manager = Arc::new(balanced_manager(vec![
+            grouped_cred("a", &[]),
+            grouped_cred("b", &[]),
+        ]));
+        seed_model_cache(&manager, 1, &["deepseek-3.2", "glm-5"]);
+        seed_model_cache(&manager, 2, &["deepseek-3.2", "glm-5"]);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.set_test_models_fetcher(test_fetcher(calls.clone(), |_| async {
+            Ok::<_, anyhow::Error>(model_response(&["glm-5"]))
+        }));
+
+        let new_id = manager.add_credential(api_key_cred("ksk_c")).await.unwrap();
+        wait_until(|| manager.cached_model_response(new_id, false).is_some()).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "新增凭据应触发且只触发一次拉取");
+        assert_eq!(
+            manager.cached_model_support(new_id, Some("deepseek-3.2")),
+            CachedModelSupport::Unsupported
+        );
+        for _ in 0..200 {
+            let id = manager
+                .select_next_credential(Some("deepseek-3.2"), None)
+                .unwrap()
+                .0;
+            assert_ne!(id, new_id, "不支持 deepseek 的新凭据不应分到 deepseek 请求");
+        }
+        let picked_for_glm =
+            (0..200).any(|_| manager.select_next_credential(Some("glm-5"), None).unwrap().0 == new_id);
+        assert!(picked_for_glm, "新凭据支持的模型应照常分到请求");
+    }
+
+    /// 预热在后台进行：上游拉取未返回时 add_credential 已经返回，凭据已可调度。
+    #[tokio::test]
+    async fn add_credential_does_not_wait_for_model_cache_warmup() {
+        let manager = Arc::new(balanced_manager(vec![]));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.set_test_models_fetcher(test_fetcher(calls.clone(), move |_| {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                Ok::<_, anyhow::Error>(model_response(&["glm-5"]))
+            }
+        }));
+
+        let new_id = tokio::time::timeout(
+            StdDuration::from_secs(1),
+            manager.add_credential(api_key_cred("ksk_slow")),
+        )
+        .await
+        .expect("add_credential 不应等待模型列表拉取")
+        .unwrap();
+        assert!(manager.cached_model_response(new_id, false).is_none());
+        assert_eq!(
+            manager.select_next_credential(Some("glm-5"), None).map(|(id, _)| id),
+            Some(new_id),
+            "预热完成前按 Unknown 参与调度"
+        );
+
+        release.notify_one();
+        wait_until(|| manager.cached_model_response(new_id, false).is_some()).await;
+    }
+
+    /// 预热失败不影响添加，缓存保持为空，凭据按 Unknown 继续参与调度（与改动前一致）。
+    #[tokio::test]
+    async fn failed_model_cache_warmup_keeps_credential_unknown() {
+        let manager = Arc::new(balanced_manager(vec![]));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.set_test_models_fetcher(test_fetcher(calls.clone(), |_| async {
+            Err::<ListAvailableModelsResponse, _>(anyhow::anyhow!("upstream unavailable"))
+        }));
+
+        let new_id = manager.add_credential(api_key_cred("ksk_fail")).await.unwrap();
+        wait_until(|| calls.load(Ordering::SeqCst) == 1).await;
+        // 让 refresh 的收尾（若有）跑完
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+
+        assert!(manager.cached_model_response(new_id, false).is_none());
+        assert_eq!(
+            manager.cached_model_support(new_id, Some("glm-5")),
+            CachedModelSupport::Unknown
+        );
+        assert_eq!(
+            manager.select_next_credential(Some("glm-5"), None).map(|(id, _)| id),
+            Some(new_id)
+        );
+    }
+
+    /// 预热进行中凭据被删除（如批量导入验活失败回滚）：迟到的结果不能写回缓存。
+    #[tokio::test]
+    async fn model_cache_warmup_result_is_dropped_after_credential_deleted() {
+        let manager = Arc::new(balanced_manager(vec![]));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(tokio::sync::Notify::new());
+        let (gate, done) = (release.clone(), finished.clone());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.set_test_models_fetcher(test_fetcher(calls.clone(), move |_| {
+            let (gate, done) = (gate.clone(), done.clone());
+            async move {
+                gate.notified().await;
+                done.notify_one();
+                Ok::<_, anyhow::Error>(model_response(&["glm-5"]))
+            }
+        }));
+
+        let new_id = manager.add_credential(api_key_cred("ksk_rollback")).await.unwrap();
+        wait_until(|| calls.load(Ordering::SeqCst) == 1).await;
+        manager.delete_credential(new_id).unwrap();
+
+        release.notify_one();
+        finished.notified().await;
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+
+        assert!(
+            manager.cached_model_response(new_id, false).is_none(),
+            "已删除凭据的模型列表不应回填缓存"
+        );
     }
 
     #[test]
@@ -7415,18 +8014,181 @@ mod tests {
         )
         .unwrap();
 
-        // 让 A(id1) 成功若干次 → balanced 应转向 success_count 更小的 B(id2)
-        manager.report_success(1);
-        manager.report_success(1);
-        let pick = manager.select_next_credential(None, Some("g1"));
+        // g1 内随机：A、B 都会被选到，但绝不会越界选到 g2 的 C
+        let mut g1_picks = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let id = manager
+                .select_next_credential(None, Some("g1"))
+                .map(|(id, _)| id)
+                .unwrap();
+            g1_picks.insert(id);
+        }
         assert_eq!(
-            pick.map(|(id, _)| id),
-            Some(2),
-            "balanced 应在 g1 内选 success_count 最小的 B"
+            g1_picks,
+            std::collections::HashSet::from([1, 2]),
+            "balanced 应在 g1 内随机选择 A、B"
         );
-        // g2 不受 g1 计数影响，仍只会选到 C(id3)
-        let pick_g2 = manager.select_next_credential(None, Some("g2"));
-        assert_eq!(pick_g2.map(|(id, _)| id), Some(3));
+        // g2 只有 C(id3)
+        for _ in 0..16 {
+            let pick_g2 = manager.select_next_credential(None, Some("g2"));
+            assert_eq!(pick_g2.map(|(id, _)| id), Some(3));
+        }
+    }
+
+    fn balanced_manager(creds: Vec<KiroCredentials>) -> MultiTokenManager {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+        MultiTokenManager::new(config, creds, None, None, false).unwrap()
+    }
+
+    /// 回归：模型缓存为 Unknown 的凭据（运行时新增 / 缓存被清空）在有 Confirmed
+    /// 凭据可用时也必须能被选到。旧实现按 discovery_rank 排序会让它永远饿死。
+    #[test]
+    fn balanced_does_not_starve_unknown_model_cache_credentials() {
+        let manager = balanced_manager(vec![
+            grouped_cred("confirmed-a", &[]),
+            grouped_cred("confirmed-b", &[]),
+            grouped_cred("unknown", &[]),
+        ]);
+        seed_model_cache(&manager, 1, &["deepseek-3.2"]);
+        seed_model_cache(&manager, 2, &["deepseek-3.2"]);
+
+        let picked_unknown = (0..200).any(|_| {
+            manager
+                .select_next_credential(Some("deepseek-3.2"), None)
+                .map(|(id, _)| id)
+                == Some(3)
+        });
+        assert!(picked_unknown, "Unknown 缓存的 #3 不能被 Confirmed 凭据饿死");
+    }
+
+    /// 回归：新凭据（success_count = 0）不能独占流量。旧实现按 success_count 取最小，
+    /// 老凭据累计成功数越多，新凭据独占的时间越长。
+    #[test]
+    fn balanced_new_credential_does_not_monopolize_traffic() {
+        let manager = balanced_manager(vec![
+            grouped_cred("veteran", &[]),
+            grouped_cred("fresh", &[]),
+        ]);
+        for _ in 0..1000 {
+            manager.report_success(1);
+        }
+
+        let mut counts = [0usize; 2];
+        for _ in 0..400 {
+            let id = manager.select_next_credential(None, None).unwrap().0;
+            counts[(id - 1) as usize] += 1;
+        }
+        // 均匀随机下 #1 期望 200 次；低于 100 的概率可忽略
+        assert!(
+            counts[0] >= 100,
+            "success_count 高的老凭据仍应分到流量: {counts:?}"
+        );
+    }
+
+    /// 回归：持续失败但不会被禁用的凭据（无专属代理的网络错误、408/429/5xx 都既不
+    /// 计成功也不计失败），其 success_count 永远最低。旧实现取最小会让每个请求、
+    /// 以及同一请求的每次重试都选中它，健康凭据完全不参与故障转移。
+    #[tokio::test]
+    async fn balanced_failing_credential_does_not_trap_requests_and_retries() {
+        let manager = balanced_manager(vec![
+            grouped_cred("broken-proxy", &[]),
+            grouped_cred("healthy-a", &[]),
+            grouped_cred("healthy-b", &[]),
+        ]);
+        for _ in 0..50 {
+            manager.report_success(2);
+            manager.report_success(3);
+        }
+
+        // 模拟 provider 的重试循环：每次尝试都重新选号；#1 失败时不上报
+        // （与 provider 对无专属代理网络错误 / 瞬态 5xx 的处理一致）。
+        const MAX_ATTEMPTS: usize = 4; // provider::MAX_TOTAL_RETRIES
+        let mut succeeded = 0;
+        for _ in 0..200 {
+            for _ in 0..MAX_ATTEMPTS {
+                let ctx = manager.acquire_context(None, None).await.unwrap();
+                if ctx.id != 1 {
+                    manager.report_success(ctx.id);
+                    succeeded += 1;
+                    break;
+                }
+            }
+        }
+        // 随机下单个请求 4 次都落到 #1 的概率 (1/3)^4 ≈ 1.2%，期望成功约 197 次
+        assert!(
+            succeeded >= 180,
+            "健康凭据应接住绝大多数请求，实际成功 {succeeded}/200"
+        );
+    }
+
+    /// balanced 随机只在可用凭据中选：模型缓存明确不支持、禁用的凭据不会被选到。
+    #[test]
+    fn balanced_random_pick_respects_availability() {
+        let manager = balanced_manager(vec![
+            grouped_cred("unsupported", &[]),
+            grouped_cred("disabled", &[]),
+            grouped_cred("ok-a", &[]),
+            grouped_cred("ok-b", &[]),
+        ]);
+        seed_model_cache(&manager, 1, &["glm-5"]);
+        manager.set_disabled(2, true).unwrap();
+
+        let mut picks = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let id = manager
+                .select_next_credential(Some("deepseek-3.2"), None)
+                .unwrap()
+                .0;
+            picks.insert(id);
+        }
+        assert_eq!(picks, std::collections::HashSet::from([3, 4]));
+    }
+
+    /// balanced + 会话粘性：命中时始终沿用绑定凭据；未命中（首轮 / 绑定不可用）时随机选号。
+    #[tokio::test]
+    async fn balanced_keeps_sticky_binding_and_randomizes_on_miss() {
+        let manager = balanced_manager(vec![
+            grouped_cred("a", &[]),
+            grouped_cred("b", &[]),
+            grouped_cred("c", &[]),
+        ]);
+
+        // 首轮无绑定：随机，三个都可能选到
+        let mut first_picks = std::collections::HashSet::new();
+        for i in 0..200 {
+            let (ctx, route) = manager
+                .acquire_context_routed(None, None, Some(&format!("new-{i}")))
+                .await
+                .unwrap();
+            assert_eq!(route.sticky_outcome, StickyOutcome::MissFirst);
+            first_picks.insert(ctx.id);
+        }
+        assert_eq!(first_picks, std::collections::HashSet::from([1, 2, 3]));
+
+        // 绑定后始终命中同一凭据
+        manager.bind_session("sess", 2);
+        for _ in 0..50 {
+            let (ctx, route) = manager
+                .acquire_context_routed(None, None, Some("sess"))
+                .await
+                .unwrap();
+            assert_eq!(ctx.id, 2);
+            assert_eq!(route.sticky_outcome, StickyOutcome::Hit);
+        }
+
+        // 绑定凭据不可用：在剩余凭据中随机，不会落回 #2
+        manager.set_disabled(2, true).unwrap();
+        let mut fallback_picks = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let (ctx, route) = manager
+                .acquire_context_routed(None, None, Some("sess"))
+                .await
+                .unwrap();
+            assert_eq!(route.sticky_outcome, StickyOutcome::MissUnavailable);
+            fallback_picks.insert(ctx.id);
+        }
+        assert_eq!(fallback_picks, std::collections::HashSet::from([1, 3]));
     }
 
     #[tokio::test]

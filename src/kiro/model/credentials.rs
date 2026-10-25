@@ -471,8 +471,8 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "is_zero")]
     pub priority: u32,
 
-    /// 凭据级 Region 配置（用于 OIDC token 刷新）
-    /// 未配置时回退到 config.json 的全局 region
+    /// 凭据级默认 Region，作为 auth_region 和 api_region 的共同回退
+    /// 未配置时分别使用 config.json 的全局 Auth / API Region
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
@@ -813,11 +813,46 @@ impl KiroCredentials {
             .unwrap_or(config.effective_auth_region())
     }
 
+    /// 获取真实 profileArn 中声明的 Region。
+    ///
+    /// Enterprise / IdC 的数据面请求必须访问与 profile 所属 Region 一致的端点；
+    /// profileArn 缺失、为 BuilderID 占位符或格式异常时不参与 Region 推断。
+    fn profile_arn_region(&self) -> Option<&str> {
+        let arn = self.effective_profile_arn()?;
+        let mut parts = arn.split(':');
+        let (Some("arn"), Some(partition), Some(service), Some(region), Some(account), Some(resource)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return None;
+        };
+
+        if parts.next().is_some()
+            || partition.is_empty()
+            || service != "codewhisperer"
+            || region.is_empty()
+            || account.is_empty()
+            || !resource.starts_with("profile/")
+            || resource.len() == "profile/".len()
+        {
+            return None;
+        }
+
+        Some(region)
+    }
+
     /// 获取有效的 API Region（用于 API 请求）
-    /// 优先级：凭据.api_region > config.api_region > config.region
+    /// 优先级：显式凭据.api_region > 真实 profileArn Region > 凭据.region >
+    /// config.api_region > config.region
     pub fn effective_api_region<'a>(&'a self, config: &'a Config) -> &'a str {
         self.api_region
             .as_deref()
+            .or_else(|| self.profile_arn_region())
+            .or(self.region.as_deref())
             .unwrap_or(config.effective_api_region())
     }
 
@@ -1279,6 +1314,38 @@ mod tests {
         // 无 ARN → None
         cred.profile_arn = None;
         assert_eq!(cred.effective_profile_arn(), None);
+    }
+
+    #[test]
+    fn test_effective_api_region_prefers_real_profile_arn_region() {
+        let cred: KiroCredentials = serde_json::from_str(
+            r#"{
+                "region": "eu-west-1",
+                "profileArn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/REAL123"
+            }"#,
+        )
+        .unwrap();
+        let config = Config::default();
+
+        assert_eq!(cred.effective_api_region(&config), "us-east-1");
+    }
+
+    #[test]
+    fn test_effective_api_region_ignores_malformed_profile_arn() {
+        for profile_arn in [
+            "arn:aws:other-service:us-east-1:123456789012:profile/REAL123",
+            "arn:aws:codewhisperer:us-east-1:123456789012:resource/REAL123",
+            "arn:aws:codewhisperer::123456789012:profile/REAL123",
+            "arn:aws:codewhisperer:us-east-1:123456789012:profile/",
+        ] {
+            let cred: KiroCredentials = serde_json::from_value(serde_json::json!({
+                "region": "eu-west-1",
+                "profileArn": profile_arn,
+            }))
+            .unwrap();
+
+            assert_eq!(cred.effective_api_region(&Config::default()), "eu-west-1");
+        }
     }
 
     #[test]
@@ -1771,12 +1838,13 @@ mod tests {
 
     #[test]
     fn test_effective_api_region_credential_api_region_highest() {
-        // 凭据.api_region > config.api_region > config.region
+        // 凭据.api_region > 凭据.region > config.api_region > config.region
         let mut config = Config::default();
         config.region = "config-region".to_string();
         config.api_region = Some("config-api-region".to_string());
 
         let mut creds = KiroCredentials::default();
+        creds.region = Some("cred-region".to_string());
         creds.api_region = Some("cred-api-region".to_string());
 
         assert_eq!(creds.effective_api_region(&config), "cred-api-region");
@@ -1804,15 +1872,28 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_api_region_ignores_credential_region() {
-        // 凭据.region 不参与 api_region 的回退链
+    fn test_effective_api_region_fallback_to_credential_region() {
         let mut config = Config::default();
         config.region = "config-region".to_string();
+        config.api_region = Some("config-api-region".to_string());
 
         let mut creds = KiroCredentials::default();
         creds.region = Some("cred-region".to_string());
 
-        assert_eq!(creds.effective_api_region(&config), "config-region");
+        assert_eq!(creds.effective_api_region(&config), "cred-region");
+    }
+
+    #[test]
+    fn test_effective_api_region_does_not_use_auth_region() {
+        let mut config = Config::default();
+        config.auth_region = Some("config-auth-region".to_string());
+        let creds = KiroCredentials {
+            auth_region: Some("cred-auth-region".to_string()),
+            ..KiroCredentials::default()
+        };
+
+        assert_eq!(creds.effective_auth_region(&config), "cred-auth-region");
+        assert_eq!(creds.effective_api_region(&config), "us-east-1");
     }
 
     #[test]

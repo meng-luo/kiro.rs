@@ -52,6 +52,7 @@ interface TopbarToolsProps {
 const NON_DATA_QUERY_ROOTS = new Set([
   'loadBalancingMode',
   'accountThrottleConfig',
+  'modelApiRetryConfig',
   'accountRpmLimitConfig',
   'selfHealConfig',
   'logGovernanceConfig',
@@ -76,7 +77,7 @@ interface ToggleSpec {
   onToggle: () => void
 }
 
-export function TopbarTools({ compact = false }: TopbarToolsProps) {
+export function TopbarTools({ compact }: TopbarToolsProps) {
   const queryClient = useQueryClient()
   const { data: lbData, isLoading: lbLoading } = useLoadBalancingMode()
   const { mutate: setLb, isPending: lbSaving } = useSetLoadBalancingMode()
@@ -135,8 +136,8 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
       label: thLoading ? '加载中…' : failover ? `故障转移 · ${cooldownMin}m` : '不切换',
       menuLabel: failover ? '关闭故障转移' : '开启故障转移',
       title: failover
-        ? `账号级风控故障转移：开启（冷却 ${cooldownMin} 分钟，可在设置页调整）`
-        : '账号级风控故障转移：关闭',
+        ? `账号级 429 故障转移：开启（冷却 ${cooldownMin} 分钟，可在设置页调整）`
+        : '账号级 429 故障转移：关闭',
       icon: failover ? (
         <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
       ) : (
@@ -180,22 +181,27 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
 
   return (
     <>
-      {compact ? (
-        <CompactTools
-          toggles={toggles}
-          hasUpdate={!!updateCheck?.hasUpdate}
-          onRefresh={handleRefresh}
-          onOpenModels={() => setModelsOpen(true)}
-          onOpenImageUpdate={() => setImageUpdateOpen(true)}
-        />
-      ) : (
-        <FullTools
-          toggles={toggles}
-          updateCheck={updateCheck}
-          onRefresh={handleRefresh}
-          onOpenModels={() => setModelsOpen(true)}
-          onOpenImageUpdate={() => setImageUpdateOpen(true)}
-        />
+      {compact !== false && (
+        <div className={compact === undefined ? 'md:hidden' : undefined}>
+          <CompactTools
+            toggles={toggles}
+            hasUpdate={!!updateCheck?.hasUpdate}
+            onRefresh={handleRefresh}
+            onOpenModels={() => setModelsOpen(true)}
+            onOpenImageUpdate={() => setImageUpdateOpen(true)}
+          />
+        </div>
+      )}
+      {!compact && (
+        <div className={compact === undefined ? 'hidden items-center gap-2 md:flex' : 'flex items-center gap-2'}>
+          <FullTools
+            toggles={toggles}
+            updateCheck={updateCheck}
+            onRefresh={handleRefresh}
+            onOpenModels={() => setModelsOpen(true)}
+            onOpenImageUpdate={() => setImageUpdateOpen(true)}
+          />
+        </div>
       )}
       <ImageUpdateDialog open={imageUpdateOpen} onOpenChange={setImageUpdateOpen} />
       <AvailableModelsDialog open={modelsOpen} onOpenChange={setModelsOpen} />
@@ -268,7 +274,7 @@ function CompactTools({
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" title="更多操作" className="relative">
+        <Button variant="ghost" size="icon" title="更多操作" aria-label="更多操作" className="relative">
           <MoreHorizontal className="h-4 w-4" />
           {hasUpdate && <UpdateDot />}
         </Button>

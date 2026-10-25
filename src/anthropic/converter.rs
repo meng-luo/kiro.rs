@@ -296,7 +296,7 @@ pub fn map_model(model: &str) -> Option<String> {
 ///
 /// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
 /// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
-/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 同 1M
+/// Sonnet 5 / Sonnet 5.5 / Opus 4.7 / 4.8 / Opus 5 / 5.5 同 1M
 ///
 /// 注意：本函数的返回值会在 `Event::ContextUsage` 处被用来把上游只回报的
 /// 百分比换算成 token 数（`pct × window / 100`）。漏配某个 1M 模型不会影响
@@ -311,16 +311,27 @@ pub fn get_context_window_size(model: &str) -> i32 {
     }
 
     match map_model(model) {
-        // GPT-5.6 family on Kiro ships a 272K context window.
+        // Kiro exposes the GPT-5.6 family with a 1M context window.
+        Some(mapped)
+            if matches!(
+                mapped.as_str(),
+                "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            ) =>
+        {
+            1_000_000
+        }
+        // Keep the existing fallback for other GPT models until their limits are confirmed.
         Some(mapped) if mapped.starts_with("gpt") => 272_000,
         Some(mapped)
             if mapped == "claude-sonnet-4.6"
                 || mapped == "claude-sonnet-4.8"
                 || mapped == "claude-sonnet-5"
+                || mapped == "claude-sonnet-5.5"
                 || mapped == "claude-opus-4.6"
                 || mapped == "claude-opus-4.7"
                 || mapped == "claude-opus-4.8"
                 || mapped == "claude-opus-5"
+                || mapped == "claude-opus-5.5"
                 || mapped == "claude-fable-5" =>
         {
             1_000_000
@@ -572,12 +583,25 @@ pub struct ConversionResult {
     pub additional_model_request_fields: Option<AdditionalModelRequestFields>,
 }
 
+/// Internal conversion purpose. Clients cannot select this directly; the
+/// Responses adapter uses compact modes only after validating a terminal
+/// `compaction_trigger` item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConversionPurpose {
+    Generate,
+    Compact,
+    CompactFallback,
+}
+
+const COMPACTION_HISTORY_TOOL_NAME: &str = "kiro_compaction_history_tool";
+
 /// 转换错误
 #[derive(Debug)]
 pub enum ConversionError {
     InvalidModel(String),
     EmptyMessages,
-    /// Claude Code 工具无法映射到 Kiro 内置工具（如 Read.pages 无对应、内置缺 schema）。
+    InvalidMessageSequence(String),
+    /// Claude Code 工具无法映射到 Kiro 内置工具（如内置缺 schema）。
     UnsupportedToolMapping(String),
 }
 
@@ -586,6 +610,9 @@ impl std::fmt::Display for ConversionError {
         match self {
             ConversionError::InvalidModel(reason) => write!(f, "无效模型 ID: {}", reason),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
+            ConversionError::InvalidMessageSequence(reason) => {
+                write!(f, "消息序列无效: {}", reason)
+            }
             ConversionError::UnsupportedToolMapping(reason) => {
                 write!(f, "工具映射不支持: {}", reason)
             }
@@ -674,6 +701,20 @@ fn create_placeholder_tool(name: &str) -> Tool {
     }
 }
 
+fn create_compaction_history_tool() -> Tool {
+    let mut tool = create_placeholder_tool(COMPACTION_HISTORY_TOOL_NAME);
+    tool.tool_specification.description =
+        "Inert placeholder for structured tool calls in compacted history. Do not call it."
+            .to_string();
+    tool
+}
+
+fn sorted_ids(ids: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut ids = ids.iter().cloned().collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
 /// 将 Anthropic 请求转换为 Kiro 请求
 /// 便捷入口（测试用）：默认按 ClaudeCode 模式转换。
 #[cfg(test)]
@@ -684,6 +725,18 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 pub fn convert_request_with_mode(
     req: &MessagesRequest,
     tool_compatibility_mode: ToolCompatibilityMode,
+) -> Result<ConversionResult, ConversionError> {
+    convert_request_with_purpose(
+        req,
+        tool_compatibility_mode,
+        ConversionPurpose::Generate,
+    )
+}
+
+pub(crate) fn convert_request_with_purpose(
+    req: &MessagesRequest,
+    tool_compatibility_mode: ToolCompatibilityMode,
+    purpose: ConversionPurpose,
 ) -> Result<ConversionResult, ConversionError> {
     // 1. 映射模型
     let model_id = map_model(&req.model).ok_or_else(|| {
@@ -736,14 +789,22 @@ pub fn convert_request_with_mode(
 
     // 6. 转换工具定义（超长名称自动缩短并记录映射；ClaudeCode 模式做内置工具适配）
     let mut tool_name_map = HashMap::new();
-    let mut tools = convert_tools(&req.tools, &mut tool_name_map, tool_compatibility_mode)?;
+    let fallback = purpose == ConversionPurpose::CompactFallback;
+    let mut tools = if fallback {
+        Vec::new()
+    } else {
+        convert_tools(&req.tools, &mut tool_name_map, tool_compatibility_mode)?
+    };
 
     // 收集本次请求声明的所有工具名（原始 client 名），供 `<invoke>` 容错的工具表校验。
-    let mut known_tool_names: std::collections::HashSet<String> = req
-        .tools
-        .as_ref()
-        .map(|ts| ts.iter().map(|t| t.name.clone()).collect())
-        .unwrap_or_default();
+    let mut known_tool_names: std::collections::HashSet<String> = if fallback {
+        std::collections::HashSet::new()
+    } else {
+        req.tools
+            .as_ref()
+            .map(|ts| ts.iter().map(|t| t.name.clone()).collect())
+            .unwrap_or_default()
+    };
     // 建议3 修复：超长工具名（>63）会被 shorten 成短名发给上游，模型回吐的也是短名。
     // tool_name_map 的 key 正是这些短名，一并加入，避免「超长名工具的合法 invoke 被漏捞」。
     for short in tool_name_map.keys() {
@@ -757,16 +818,22 @@ pub fn convert_request_with_mode(
         &model_id,
         &mut tool_name_map,
         tool_compatibility_mode,
+        purpose,
     )?;
 
     // 8. 验证并过滤 tool_use/tool_result 配对
     // 移除孤立的 tool_result（没有对应的 tool_use）
     // 同时返回孤立的 tool_use_id 集合，用于后续清理
-    let (validated_tool_results, orphaned_tool_use_ids) =
-        validate_tool_pairing(&history, &tool_results);
-
-    // 9. 从历史中移除孤立的 tool_use（Kiro API 要求 tool_use 必须有对应的 tool_result）
-    remove_orphaned_tool_uses(&mut history, &orphaned_tool_use_ids);
+    let validated_tool_results = if purpose != ConversionPurpose::Generate {
+        validate_compaction_tool_sequence(&history, &tool_results)?;
+        tool_results.clone()
+    } else {
+        let (validated_tool_results, orphaned_tool_use_ids) =
+            validate_tool_pairing(&history, &tool_results);
+        // Generate keeps its existing compatibility behavior.
+        remove_orphaned_tool_uses(&mut history, &orphaned_tool_use_ids);
+        validated_tool_results
+    };
 
     // 10. 收集历史中使用的工具名称，为缺失的工具生成占位符定义
     // Kiro API 要求：历史消息中引用的工具必须在 tools 列表中有定义
@@ -777,9 +844,16 @@ pub fn convert_request_with_mode(
         .map(|t| t.tool_specification.name.to_lowercase())
         .collect();
 
-    for tool_name in history_tool_names {
-        if !existing_tool_names.contains(&tool_name.to_lowercase()) {
-            tools.push(create_placeholder_tool(&tool_name));
+    if fallback {
+        if !history_tool_names.is_empty() {
+            tools.push(create_compaction_history_tool());
+            known_tool_names.insert(COMPACTION_HISTORY_TOOL_NAME.to_string());
+        }
+    } else {
+        for tool_name in history_tool_names {
+            if !existing_tool_names.contains(&tool_name.to_lowercase()) {
+                tools.push(create_placeholder_tool(&tool_name));
+            }
         }
     }
 
@@ -828,6 +902,21 @@ pub fn convert_request_with_mode(
     // `additionalModelRequestFields is not supported for this model`, so keep the field opt-in
     // by upstream model capability rather than by the mere presence of client output_config.
     let additional_model_request_fields = build_additional_model_request_fields(req, &model_id);
+
+    let upstream_effort = additional_model_request_fields.as_ref().and_then(|f| {
+        f.output_config
+            .as_ref()
+            .map(|c| c.effort.as_str())
+            .or_else(|| f.reasoning.as_ref().map(|r| r.effort.as_str()))
+    });
+    tracing::info!(
+        model_id = %model_id,
+        thinking_type = req.thinking.as_ref().map(|t| t.thinking_type.as_str()).unwrap_or("-"),
+        budget_tokens = req.thinking.as_ref().map(|t| t.budget_tokens).unwrap_or(0),
+        client_effort = req.output_config.as_ref().map(|c| c.effort.as_str()).unwrap_or("-"),
+        upstream_effort = upstream_effort.unwrap_or("-"),
+        "thinking 配置"
+    );
 
     Ok(ConversionResult {
         conversation_state,
@@ -1073,6 +1162,66 @@ fn validate_tool_pairing(
     (filtered_results, unpaired_tool_use_ids)
 }
 
+fn validate_compaction_tool_sequence(
+    history: &[Message],
+    current_tool_results: &[ToolResult],
+) -> Result<(), ConversionError> {
+    let mut pending = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for message in history {
+        match message {
+            Message::Assistant(assistant) => {
+                for tool_use in assistant
+                    .assistant_response_message
+                    .tool_uses
+                    .iter()
+                    .flatten()
+                {
+                    if !seen.insert(tool_use.tool_use_id.clone()) {
+                        return Err(ConversionError::InvalidMessageSequence(format!(
+                            "duplicate tool_use id in compaction history: {}",
+                            tool_use.tool_use_id
+                        )));
+                    }
+                    pending.insert(tool_use.tool_use_id.clone());
+                }
+            }
+            Message::User(user) => {
+                for result in &user
+                    .user_input_message
+                    .user_input_message_context
+                    .tool_results
+                {
+                    if !pending.remove(&result.tool_use_id) {
+                        return Err(ConversionError::InvalidMessageSequence(format!(
+                            "tool_result has no pending tool_use in compaction history: {}",
+                            result.tool_use_id
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    for result in current_tool_results {
+        if !pending.remove(&result.tool_use_id) {
+            return Err(ConversionError::InvalidMessageSequence(format!(
+                "current tool_result has no pending tool_use in compaction history: {}",
+                result.tool_use_id
+            )));
+        }
+    }
+
+    if !pending.is_empty() {
+        return Err(ConversionError::InvalidMessageSequence(format!(
+            "compaction history contains tool_use without tool_result: {}",
+            sorted_ids(&pending).join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// 从历史消息中移除孤立的 tool_use
 ///
 /// Kiro API 要求每个 tool_use 必须有对应的 tool_result，否则返回 400 Bad Request。
@@ -1234,11 +1383,9 @@ fn map_tool_input_to_kiro(
             maybe_insert(&mut out, "timeout", take_first(&obj, &["timeout"]));
         }
         ("Read", "read_file") => {
-            if obj.contains_key("pages") && !obj.get("pages").is_some_and(|v| v.is_null()) {
-                return Err(ConversionError::UnsupportedToolMapping(
-                    "Claude Code Read.pages has no Kiro read_file equivalent".to_string(),
-                ));
-            }
+            // Claude Code 的 `pages`（PDF 页范围）在 Kiro read_file 中无对应字段。本函数只处理
+            // 回放的历史 tool_use，客户端无法修正，拒绝会让整个会话永久 400；这里随白名单
+            // 构造自然丢弃，Kiro 看到的只是一次普通读取历史。
             maybe_insert(&mut out, "path", take_first(&obj, &["file_path", "path"]));
             let offset = obj.get("offset").and_then(optional_number);
             let limit = obj.get("limit").and_then(optional_number);
@@ -1623,7 +1770,14 @@ fn has_thinking_tags(content: &str) -> bool {
 ///   注意：该切片与 `req.messages` 可能不同（prefill 时会截断末尾的 assistant 消息），
 ///   调用方应始终使用此参数而非 `req.messages`。
 /// * `model_id` - 已映射的 Kiro 模型 ID
-fn build_history(req: &MessagesRequest, messages: &[super::types::Message], model_id: &str, tool_name_map: &mut HashMap<String, String>, mode: ToolCompatibilityMode) -> Result<Vec<Message>, ConversionError> {
+fn build_history(
+    req: &MessagesRequest,
+    messages: &[super::types::Message],
+    model_id: &str,
+    tool_name_map: &mut HashMap<String, String>,
+    mode: ToolCompatibilityMode,
+    purpose: ConversionPurpose,
+) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
 
     // 生成thinking前缀（如果需要）
@@ -1685,7 +1839,8 @@ fn build_history(req: &MessagesRequest, messages: &[super::types::Message], mode
         if msg.role == "user" {
             // 先处理累积的 assistant 消息
             if !assistant_buffer.is_empty() {
-                let merged = merge_assistant_messages(&assistant_buffer, tool_name_map, mode)?;
+                let merged =
+                    merge_assistant_messages(&assistant_buffer, tool_name_map, mode, purpose)?;
                 history.push(Message::Assistant(merged));
                 assistant_buffer.clear();
             }
@@ -1704,7 +1859,7 @@ fn build_history(req: &MessagesRequest, messages: &[super::types::Message], mode
 
     // 处理末尾累积的 assistant 消息
     if !assistant_buffer.is_empty() {
-        let merged = merge_assistant_messages(&assistant_buffer, tool_name_map, mode)?;
+        let merged = merge_assistant_messages(&assistant_buffer, tool_name_map, mode, purpose)?;
         history.push(Message::Assistant(merged));
     }
 
@@ -1713,9 +1868,14 @@ fn build_history(req: &MessagesRequest, messages: &[super::types::Message], mode
         let merged_user = merge_user_messages(&user_buffer, model_id, &mut image_dedup)?;
         history.push(Message::User(merged_user));
 
-        // 自动配对一个 "OK" 的 assistant 响应
-        let auto_assistant = HistoryAssistantMessage::new("OK");
-        history.push(Message::Assistant(auto_assistant));
+        if purpose != ConversionPurpose::Generate {
+            return Err(ConversionError::InvalidMessageSequence(
+                "compaction would move an unanswered user message into history".to_string(),
+            ));
+        }
+
+        // Generate preserves the legacy compatibility pair.
+        history.push(Message::Assistant(HistoryAssistantMessage::new("OK")));
     }
 
     Ok(history)
@@ -1765,6 +1925,7 @@ fn convert_assistant_message(
     msg: &super::types::Message,
     tool_name_map: &mut HashMap<String, String>,
     mode: ToolCompatibilityMode,
+    purpose: ConversionPurpose,
 ) -> Result<HistoryAssistantMessage, ConversionError> {
     let mut thinking_content = String::new();
     let mut text_content = String::new();
@@ -1791,9 +1952,20 @@ fn convert_assistant_message(
                         "tool_use" => {
                             if let (Some(id), Some(name)) = (block.id, block.name) {
                                 let input = block.input.unwrap_or(serde_json::json!({}));
-                                let mapped_name =
-                                    map_client_tool_name_to_kiro(&name, tool_name_map, mode);
-                                let input = map_tool_input_to_kiro(&name, input, mode)?;
+                                let (mapped_name, input) = if purpose
+                                    == ConversionPurpose::CompactFallback
+                                {
+                                    (COMPACTION_HISTORY_TOOL_NAME.to_string(), input)
+                                } else {
+                                    (
+                                        map_client_tool_name_to_kiro(
+                                            &name,
+                                            tool_name_map,
+                                            mode,
+                                        ),
+                                        map_tool_input_to_kiro(&name, input, mode)?,
+                                    )
+                                };
                                 tool_uses
                                     .push(ToolUseEntry::new(id, mapped_name).with_input(input));
                             }
@@ -1840,17 +2012,18 @@ fn merge_assistant_messages(
     messages: &[&super::types::Message],
     tool_name_map: &mut HashMap<String, String>,
     mode: ToolCompatibilityMode,
+    purpose: ConversionPurpose,
 ) -> Result<HistoryAssistantMessage, ConversionError> {
     assert!(!messages.is_empty());
     if messages.len() == 1 {
-        return convert_assistant_message(messages[0], tool_name_map, mode);
+        return convert_assistant_message(messages[0], tool_name_map, mode, purpose);
     }
 
     let mut all_tool_uses: Vec<ToolUseEntry> = Vec::new();
     let mut content_parts: Vec<String> = Vec::new();
 
     for msg in messages {
-        let converted = convert_assistant_message(msg, tool_name_map, mode)?;
+        let converted = convert_assistant_message(msg, tool_name_map, mode, purpose)?;
         let am = converted.assistant_response_message;
         if !am.content.trim().is_empty() {
             content_parts.push(am.content);
@@ -1962,6 +2135,11 @@ mod tests {
         );
         assert_eq!(get_context_window_size("claude-sonnet-5"), 1_000_000);
         assert_eq!(
+            map_model("claude-sonnet-5-5"),
+            Some("claude-sonnet-5.5".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-sonnet-5-5"), 1_000_000);
+        assert_eq!(
             map_model("claude-3-5-sonnet-20241022"),
             Some("claude-sonnet-3.5".to_string())
         );
@@ -2020,6 +2198,20 @@ mod tests {
             map_model("claude-sonnet-5-2"),
             Some("claude-sonnet-5.2".to_string())
         );
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5.5",
+            "claude-opus-5-5-thinking",
+            "claude-opus-5.5-latest",
+            "claude-opus-5-5-20270101",
+            "CLAUDE-OPUS-5-5",
+        ] {
+            assert_eq!(
+                map_model(model),
+                Some("claude-opus-5.5".to_string()),
+                "{model} 应映射到 claude-opus-5.5"
+            );
+        }
         assert_eq!(
             map_model("claude-opus-5-beta"),
             Some("claude-opus-5-beta".to_string())
@@ -2055,6 +2247,8 @@ mod tests {
             "claude-opus-4-7",
             "claude-opus-4-8",
             "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-opus-5.5-thinking",
             "claude-fable-5",
         ] {
             assert_eq!(
@@ -2084,10 +2278,17 @@ mod tests {
     #[test]
     fn test_map_model_gpt_5_6_family() {
         // Kiro serves the GPT-5.6 family; ids pass through verbatim.
-        assert_eq!(map_model("gpt-5.6-sol"), Some("gpt-5.6-sol".to_string()));
-        assert_eq!(map_model("gpt-5.6-terra"), Some("gpt-5.6-terra".to_string()));
-        assert_eq!(map_model("gpt-5.6-luna"), Some("gpt-5.6-luna".to_string()));
-        assert_eq!(get_context_window_size("gpt-5.6-sol"), 272_000);
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert_eq!(map_model(model), Some(model.to_string()));
+            assert_eq!(
+                get_context_window_size(model),
+                1_000_000,
+                "{model} should use the 1M context window"
+            );
+        }
+
+        // Do not silently expand unconfirmed GPT model windows.
+        assert_eq!(get_context_window_size("gpt-5.5"), 272_000);
     }
 
     #[test]
@@ -2204,6 +2405,26 @@ mod tests {
                 .model_id,
             "glm-5"
         );
+    }
+
+    #[test]
+    fn test_opus_5_5_maps_upstream_id_and_keeps_xhigh() {
+        let req =
+            minimal_adaptive_thinking_request_with_effort("claude-opus-5-5-thinking", "xhigh");
+        let result = convert_request(&req).unwrap();
+
+        assert_eq!(
+            result
+                .conversation_state
+                .current_message
+                .user_input_message
+                .model_id,
+            "claude-opus-5.5"
+        );
+        let fields = result
+            .additional_model_request_fields
+            .expect("opus 5.5 adaptive thinking should keep output_config");
+        assert_eq!(fields.output_config.unwrap().effort, "xhigh");
     }
 
     #[test]
@@ -2374,6 +2595,7 @@ mod tests {
             "claude-sonnet-4.6",
             "claude-fable-5",
             "claude-sonnet-5",
+            "claude-opus-5.5",
         ] {
             assert!(model_supports_native_reasoning(m), "{m} 应支持原生 reasoning");
         }
@@ -2736,14 +2958,52 @@ mod tests {
     }
 
     #[test]
-    fn cc_outbound_read_pages_errors() {
-        let err = map_tool_input_to_kiro(
+    fn cc_outbound_read_pages_is_dropped() {
+        let out = map_tool_input_to_kiro(
             "Read",
-            serde_json::json!({"file_path": "/a", "pages": "1-3"}),
+            serde_json::json!({"file_path": "/a", "offset": 3, "pages": "1-3"}),
             ToolCompatibilityMode::ClaudeCode,
         )
-        .unwrap_err();
-        assert!(matches!(err, ConversionError::UnsupportedToolMapping(_)));
+        .unwrap();
+        assert!(out.get("pages").is_none());
+        assert_eq!(out["path"], serde_json::json!("/a"));
+        assert_eq!(out["start_line"], serde_json::json!(3));
+    }
+
+    /// 回归：历史 assistant 消息里的 Read.pages（含空串）不应让整个请求 400。
+    /// 该入参只会出现在回放历史中，客户端无法修正，报错会让该会话此后每次请求都失败。
+    #[test]
+    fn cc_history_read_with_pages_converts_without_error() {
+        use super::super::types::Message as AnthropicMessage;
+
+        for pages in [serde_json::json!("1-3"), serde_json::json!("")] {
+            let msg = AnthropicMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!([
+                    {"type": "tool_use", "id": "toolu_01PDF", "name": "Read",
+                     "input": {"file_path": "/a.pdf", "pages": pages}}
+                ]),
+            };
+            let mut map = HashMap::new();
+            let result = convert_assistant_message(
+                &msg,
+                &mut map,
+                ToolCompatibilityMode::ClaudeCode,
+                ConversionPurpose::Generate,
+            )
+            .unwrap_or_else(|e| panic!("pages={pages} 的历史 Read 应能转换: {e}"));
+
+            let tool_uses = result
+                .assistant_response_message
+                .tool_uses
+                .expect("应保留 tool_use");
+            assert_eq!(tool_uses[0].name, "read_file");
+            assert_eq!(tool_uses[0].input["path"], serde_json::json!("/a.pdf"));
+            assert!(
+                tool_uses[0].input.get("pages").is_none(),
+                "Kiro read_file schema 为 additionalProperties:false，不能带 pages"
+            );
+        }
     }
 
     #[test]
@@ -3344,7 +3604,13 @@ mod tests {
             ]),
         };
 
-        let result = convert_assistant_message(&msg, &mut HashMap::new(), ToolCompatibilityMode::Raw).expect("应该成功转换");
+        let result = convert_assistant_message(
+            &msg,
+            &mut HashMap::new(),
+            ToolCompatibilityMode::Raw,
+            ConversionPurpose::Generate,
+        )
+        .expect("应该成功转换");
 
         // 验证 content 不为空（使用占位符）
         assert!(
@@ -3379,7 +3645,13 @@ mod tests {
             ]),
         };
 
-        let result = convert_assistant_message(&msg, &mut HashMap::new(), ToolCompatibilityMode::Raw).expect("应该成功转换");
+        let result = convert_assistant_message(
+            &msg,
+            &mut HashMap::new(),
+            ToolCompatibilityMode::Raw,
+            ConversionPurpose::Generate,
+        )
+        .expect("应该成功转换");
 
         // 验证 content 使用原始文本（不是占位符）
         assert_eq!(
@@ -3492,7 +3764,13 @@ mod tests {
         };
 
         let messages: Vec<&AnthropicMessage> = vec![&msg1, &msg2];
-        let result = merge_assistant_messages(&messages, &mut HashMap::new(), ToolCompatibilityMode::Raw).expect("合并应成功");
+        let result = merge_assistant_messages(
+            &messages,
+            &mut HashMap::new(),
+            ToolCompatibilityMode::Raw,
+            ConversionPurpose::Generate,
+        )
+        .expect("合并应成功");
 
         let content = &result.assistant_response_message.content;
         assert!(content.contains("<thinking>"), "应包含 thinking 标签");

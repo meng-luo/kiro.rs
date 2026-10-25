@@ -2,7 +2,6 @@ import { useState, useEffect, lazy, Suspense } from "react";
 import { storage } from "@/lib/storage";
 import {
   applyTheme,
-  applyThemeWithTransition,
   resolveDarkMode,
   type ThemeId,
   type ThemeMode,
@@ -92,14 +91,10 @@ function App() {
 }
 
 function useAppShell() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => !!storage.getApiKey());
   const [tab, setTab] = useState<Tab>(readTabFromHash);
   const [theme, setTheme] = useState<ThemeSelection>(() => storage.getThemeSelection());
   const [isDarkMode, setIsDarkMode] = useState(() => resolveDarkMode(theme));
-
-  useEffect(() => {
-    if (storage.getApiKey()) setIsLoggedIn(true);
-  }, []);
 
   useEffect(() => {
     const onHash = () => setTab(readTabFromHash());
@@ -110,11 +105,7 @@ function useAppShell() {
   useEffect(() => {
     storage.setThemeSelection(theme);
     const resolved = resolveDarkMode(theme);
-    const root = document.documentElement;
-    const alreadyApplied =
-      root.dataset.theme === theme.palette && root.classList.contains("dark") === resolved;
-    setIsDarkMode(alreadyApplied ? resolved : applyThemeWithTransition(theme, resolved));
-    if (alreadyApplied) applyTheme(theme, resolved);
+    setIsDarkMode(applyTheme(theme, resolved));
   }, [theme]);
 
   useEffect(() => {
@@ -122,7 +113,7 @@ function useAppShell() {
 
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const onSystemThemeChange = (event: MediaQueryListEvent) => {
-      setIsDarkMode(applyThemeWithTransition(theme, event.matches));
+      setIsDarkMode(applyTheme(theme, event.matches));
     };
     media.addEventListener("change", onSystemThemeChange);
     return () => media.removeEventListener("change", onSystemThemeChange);

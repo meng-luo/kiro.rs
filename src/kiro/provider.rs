@@ -12,14 +12,20 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 use crate::admin::trace_db::{TraceAttempt, TraceRoute, TraceSink, outcome, truncate_snippet};
-use crate::http_client::{ProxyConfig, build_client};
+use crate::http_client::{ProxyConfig, build_client_with_timeouts};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
-use crate::kiro::error::UpstreamRateLimitError;
+use crate::kiro::error::{
+    UpstreamContextOverflowError, UpstreamModelUnavailableError, UpstreamRateLimitError,
+    UpstreamTimeoutError,
+};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
+
+#[cfg(test)]
+mod proxy_tests;
 
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
@@ -31,6 +37,13 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 /// 配合 429 专用长退避（见 retry_delay_throttle），被限时尽早返回而非耗尽配额。
 const MAX_TOTAL_RETRIES: usize = 4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelApi429Action {
+    Failover,
+    RetryCurrent,
+    Return,
+}
+
 /// HTTP Client 缓存容量上限（不含常驻的全局代理 client）。
 /// 代理池条目较多时，避免每个不同代理都常驻一个 reqwest::Client 导致内存无界增长。
 const CLIENT_CACHE_CAP: usize = 64;
@@ -38,7 +51,7 @@ const CLIENT_CACHE_CAP: usize = 64;
 /// 带容量上限的 HTTP Client 缓存。
 ///
 /// - key 为 effective proxy 配置（None = 直连/全局回退）
-/// - 受保护 key（全局代理对应的 effective 配置）永不被淘汰
+/// - 受保护 key 始终跟随当前全局代理，旧全局代理切换后释放缓存引用
 /// - 超出容量时按插入顺序淘汰最旧的「非受保护」条目
 struct ClientCache {
     map: HashMap<Option<ProxyConfig>, Client>,
@@ -63,6 +76,16 @@ impl ClientCache {
 
     fn get(&self, key: &Option<ProxyConfig>) -> Option<Client> {
         self.map.get(key).cloned()
+    }
+
+    /// 切换全局代理时释放旧连接池；在途请求持有的 Client 克隆仍可完成响应。
+    fn set_global_proxy(&mut self, proxy: Option<ProxyConfig>) {
+        if self.protected != proxy {
+            self.map.remove(&self.protected);
+            // 新全局代理可能原本是凭据专属代理，升级为常驻条目后不再参与淘汰。
+            self.order.retain(|key| key != &proxy);
+            self.protected = proxy;
+        }
     }
 
     /// 插入新条目，必要时淘汰最旧的非受保护条目
@@ -105,8 +128,6 @@ struct McpCallResult {
 /// 按凭据 `endpoint` 字段选择 [`KiroEndpoint`] 实现
 pub struct KiroProvider {
     token_manager: Arc<MultiTokenManager>,
-    /// 全局代理配置（用于凭据无自定义代理时的回退）
-    global_proxy: Option<ProxyConfig>,
     /// Client 缓存：key = effective proxy config, value = reqwest::Client
     /// 不同代理配置的凭据使用不同的 Client，共享相同代理的凭据复用 Client。
     /// 带容量上限淘汰（全局代理 client 常驻），避免代理数量增长导致内存无界增长。
@@ -131,16 +152,14 @@ impl KiroProvider {
         &self.token_manager
     }
 
-    /// 创建带代理配置和端点注册表的 KiroProvider 实例
+    /// 创建 KiroProvider；全局代理始终从共享凭据管理器读取。
     ///
     /// # Arguments
     /// * `token_manager` - 多凭据 Token 管理器
-    /// * `proxy` - 全局代理配置
     /// * `endpoints` - 端点名 → 实现的注册表（至少包含 `default_endpoint` 对应条目）
     /// * `default_endpoint` - 凭据未显式指定 endpoint 时使用的名称
-    pub fn with_proxy(
+    pub fn new(
         token_manager: Arc<MultiTokenManager>,
-        proxy: Option<ProxyConfig>,
         endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
         default_endpoint: String,
     ) -> Self {
@@ -150,14 +169,21 @@ impl KiroProvider {
             default_endpoint
         );
         let tls_backend = token_manager.config().tls_backend;
+        let proxy = token_manager.proxy();
         // 预热：构建全局代理对应的 Client（作为受保护的常驻条目）
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let config = token_manager.config();
+        let initial_client = build_client_with_timeouts(
+            proxy.as_ref(),
+            config.upstream_total_timeout_secs,
+            tls_backend,
+            config.upstream_connect_timeout_secs,
+            config.upstream_read_timeout_secs,
+        )
+        .expect("创建 HTTP 客户端失败");
         let client_cache = ClientCache::new(proxy.clone(), initial_client, CLIENT_CACHE_CAP);
 
         Self {
             token_manager,
-            global_proxy: proxy,
             client_cache: Mutex::new(client_cache),
             tls_backend,
             endpoints,
@@ -168,12 +194,22 @@ impl KiroProvider {
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
     fn client_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Client> {
-        let effective = credentials.effective_proxy(self.global_proxy.as_ref());
         let mut cache = self.client_cache.lock();
+        // 在缓存锁内读取最新代理，避免并发请求用旧快照将缓存切回旧全局代理。
+        let global_proxy = self.token_manager.proxy();
+        cache.set_global_proxy(global_proxy.clone());
+        let effective = credentials.effective_proxy(global_proxy.as_ref());
         if let Some(client) = cache.get(&effective) {
             return Ok(client);
         }
-        let client = build_client(effective.as_ref(), 720, self.tls_backend)?;
+        let config = self.token_manager.config();
+        let client = build_client_with_timeouts(
+            effective.as_ref(),
+            config.upstream_total_timeout_secs,
+            self.tls_backend,
+            config.upstream_connect_timeout_secs,
+            config.upstream_read_timeout_secs,
+        )?;
         cache.insert(effective, client.clone());
         Ok(client)
     }
@@ -446,6 +482,7 @@ impl KiroProvider {
                 token: &ctx.token,
                 machine_id: &machine_id,
                 config,
+                api_domain: self.token_manager.api_domain(),
             };
 
             let url = endpoint.mcp_url(&rctx);
@@ -470,8 +507,7 @@ impl KiroProvider {
             let base = client
                 .post(&url)
                 .body(body)
-                .header("content-type", endpoint.content_type())
-                .header("Connection", "close");
+                .header("content-type", endpoint.content_type());
             let request = endpoint.decorate_mcp(base, &rctx);
 
             let response = match request.send().await {
@@ -808,6 +844,7 @@ impl KiroProvider {
                 token: &ctx.token,
                 machine_id: &machine_id,
                 config,
+                api_domain: self.token_manager.api_domain(),
             };
 
             let url = endpoint.api_url(&rctx);
@@ -816,12 +853,12 @@ impl KiroProvider {
             tracing::debug!("使用端点 [{}] POST {}", endpoint.name(), url);
             tracing::debug!("实际发送请求体: {}", body);
 
-            let base = self
-                .client_for(&ctx.credentials)?
+            // 一次尝试使用同一个 Client；热更新在下一次请求或重试时生效。
+            let client = self.client_for(&ctx.credentials)?;
+            let base = client
                 .post(&url)
                 .body(body)
-                .header("content-type", endpoint.content_type())
-                .header("Connection", "close");
+                .header("content-type", endpoint.content_type());
             let request = endpoint.decorate_api(base, &rctx);
 
             // 打印实际发送的请求头（RUST_LOG=debug 时输出，便于排查问题）
@@ -831,7 +868,7 @@ impl KiroProvider {
                     tracing::debug!("  header {}: {}", k, v.to_str().unwrap_or("<binary>"));
                 }
             }
-            let response = match self.client_for(&ctx.credentials)?.execute(request).await {
+            let response = match client.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
                     tracing::warn!(
@@ -844,6 +881,9 @@ impl KiroProvider {
                         sink, attempt, ctx.id, endpoint_name, None,
                         outcome::NETWORK_ERROR, Some(&e.to_string()), attempt_start,
                     );
+                    if e.is_timeout() {
+                        return Err(UpstreamTimeoutError { source: e }.into());
+                    }
                     // 凭据专属代理故障时，重试同一凭据无意义，应跳过该凭据换下一个。
                     // 没有专属代理时（直连或仅全局代理），切换凭据不解决问题，保持重试。
                     let has_own_proxy = ctx.credentials.proxy_url.as_deref()
@@ -887,8 +927,49 @@ impl KiroProvider {
                 });
             }
 
+            let retry_after = UpstreamRateLimitError::from_headers(response.headers());
             // 失败响应：读取 body 用于日志/错误信息
-            let body = response.text().await.unwrap_or_default();
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    Self::emit_attempt(
+                        sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
+                        outcome::NETWORK_ERROR, Some(&error.to_string()), attempt_start,
+                    );
+                    if error.is_timeout() {
+                        return Err(UpstreamTimeoutError { source: error }.into());
+                    }
+                    return Err(error.into());
+                }
+            };
+
+            if status.is_server_error()
+                && serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    == Some("MODEL_TEMPORARILY_UNAVAILABLE")
+            {
+                Self::emit_attempt(
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::TRANSIENT,
+                    Some(&body),
+                    attempt_start,
+                );
+                // 只让本次请求失败，不做模型级全局冷却：过载通常只落在个别账号/节点上，
+                // 全局冷却会把一次过载放大成冷却期内该模型的所有请求都直接 503。
+                let delay = retry_after.retry_after().unwrap_or("5").to_string();
+                return Err(UpstreamModelUnavailableError { retry_after: delay }.into());
+            }
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -933,6 +1014,9 @@ impl KiroProvider {
                     sink, attempt, ctx.id, endpoint_name, Some(400),
                     outcome::BAD_REQUEST, Some(&body), attempt_start,
                 );
+                if body.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
+                    return Err(UpstreamContextOverflowError.into());
+                }
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
@@ -1024,54 +1108,78 @@ impl KiroProvider {
                 continue;
             }
 
-            // 429 + suspicious activity = 账号级临时风控
-            // 仅当前凭据被针对，故障转移到其它凭据可立即恢复（受配置开关控制）。
-            if status.as_u16() == 429
-                && self.token_manager.get_account_throttle_failover()
-                && endpoint.is_account_throttled(&body)
-            {
-                let cooldown_secs = self
-                    .token_manager
-                    .get_account_throttle_cooldown_secs()
-                    .max(1);
-                let cooldown = std::time::Duration::from_secs(cooldown_secs);
-                tracing::warn!(
-                    "API 请求失败（账号级风控，凭据 #{} 冷却 {}s 并切换，尝试 {}/{}）: {}",
-                    ctx.id,
-                    cooldown_secs,
-                    attempt + 1,
-                    max_retries,
-                    body
-                );
+            if status.as_u16() == 429 {
+                let account_rate_limited = endpoint.is_account_rate_limited(&body);
+                match model_api_429_action(
+                    account_rate_limited,
+                    self.token_manager.get_account_throttle_failover(),
+                    self.token_manager.get_model_api_429_retry_enabled(),
+                ) {
+                    ModelApi429Action::Failover => {
+                        let cooldown_secs = self
+                            .token_manager
+                            .get_account_throttle_cooldown_secs()
+                            .max(1);
+                        let cooldown = std::time::Duration::from_secs(cooldown_secs);
+                        tracing::warn!(
+                            "API 请求失败（账号级限流，凭据 #{} 冷却 {}s 并切换，尝试 {}/{}）: {}",
+                            ctx.id,
+                            cooldown_secs,
+                            attempt + 1,
+                            max_retries,
+                            body
+                        );
 
-                let remaining = self
-                    .token_manager
-                    .report_account_throttled_for_request(
-                        ctx.id,
-                        cooldown,
-                        model.as_deref(),
-                        group,
-                    );
-                Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(429),
-                    outcome::ACCOUNT_THROTTLED, Some(&body), attempt_start,
-                );
-                // 账号级风控通常不返回 Retry-After；此时使用本地实际冷却时间，
-                // 让下游网关在同一时段内也停止调度该虚拟账号。
-                let (rate_limit_error, must_wait_for_upstream) =
-                    account_rate_limit_with_fallback(rate_limit_error, cooldown_secs);
-
-                // 上游给出明确等待时间时必须立即交给客户端遵守，不能在同一请求中
-                // 提前换号重试。无有效 Retry-After 时仍允许按既有策略故障转移。
-                if must_wait_for_upstream {
-                    return Err(rate_limit_error.into());
+                        let remaining = self
+                            .token_manager
+                            .report_account_throttled_for_request(
+                                ctx.id,
+                                cooldown,
+                                model.as_deref(),
+                                group,
+                            );
+                        Self::emit_attempt(
+                            sink, attempt, ctx.id, endpoint_name, Some(429),
+                            outcome::ACCOUNT_THROTTLED, Some(&body), attempt_start,
+                        );
+                        // Retry-After 约束的是刚被限流的账号；故障转移开启时仍可立即
+                        // 尝试其它账号。若最终无账号可用，则把上游值或本地冷却时间
+                        // 返回客户端。
+                        let rate_limit_error =
+                            account_rate_limit_with_fallback(rate_limit_error, cooldown_secs);
+                        if remaining == 0 {
+                            return Err(rate_limit_error.into());
+                        }
+                        last_error = Some(rate_limit_error.into());
+                        continue;
+                    }
+                    ModelApi429Action::Return => {
+                        let outcome = if account_rate_limited {
+                            outcome::ACCOUNT_THROTTLED
+                        } else {
+                            outcome::TRANSIENT
+                        };
+                        let reason = if account_rate_limited {
+                            "账号级限流但故障转移已关闭"
+                        } else {
+                            "普通 429 自动重试已关闭"
+                        };
+                        tracing::warn!(
+                            "API 请求失败（{}，直接返回客户端）: {} {}",
+                            reason,
+                            status,
+                            body
+                        );
+                        Self::emit_attempt(
+                            sink, attempt, ctx.id, endpoint_name, Some(429),
+                            outcome, Some(&body), attempt_start,
+                        );
+                        return Err(rate_limit_error
+                            .unwrap_or_else(|| UpstreamRateLimitError::new(None))
+                            .into());
+                    }
+                    ModelApi429Action::RetryCurrent => {}
                 }
-
-                if remaining == 0 {
-                    return Err(rate_limit_error.into());
-                }
-                last_error = Some(rate_limit_error.into());
-                continue;
             }
 
             // 客户端请求格式错误（messages 数组违反协议）：根因在调用方，重试无意义
@@ -1113,8 +1221,8 @@ impl KiroProvider {
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
-            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
-            // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
+            // 走到这里的 429 是已允许自动重试的容量类错误；不禁用或切换凭据。
+            // 408/5xx 同样维持既有的当前凭据重试行为。
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
@@ -1296,19 +1404,33 @@ fn take_rate_limit_error(last_error: &mut Option<anyhow::Error>) -> Option<anyho
     }
 }
 
-/// 为账号风控 429 补齐本地冷却时间，并区分上游是否明确要求等待。
+fn model_api_429_action(
+    account_rate_limited: bool,
+    failover_enabled: bool,
+    ordinary_retry_enabled: bool,
+) -> ModelApi429Action {
+    if account_rate_limited {
+        if failover_enabled {
+            ModelApi429Action::Failover
+        } else {
+            ModelApi429Action::Return
+        }
+    } else if ordinary_retry_enabled {
+        ModelApi429Action::RetryCurrent
+    } else {
+        ModelApi429Action::Return
+    }
+}
+
+/// 账号级 429 最终返回客户端时，缺少上游 Retry-After 则补上本地冷却时间。
 fn account_rate_limit_with_fallback(
     rate_limit: Option<UpstreamRateLimitError>,
     cooldown_secs: u64,
-) -> (UpstreamRateLimitError, bool) {
-    let must_wait_for_upstream = rate_limit
-        .as_ref()
-        .is_some_and(|error| !error.should_retry_locally());
-    let error = match rate_limit {
+) -> UpstreamRateLimitError {
+    match rate_limit {
         Some(error) if error.retry_after().is_some() => error,
         _ => UpstreamRateLimitError::new(Some(cooldown_secs.to_string())),
-    };
-    (error, must_wait_for_upstream)
+    }
 }
 
 #[cfg(test)]
@@ -1366,24 +1488,46 @@ mod rate_limit_tests {
 
     #[test]
     fn account_rate_limit_uses_cooldown_when_retry_after_is_missing() {
-        let (error, must_wait) = account_rate_limit_with_fallback(
+        let error = account_rate_limit_with_fallback(
             Some(UpstreamRateLimitError::new(None)),
             300,
         );
 
         assert_eq!(error.retry_after(), Some("300"));
-        assert!(!must_wait, "无上游等待值时仍可按账号冷却策略故障转移");
     }
 
     #[test]
-    fn account_rate_limit_honors_explicit_upstream_retry_after() {
-        let (error, must_wait) = account_rate_limit_with_fallback(
+    fn account_rate_limit_preserves_explicit_upstream_retry_after() {
+        let error = account_rate_limit_with_fallback(
             Some(UpstreamRateLimitError::new(Some("90".to_string()))),
             300,
         );
 
         assert_eq!(error.retry_after(), Some("90"));
-        assert!(must_wait, "上游明确要求等待时不得在内部提前重试");
+    }
+
+    #[test]
+    fn account_rate_limit_only_uses_failover_switch() {
+        assert_eq!(
+            model_api_429_action(true, true, false),
+            ModelApi429Action::Failover
+        );
+        assert_eq!(
+            model_api_429_action(true, false, true),
+            ModelApi429Action::Return
+        );
+    }
+
+    #[test]
+    fn ordinary_rate_limit_only_uses_retry_switch() {
+        assert_eq!(
+            model_api_429_action(false, false, true),
+            ModelApi429Action::RetryCurrent
+        );
+        assert_eq!(
+            model_api_429_action(false, true, false),
+            ModelApi429Action::Return
+        );
     }
 
     #[test]
