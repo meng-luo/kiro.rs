@@ -1,11 +1,15 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useDeferredValue } from 'react'
 import { toast } from 'sonner'
 import {
   Plus, KeyRound, Trash2, Copy, Eye, EyeOff, Power, RotateCcw, Pencil, RefreshCw, Loader2,
+  Search, X, ArrowUp, ArrowDown, ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import {
+  Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '@/components/ui/dropdown-menu'
@@ -18,8 +22,9 @@ import {
   useRotateClientKey, useSetClientKeyMaxCredits,
 } from '@/hooks/use-client-keys'
 import { useGroupOptions } from '@/hooks/use-groups'
+import { listClientKeys } from '@/api/client-keys'
 import { GroupSingleSelect } from '@/components/group-select'
-import type { ClientKeyItem, CreateClientKeyResponse } from '@/types/api'
+import type { ClientKeyItem, ClientKeyBillingMode, CreateClientKeyResponse, ClientKeyQueryParams, SortDir } from '@/types/api'
 import { extractErrorMessage, formatCredits } from '@/lib/utils'
 import { useConfirm } from '@/components/ui/confirm-dialog'
 import { ConsoleTable, type ConsoleColumn } from '@/components/console/data-table'
@@ -44,6 +49,62 @@ function parseMaxCreditsInput(raw: string): number | null | 'invalid' {
   const n = Number(t)
   if (!Number.isFinite(n) || n < 0) return 'invalid'
   return n
+}
+
+function parseMaxCallsInput(raw: string): number | null | 'invalid' {
+  const value = parseMaxCreditsInput(raw)
+  if (value === null || value === 'invalid') return value
+  return Number.isSafeInteger(value) ? value : 'invalid'
+}
+
+function BillingFields({ id, mode, onModeChange, limit, onLimitChange, disabled }: {
+  id: string
+  mode: ClientKeyBillingMode
+  onModeChange: (mode: ClientKeyBillingMode) => void
+  limit: string
+  onLimitChange: (value: string) => void
+  disabled: boolean
+}) {
+  const byCalls = mode === 'calls'
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <label htmlFor={`${id}-mode`} className="text-[12px] text-muted-foreground">计费方式</label>
+        <Select value={mode} onValueChange={(value) => onModeChange(value === 'calls' ? 'calls' : 'credits')} disabled={disabled}>
+          <SelectTrigger id={`${id}-mode`}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value="credits">按积分计费</SelectItem>
+              <SelectItem value="calls">按有效调用次数计费</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </div>
+      <div>
+        <label htmlFor={`${id}-limit`} className="text-[12px] text-muted-foreground">
+          {byCalls ? '有效调用次数上限（可选）' : '积分上限（可选）'}
+        </label>
+        <Input
+          id={`${id}-limit`}
+          type="number"
+          min="0"
+          max={byCalls ? Number.MAX_SAFE_INTEGER : undefined}
+          step={byCalls ? '1' : 'any'}
+          inputMode={byCalls ? 'numeric' : 'decimal'}
+          placeholder="留空表示不限制"
+          value={limit}
+          onChange={(event) => onLimitChange(event.target.value)}
+          disabled={disabled}
+        />
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {byCalls
+            ? '成功完成的请求计 1 次，失败、中断、内部重试不额外计次。达到上限后拒绝新请求（HTTP 429）；已放行的并发请求仍会结算，可能超过上限。'
+            : '累计 credit 达到上限后拒绝新请求（HTTP 429）。'}
+          留空表示不限制，0 表示禁止调用。切换计费方式保留统计，重置统计后重新计费。
+        </p>
+      </div>
+    </div>
+  )
 }
 
 /** 渲染「已用积分 / 上限」列。无上限时仅显示已用量。 */
@@ -76,7 +137,31 @@ function formatRelative(ts?: string): string {
 }
 
 export function ClientKeysPage() {
-  const { data, isLoading, isFetching, refetch } = useClientKeys()
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<number>(10)
+  const [searchQuery, setSearchQuery] = useState('')
+  const deferredSearch = useDeferredValue(searchQuery)
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
+  const [groupFilter, setGroupFilter] = useState<string>('')
+  const [sortBy, setSortBy] = useState<string>('id')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  // 搜索、筛选或排序改变时重置到第 1 页
+  useEffect(() => {
+    setPage(1)
+  }, [deferredSearch, statusFilter, groupFilter, sortBy, sortDir])
+
+  const clientKeyQueryParams = useMemo<ClientKeyQueryParams>(() => ({
+    page,
+    pageSize: pageSize === 0 ? 0 : pageSize,
+    search: deferredSearch.trim() || undefined,
+    status: statusFilter === 'all' ? undefined : statusFilter,
+    group: groupFilter || undefined,
+    sortBy,
+    sortDir,
+  }), [page, pageSize, deferredSearch, statusFilter, groupFilter, sortBy, sortDir])
+
+  const { data, isLoading, isFetching, refetch } = useClientKeys(clientKeyQueryParams)
   // 已注册分组列表（来自 groups.json 注册表，与凭据的 groups 字段解耦）
   const groupOptions = useGroupOptions()
   const createKey = useCreateClientKey()
@@ -93,6 +178,8 @@ export function ClientKeysPage() {
   const [createDesc, setCreateDesc] = useState('')
   const [createGroup, setCreateGroup] = useState('')
   const [createMaxCredits, setCreateMaxCredits] = useState('')
+  const [createBillingMode, setCreateBillingMode] = useState<ClientKeyBillingMode>('credits')
+  const [createMaxCalls, setCreateMaxCalls] = useState('')
   const [createdKey, setCreatedKey] = useState<CreateClientKeyResponse | null>(null)
   const [showCreatedPlain, setShowCreatedPlain] = useState(true)
 
@@ -102,6 +189,8 @@ export function ClientKeysPage() {
   const [editDesc, setEditDesc] = useState('')
   const [editGroup, setEditGroup] = useState('')
   const [editMaxCredits, setEditMaxCredits] = useState('')
+  const [editBillingMode, setEditBillingMode] = useState<ClientKeyBillingMode>('credits')
+  const [editMaxCalls, setEditMaxCalls] = useState('')
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -110,9 +199,14 @@ export function ClientKeysPage() {
       toast.error('请填写名称')
       return
     }
-    const maxCredits = parseMaxCreditsInput(createMaxCredits)
+    const maxCredits = createBillingMode === 'credits' ? parseMaxCreditsInput(createMaxCredits) : null
     if (maxCredits === 'invalid') {
       toast.error('积分上限必须是非负数')
+      return
+    }
+    const maxCalls = createBillingMode === 'calls' ? parseMaxCallsInput(createMaxCalls) : null
+    if (maxCalls === 'invalid') {
+      toast.error('调用次数上限必须是非负安全整数')
       return
     }
     try {
@@ -121,6 +215,8 @@ export function ClientKeysPage() {
         description: createDesc.trim() || undefined,
         group: createGroup.trim() || undefined,
         maxCredits: maxCredits ?? undefined,
+        billingMode: createBillingMode,
+        maxCalls: maxCalls ?? undefined,
       })
       setCreatedKey(res)
       setCreateOpen(false)
@@ -128,6 +224,8 @@ export function ClientKeysPage() {
       setCreateDesc('')
       setCreateGroup('')
       setCreateMaxCredits('')
+      setCreateBillingMode('credits')
+      setCreateMaxCalls('')
       setShowCreatedPlain(true)
     } catch (err) {
       toast.error('创建失败：' + extractErrorMessage(err))
@@ -210,21 +308,31 @@ export function ClientKeysPage() {
     setEditDesc(item.description ?? '')
     setEditGroup(item.group ?? '')
     setEditMaxCredits(item.maxCredits != null ? String(item.maxCredits) : '')
+    setEditBillingMode(item.billingMode)
+    setEditMaxCalls(item.maxCalls != null ? String(item.maxCalls) : '')
     setEditOpen(true)
   }
 
   const handleEditSave = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!editTarget) return
-    const maxCredits = parseMaxCreditsInput(editMaxCredits)
+    const maxCredits = editBillingMode === 'credits' ? parseMaxCreditsInput(editMaxCredits) : (editTarget.maxCredits ?? null)
     if (maxCredits === 'invalid') {
       toast.error('积分上限必须是非负数')
+      return
+    }
+    const maxCalls = editBillingMode === 'calls' ? parseMaxCallsInput(editMaxCalls) : (editTarget.maxCalls ?? null)
+    if (maxCalls === 'invalid') {
+      toast.error('调用次数上限必须是非负安全整数')
       return
     }
     try {
       await updateKey.mutateAsync({
         id: editTarget.id,
-        req: { name: editName.trim(), description: editDesc.trim(), group: editGroup.trim() },
+        req: {
+          name: editName.trim(), description: editDesc.trim(), group: editGroup.trim(),
+          billingMode: editBillingMode, maxCalls,
+        },
       })
       // 仅在上限发生变化时才调用额度接口，避免无谓写入
       const prev = editTarget.maxCredits ?? null
@@ -251,11 +359,84 @@ export function ClientKeysPage() {
   const [batchActionPending, setBatchActionPending] = useState(false)
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; action: 'delete' | 'toggle' } | null>(null)
 
-  const keys: ClientKeyItem[] = useMemo(() => data?.keys ?? [], [data?.keys])
+  const isServerPaginated = data?.filteredTotal !== undefined
+
+  const clientFilteredKeys = useMemo(() => {
+    if (isServerPaginated) return data?.keys ?? []
+    let list = data?.keys ?? []
+    const q = deferredSearch.trim().toLowerCase()
+    if (q) {
+      list = list.filter((k) =>
+        k.name.toLowerCase().includes(q) ||
+        k.id.toString().includes(q) ||
+        (k.group?.toLowerCase().includes(q) ?? false) ||
+        (k.description?.toLowerCase().includes(q) ?? false)
+      )
+    }
+    if (statusFilter === 'enabled') {
+      list = list.filter((k) => !k.disabled)
+    } else if (statusFilter === 'disabled') {
+      list = list.filter((k) => k.disabled)
+    }
+    if (groupFilter) {
+      if (groupFilter === '__none__') {
+        list = list.filter((k) => !k.group)
+      } else {
+        list = list.filter((k) => k.group === groupFilter)
+      }
+    }
+    const dir = sortDir === 'asc' ? 1 : -1
+    return [...list].sort((a, b) => {
+      let cmp = 0
+      switch (sortBy) {
+        case 'name':
+          cmp = a.name.localeCompare(b.name)
+          break
+        case 'totalCalls':
+          cmp = a.totalCalls - b.totalCalls
+          break
+        case 'totalCredits':
+          cmp = a.totalCredits - b.totalCredits
+          break
+        case 'lastUsedAt':
+          cmp = (a.lastUsedAt ? Date.parse(a.lastUsedAt) : 0) - (b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0)
+          break
+        case 'createdAt':
+          cmp = Date.parse(a.createdAt) - Date.parse(b.createdAt)
+          break
+        default:
+          cmp = a.id - b.id
+      }
+      return cmp !== 0 ? cmp * dir : a.id - b.id
+    })
+  }, [isServerPaginated, data?.keys, deferredSearch, statusFilter, groupFilter, sortBy, sortDir])
+
+  const totalFilteredCount = isServerPaginated
+    ? (data?.filteredTotal ?? data?.keys?.length ?? 0)
+    : clientFilteredKeys.length
+
+  const effectivePageSize = pageSize === 0 ? Math.max(totalFilteredCount, 1) : pageSize
+  const totalPages = Math.max(1, Math.ceil(totalFilteredCount / effectivePageSize))
+
+  useEffect(() => {
+    if (data && page > totalPages) setPage(totalPages)
+  }, [data, page, totalPages])
+
+  const keys: ClientKeyItem[] = useMemo(() => {
+    if (isServerPaginated) return data?.keys ?? []
+    const start = (page - 1) * effectivePageSize
+    return clientFilteredKeys.slice(start, start + effectivePageSize)
+  }, [isServerPaginated, data?.keys, clientFilteredKeys, page, effectivePageSize])
 
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return
-    const selectedItems = keys.filter((k) => selectedIds.has(k.id))
+    let selectedItems: ClientKeyItem[]
+    try {
+      selectedItems = (await listClientKeys()).keys.filter((item) => selectedIds.has(item.id))
+    } catch (error) {
+      toast.error(extractErrorMessage(error))
+      return
+    }
     const deletableItems = selectedItems.filter((k) => !k.isSystem)
     const systemCount = selectedItems.length - deletableItems.length
 
@@ -408,6 +589,12 @@ export function ClientKeysPage() {
         cell: (k) => <span className="console-num">{k.totalCalls}</span>,
       },
       {
+        id: 'successfulCalls',
+        header: '有效调用',
+        align: 'right',
+        cell: (item) => <span className="console-num">{item.totalSuccessfulCalls}</span>,
+      },
+      {
         id: 'inputTokens',
         header: '输入',
         align: 'right',
@@ -421,9 +608,13 @@ export function ClientKeysPage() {
       },
       {
         id: 'credits',
-        header: '积分 / 上限',
+        header: '计费 / 上限',
         align: 'right',
-        cell: (k) => <CreditsUsage used={k.totalCredits} max={k.maxCredits} />,
+        cell: (item) => item.billingMode === 'calls' ? (
+          <span className="console-num" title={`有效调用 ${item.totalSuccessfulCalls} 次；上游累计 ${formatCredits(item.totalCredits)} credits`}>
+            {item.totalSuccessfulCalls} / {item.maxCalls ?? '无限制'} 次
+          </span>
+        ) : <CreditsUsage used={item.totalCredits} max={item.maxCredits} />,
       },
       {
         id: 'lastUsed',
@@ -516,17 +707,156 @@ export function ClientKeysPage() {
         }
       />
 
-      <ConsoleTable
-        rows={keys}
-        columns={columns}
-        rowKey={(k) => k.id}
-        selectable
-        selected={selectedIds}
-        onSelectedChange={setSelectedIds}
-        rowActions={rowActions}
-        loading={isLoading}
-        empty="还没有客户端 Key，点击右上角「新建 Key」开始。"
-      />
+      <div className="space-y-3">
+        {/* 搜索与过滤工具栏 */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border bg-card/50 p-2.5">
+          <div className="flex flex-1 flex-wrap items-center gap-2 min-w-[240px]">
+            {/* 搜索框 */}
+            <div className="relative flex-1 min-w-[180px] max-w-sm">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索 Key 名称 / 描述 / 分组 / ID..."
+                className="h-8 pl-8 pr-8 text-xs"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* 状态筛选 */}
+            <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as any)}>
+              <SelectTrigger className="h-8 w-[110px] text-xs">
+                <SelectValue placeholder="状态" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部状态</SelectItem>
+                <SelectItem value="enabled">启用</SelectItem>
+                <SelectItem value="disabled">已禁用</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {/* 分组筛选 */}
+            <Select value={groupFilter} onValueChange={setGroupFilter}>
+              <SelectTrigger className="h-8 w-[120px] text-xs">
+                <SelectValue placeholder="分组" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">全部分组</SelectItem>
+                <SelectItem value="__none__">未绑定分组</SelectItem>
+                {groupOptions.map((g) => (
+                  <SelectItem key={g} value={g}>{g}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* 排序控件 */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-muted-foreground whitespace-nowrap">排序:</span>
+            <Select value={sortBy} onValueChange={setSortBy}>
+              <SelectTrigger className="h-8 w-[110px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="id">ID</SelectItem>
+                <SelectItem value="name">名称</SelectItem>
+                <SelectItem value="totalCalls">调用次数</SelectItem>
+                <SelectItem value="totalCredits">积分消耗</SelectItem>
+                <SelectItem value="lastUsedAt">最近活跃</SelectItem>
+                <SelectItem value="createdAt">创建时间</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 w-8 p-0"
+              onClick={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+              title={sortDir === 'asc' ? '升序 (点击切换降序)' : '降序 (点击切换升序)'}
+            >
+              {sortDir === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />}
+            </Button>
+          </div>
+        </div>
+
+        <ConsoleTable
+          rows={keys}
+          columns={columns}
+          rowKey={(k) => k.id}
+          selectable
+          selected={selectedIds}
+          onSelectedChange={setSelectedIds}
+          rowActions={rowActions}
+          loading={isLoading}
+          empty={
+            deferredSearch || statusFilter !== 'all' || groupFilter
+              ? '当前筛选条件下没有客户端 Key。'
+              : '还没有客户端 Key，点击右上角「新建 Key」开始。'
+          }
+        />
+
+        {/* 分页控制栏 */}
+        {totalFilteredCount > 0 && (
+          <div className="flex flex-col items-center justify-between gap-3 pt-2 sm:flex-row">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>每页</span>
+              <Select
+                value={String(pageSize)}
+                onValueChange={(v) => {
+                  setPageSize(Number(v))
+                  setPage(1)
+                }}
+              >
+                <SelectTrigger className="h-7 w-[75px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="10">10</SelectItem>
+                  <SelectItem value="20">20</SelectItem>
+                  <SelectItem value="50">50</SelectItem>
+                  <SelectItem value="0">全部</SelectItem>
+                </SelectContent>
+              </Select>
+              <span>条 · 共 {totalFilteredCount} 把 Key</span>
+            </div>
+
+            {totalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  上一页
+                </Button>
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  第 {page} / {totalPages} 页
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                >
+                  下一页
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* 吸底批量操作栏 */}
       <BulkBar
@@ -627,22 +957,14 @@ export function ClientKeysPage() {
                   绑定后该 Key 仅会使用含此分组的账号（严格隔离，分组内无可用账号时请求会失败）。
                 </p>
               </div>
-              <div>
-                <label className="text-[12px] text-muted-foreground">积分上限（可选）</label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="any"
-                  inputMode="decimal"
-                  placeholder="留空表示不限制"
-                  value={createMaxCredits}
-                  onChange={(e) => setCreateMaxCredits(e.target.value)}
-                  disabled={createKey.isPending}
-                />
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  累计使用的 credit 达到上限后，该 Key 的请求会被拒绝（HTTP 429）。重置统计后重新计费。
-                </p>
-              </div>
+              <BillingFields
+                id="create-billing"
+                mode={createBillingMode}
+                onModeChange={setCreateBillingMode}
+                limit={createBillingMode === 'calls' ? createMaxCalls : createMaxCredits}
+                onLimitChange={createBillingMode === 'calls' ? setCreateMaxCalls : setCreateMaxCredits}
+                disabled={createKey.isPending}
+              />
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={createKey.isPending}>
                   取消
@@ -713,11 +1035,11 @@ export function ClientKeysPage() {
 
       {/* 编辑对话框 */}
       {editOpen && (
-        <Dialog open={editOpen} onOpenChange={(o) => !updateKey.isPending && setEditOpen(o)}>
+        <Dialog open={editOpen} onOpenChange={(o) => !updateKey.isPending && !setMaxCredits.isPending && setEditOpen(o)}>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>编辑 Key</DialogTitle>
-              <DialogDescription>修改名称与描述（不影响 Key 值与统计）</DialogDescription>
+              <DialogDescription>修改名称、分组与计费设置（不影响 Key 值与累计统计）</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleEditSave} className="space-y-3 py-2">
               <div>
@@ -741,24 +1063,16 @@ export function ClientKeysPage() {
                   绑定后仅调度该分组内账号（严格隔离）。选「不绑定」表示解除绑定。
                 </p>
               </div>
-              <div>
-                <label className="text-[12px] text-muted-foreground">积分上限</label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="any"
-                  inputMode="decimal"
-                  placeholder="留空表示不限制"
-                  value={editMaxCredits}
-                  onChange={(e) => setEditMaxCredits(e.target.value)}
-                  disabled={updateKey.isPending || setMaxCredits.isPending}
-                />
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  累计 credit 达到上限后该 Key 请求会被拒绝（HTTP 429）。清空则取消限制；重置统计可清零已用量。
-                </p>
-              </div>
+              <BillingFields
+                id="edit-billing"
+                mode={editBillingMode}
+                onModeChange={setEditBillingMode}
+                limit={editBillingMode === 'calls' ? editMaxCalls : editMaxCredits}
+                onLimitChange={editBillingMode === 'calls' ? setEditMaxCalls : setEditMaxCredits}
+                disabled={updateKey.isPending || setMaxCredits.isPending}
+              />
               <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>取消</Button>
+                <Button type="button" variant="outline" onClick={() => setEditOpen(false)} disabled={updateKey.isPending || setMaxCredits.isPending}>取消</Button>
                 <Button type="submit" disabled={updateKey.isPending || setMaxCredits.isPending}>
                   {updateKey.isPending || setMaxCredits.isPending ? '保存中…' : '保存'}
                 </Button>

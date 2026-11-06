@@ -52,9 +52,18 @@ pub struct AppState {
     pub cache_meter: Option<SharedCacheMeter>,
     /// 请求链路追踪存储（SQLite，可选）
     pub trace_store: Option<SharedTraceStore>,
+    /// 自定义响应头管理器（热重载）
+    pub custom_headers: Option<crate::model::custom_headers::CustomHeadersManager>,
 }
 
 impl AppState {
+    pub fn snapshot_tool_compatibility_mode(mut self) -> Self {
+        if let Some(provider) = &self.kiro_provider {
+            self.tool_compatibility_mode = provider.token_manager().tool_compatibility_mode();
+        }
+        self
+    }
+
     /// 创建新的应用状态（不含 client_keys 的基础构造，供嵌入 / 测试使用）
     #[allow(dead_code)]
     pub fn new(
@@ -70,6 +79,7 @@ impl AppState {
             usage_aggregator: None,
             cache_meter: None,
             trace_store: None,
+            custom_headers: None,
         }
     }
 
@@ -101,6 +111,15 @@ impl AppState {
     /// 注入链路追踪存储
     pub fn with_trace_store(mut self, store: Option<SharedTraceStore>) -> Self {
         self.trace_store = store;
+        self
+    }
+
+    /// 注入自定义响应头管理器
+    pub fn with_custom_headers(
+        mut self,
+        custom_headers: Option<crate::model::custom_headers::CustomHeadersManager>,
+    ) -> Self {
+        self.custom_headers = custom_headers;
         self
     }
 }
@@ -140,6 +159,16 @@ pub async fn auth_middleware(
                     "rate_limit_error",
                     format!(
                         "该 API Key 已达到积分使用上限（已用 {:.2} / 上限 {:.2}），请联系管理员调整额度或重置统计",
+                        used, limit
+                    ),
+                );
+                return (StatusCode::TOO_MANY_REQUESTS, Json(error)).into_response();
+            }
+            KeyAuth::CallsOverLimit { used, limit, .. } => {
+                let error = ErrorResponse::new(
+                    "rate_limit_error",
+                    format!(
+                        "该 API Key 已达到有效调用次数上限（已用 {} / 上限 {}），请联系管理员调整额度或重置统计",
                         used, limit
                     ),
                 );

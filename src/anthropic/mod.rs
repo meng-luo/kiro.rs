@@ -29,6 +29,8 @@ mod middleware;
 mod openai;
 mod responses;
 mod router;
+mod structured_output;
+mod structured_rewrite;
 pub mod stream;
 pub mod types;
 mod websearch;
@@ -36,6 +38,12 @@ mod websearch_loop;
 
 #[cfg(test)]
 mod gateway_tests;
+
+#[cfg(test)]
+mod live_tool_tests;
+
+#[cfg(test)]
+mod tool_stream_tests;
 
 // `create_router_with_provider` 是公开扩展点（允许外部以自定义 provider 构造路由），
 // 项目内默认走 `create_router_with_shared_provider`，因此本身不会触发该函数。

@@ -8,6 +8,9 @@ mod kiro;
 mod model;
 pub mod token;
 
+#[cfg(test)]
+mod credential_startup_tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -40,6 +43,20 @@ async fn main() {
         .credentials
         .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
 
+    if args.deduplicate_credentials {
+        match kiro::credential_dedup::run(
+            std::path::Path::new(&credentials_path),
+            args.apply_credential_dedup,
+        ) {
+            Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
+            Err(error) => {
+                eprintln!("凭据去重失败：{error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // 文件不存在时自动初始化（Docker 首次部署友好）
     ensure_config_files(&config_path, &credentials_path);
 
@@ -48,6 +65,12 @@ async fn main() {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+    let balance_refresh_interval = config
+        .resolve_balance_refresh_interval(std::env::var("KIRO_RS_BALANCE_REFRESH_INTERVAL_SECS"))
+        .unwrap_or_else(|error| {
+            tracing::error!("余额后台刷新配置无效: {}", error);
+            std::process::exit(1);
+        });
 
     // 加载凭证（支持单对象或数组格式）
     let credentials_config = CredentialsConfig::load(&credentials_path).unwrap_or_else(|e| {
@@ -63,18 +86,15 @@ async fn main() {
 
     // 检查 KIRO_API_KEY 环境变量，自动创建 API Key 凭据
     if let Ok(kiro_api_key) = std::env::var("KIRO_API_KEY") {
-        if kiro_api_key.is_empty() {
-            tracing::warn!("KIRO_API_KEY 环境变量已设置但为空，视为未配置");
-        } else {
-            tracing::info!("检测到 KIRO_API_KEY 环境变量，添加 API Key 凭据（最高优先级）");
-            let api_key_cred = KiroCredentials {
-                kiro_api_key: Some(kiro_api_key),
-                auth_method: Some("api_key".to_string()),
-                priority: 0,
-                ..Default::default()
-            };
-            credentials_list.insert(0, api_key_cred);
-        }
+        merge_environment_api_key(&mut credentials_list, kiro_api_key);
+    }
+
+    let duplicate_groups = kiro::credential_dedup::duplicate_groups(&credentials_list);
+    if !duplicate_groups.is_empty() {
+        tracing::warn!(
+            groups = duplicate_groups.len(),
+            "发现历史重复凭据；停止服务后使用 --deduplicate-credentials 预览，确认后加 --apply-credential-dedup 清理"
+        );
     }
 
     tracing::info!("已加载 {} 个凭据配置", credentials_list.len());
@@ -221,6 +241,8 @@ async fn main() {
             tracing::info!("分组注册表：自动迁移 {} 个已用分组", added);
         }
     }
+    // 让调度器能解析分组级负载均衡 / 优先级反转覆盖。
+    token_manager.set_group_manager(group_manager.clone());
 
     // 请求链路追踪存储（SQLite，traces.db）。失败不致命：trace 不可用但服务正常。
     let trace_store: Option<admin::SharedTraceStore> = match admin::TraceStore::open(
@@ -344,6 +366,10 @@ async fn main() {
         });
     }
 
+    let custom_headers_manager = model::custom_headers::CustomHeadersManager::new(
+        config.custom_headers.clone(),
+    );
+
     let anthropic_app = anthropic::create_router_with_shared_provider(
         Some(kiro_provider.clone()),
         config.extract_thinking,
@@ -353,6 +379,7 @@ async fn main() {
         Some(usage_aggregator.clone()),
         Some(cache_meter.clone()),
         trace_store.clone(),
+        Some(custom_headers_manager.clone()),
     );
 
     // 构建 Admin API 路由（配置了非空 adminApiKey 时启用）
@@ -370,12 +397,14 @@ async fn main() {
             });
             let admin_service =
                 admin::AdminService::new(token_manager.clone(), endpoint_names.clone())
+                    .with_quota_alerts(balance_refresh_interval)
                     .with_kiro_provider(kiro_provider.clone())
                     .with_log_governance(
                         Some(admin_trace_store.clone()),
                         Some(usage_recorder.clone()),
                     )
-                    .with_cache_meter(cache_meter.clone());
+                    .with_cache_meter(cache_meter.clone())
+                    .with_custom_headers(Some(custom_headers_manager.clone()));
             let admin_state = admin::AdminState::new(
                 admin_key,
                 admin_service,
@@ -385,10 +414,9 @@ async fn main() {
                 group_manager.clone(),
             );
 
-            // 启动余额后台刷新调度器（每 5 分钟一次，与缓存 TTL 对齐）
             admin_state
                 .service
-                .start_balance_refresher(std::time::Duration::from_secs(300));
+                .start_balance_refresher(balance_refresh_interval);
 
             // 启动代理池健康检查调度器（每 5 分钟一次）
             admin_state
@@ -442,6 +470,25 @@ async fn main() {
     )
     .await
     .unwrap();
+}
+
+fn merge_environment_api_key(credentials: &mut Vec<KiroCredentials>, api_key: String) {
+    if api_key.trim().is_empty() {
+        tracing::warn!("KIRO_API_KEY 环境变量已设置但为空，视为未配置");
+        return;
+    }
+    if credentials.iter().any(|credential| credential.kiro_api_key.as_deref() == Some(&api_key)) {
+        tracing::info!("KIRO_API_KEY 已存在于凭据文件，沿用原记录及其配置");
+        return;
+    }
+    tracing::info!("检测到新的 KIRO_API_KEY，添加 API Key 凭据");
+    credentials.insert(0, KiroCredentials {
+        kiro_api_key: Some(api_key),
+        auth_method: Some("api_key".to_string()),
+        priority: 0,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    });
 }
 
 /// 文件不存在时初始化配置/凭证文件
